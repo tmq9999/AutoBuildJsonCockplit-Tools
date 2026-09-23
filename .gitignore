@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.env
+data/
+.deps/
+.superpowers/
+.superdesign/
+node_modules/
+accounts*.txt
+proxy*.txt
+.coverage
