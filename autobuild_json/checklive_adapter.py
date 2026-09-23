@@ -102,9 +102,12 @@ def guarded_auth(module, transport):
                 value = super()._get_sentinel_token(flow)
             except FlowError as exc:
                 raise FlowError(exc.code, "sentinel") from None
-            if transport.fatal_error:
-                raise transport.fatal_error
-            transport.context.check()
+            try:
+                if transport.fatal_error:
+                    raise transport.fatal_error
+                transport.context.check()
+            except FlowError as exc:
+                raise FlowError(exc.code, "sentinel") from None
             return value
 
     return GuardedAuth()

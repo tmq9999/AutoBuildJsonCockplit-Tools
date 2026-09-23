@@ -94,6 +94,21 @@ def test_real_sentinel_http_rejection_keeps_precise_stage(settings, context, sta
     assert raw.closed
 
 
+def test_sentinel_transport_failure_is_attributed_to_sentinel(settings, context):
+    module = load_checklive(Path(".deps/Check-Account-ChatGPT"))
+    class FailingRaw(RawSession):
+        def request(self, **kwargs):
+            if urlsplit(kwargs["url"]).hostname == "sentinel.openai.com":
+                raise OSError("synthetic network failure")
+            return super().request(**kwargs)
+    raw = FailingRaw(sequence())
+    processor = CheckliveProcessor(settings, OAuthSessions(settings), None, module=module, raw_factory=lambda:raw)
+    result = processor(parse_accounts("u@example.com|p|JBSWY3DPEHPK3PXP").accounts[0], None, context)
+    assert result.error.code == "NETWORK_ERROR"
+    assert result.error.stage == "sentinel"
+    assert raw.closed
+
+
 def test_provider_rejects_email_after_sentinel_not_mislabeled_as_metadata_challenge(context):
     module = load_checklive(Path(".deps/Check-Account-ChatGPT"))
     raw = RawSession([
