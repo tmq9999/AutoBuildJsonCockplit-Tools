@@ -9,6 +9,7 @@ from ..protocols.anthropic import AnthropicCodec
 from .auth import client_secret
 from .boundary import GatewayBoundary
 from .streaming import GatewayStreamResponse
+from .gemini_routes import gemini_router
 
 
 def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
@@ -20,6 +21,10 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
         headers = {"Cache-Control": "no-store"}
         if error.retry_after is not None:
             headers["Retry-After"] = str(error.retry_after)
+        if request.url.path.startswith("/v1beta/"):
+            status = {400: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED", 404: "NOT_FOUND",
+                      429: "RESOURCE_EXHAUSTED", 503: "UNAVAILABLE"}.get(error.status, "INTERNAL")
+            return JSONResponse({"error": {"code": error.status, "message": error.code, "status": status}}, status_code=error.status, headers=headers)
         if request.url.path.startswith("/v1/messages") or request.headers.get("anthropic-version"):
             kind = {401: "authentication_error", 403: "permission_error", 429: "rate_limit_error"}.get(error.status, "invalid_request_error" if error.status == 400 else "api_error")
             return JSONResponse({"type": "error", "error": {"type": kind, "message": error.code}}, status_code=error.status, headers=headers)
@@ -104,4 +109,5 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
         decoded = AnthropicCodec().decode(dict(body, max_tokens=1), {})
         return {"input_tokens": await engine.count_tokens(principal, decoded, engine.meta(body, protocol="anthropic"))}
 
+    app.include_router(gemini_router(identity, catalog, engine))
     return app

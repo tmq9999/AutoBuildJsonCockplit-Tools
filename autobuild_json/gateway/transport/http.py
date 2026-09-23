@@ -5,6 +5,7 @@ import json
 import ssl
 import time
 from urllib.parse import unquote, urlsplit
+from urllib.parse import urlencode
 
 import httpcore
 import httpx
@@ -21,6 +22,7 @@ class OutboundRequest:
     auth_header: tuple[str, str] | None = field(default=None, repr=False)
     deadline: float = 0
     headers: tuple[tuple[str, str], ...] = ()
+    query: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self):
         if (self.method not in {"GET", "POST"} or not self.suffix or self.suffix.startswith("/")
@@ -29,6 +31,8 @@ class OutboundRequest:
                 or any(ord(c) <= 32 for c in self.suffix)):
             raise ValueError("invalid_upstream_path")
         allowed = {"accept", "content-type", "anthropic-version", "chatgpt-account-id", "originator"}
+        if self.query not in {(), (("alt", "sse"),)}:
+            raise ValueError("invalid_upstream_query")
         if any(name.lower() not in allowed or "\r" in value or "\n" in value for name, value in self.headers):
             raise ValueError("invalid_upstream_headers")
         if self.auth_header is not None:
@@ -145,7 +149,8 @@ class Transport:
             adapter = self.adapter or CoreTransport(self.policy, proxy)
             async with httpx.AsyncClient(transport=adapter, trust_env=False, follow_redirects=False,
                 timeout=httpx.Timeout(min(60, remaining), connect=min(10, remaining))) as client:
-                call = client.build_request(request.method, route.root.rstrip("/") + "/" + request.suffix,
+                url = route.root.rstrip("/") + "/" + request.suffix + ("?"+urlencode(request.query) if request.query else "")
+                call = client.build_request(request.method, url,
                                             json=request.body, headers=headers)
                 response = await asyncio.wait_for(client.send(call, stream=True), timeout=remaining)
                 try:
