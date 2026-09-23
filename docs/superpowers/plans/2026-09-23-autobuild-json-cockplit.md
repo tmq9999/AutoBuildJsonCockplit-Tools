@@ -1,5 +1,11 @@
 # AutoBuildJsonCockplit-Tools Implementation Plan
 
+**Execution status (2026-09-23):** Native execution approved; tasks 1–8 implemented.
+Final evidence: 107 Python tests, 5 Node tests and real Chrome fake-provider acceptance
+pass; Ruff/compile/build pass. See `docs/implementation-status.md` for review fixes,
+explicit limits and the deferred minor. Original step checkboxes below preserve the
+approved planning text; the per-task execution ledger and commits record completion.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a local FastAPI/web UI tool that imports authorized accounts, performs HTTP Codex OAuth sequentially or concurrently through optional proxies, and exports compatible success JSON plus sanitized failure reports.
@@ -8,7 +14,7 @@
 
 **Tech Stack:** Python 3.10+, FastAPI, Uvicorn, Pydantic Settings, curl_cffi, pyotp, PyJWT[crypto], pytest, HTTPX, Ruff; local HTML/CSS/JavaScript without a frontend runtime build requirement.
 
-**Spec:** `docs/superpowers/specs/2026-09-23-autobuild-json-cockplit-design.md` — approved by the user's “triển khai đi” response. This implementation plan still requires review and execution-method selection before product code.
+**Spec:** `docs/superpowers/specs/2026-09-23-autobuild-json-cockplit-design.md` — approved by the user's “triển khai đi” response. Plan and Native execution were subsequently approved; Superdesign v2 approved before UI implementation.
 
 ## Global Constraints
 
@@ -498,4 +504,4 @@ Add `build` as a development dependency for the packaging check. Review build ou
 
 Recommended method: **Native** — one implementer in this session, tasks in dependency order, then an independent whole-project review. The eight tasks share tight contracts (session ownership, safe DTOs and persistence), so this avoids repeating integration context across multiple implementers. **Subagent-driven** is the alternative for independent per-task implementation/review gates at higher context cost.
 
-Do not start product implementation until the user has reviewed this plan and selected the method. No product code, dependencies or auth checkout have been created by this planning step.
+Historical handoff gate: the user approved this plan and Native execution before implementation. The completed product remains local on `feat/http-oauth`; nothing was pushed or published.

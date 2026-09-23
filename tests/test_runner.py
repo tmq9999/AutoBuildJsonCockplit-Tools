@@ -92,6 +92,34 @@ def test_disk_failure_stops_and_does_not_claim_success(tmp_path, monkeypatch):
     assert snapshot["status"] == "error"
     assert snapshot["batch_error"]["code"] == "STORAGE_ERROR"
     assert snapshot["counts"]["success"] == 0
+    assert snapshot["counts"]["running"] == 0
+    assert snapshot["counts"]["queued"] == 0
+    assert snapshot["counts"]["error"] == 1
+    assert snapshot["counts"]["cancelled"] == 2
+    assert store.list_runs()[0]["status"] == "error"
+    runner.close()
+
+
+def test_total_storage_failure_gives_consistent_history_and_exports(tmp_path, monkeypatch):
+    import json
+    store = RunStore(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    def processor(account, proxy, context):
+        entered.set()
+        assert release.wait(2)
+        return success_result(account.email)
+    runner = Runner(store, processor)
+    job = runner.start(accounts(2), [], "sequential", 1, 180)
+    assert entered.wait(2)
+    def disk_full(*args, **kwargs):
+        raise FlowError("STORAGE_ERROR", "storage")
+    monkeypatch.setattr(store, "_save", disk_full)
+    release.set()
+    runner.wait(job, 3)
+    assert store.list_runs()[0]["status"] == runner.get(job)["status"] == "error"
+    assert len(json.loads(store.export(job,"errors"))) == 1
+    assert len(json.loads(store.export(job,"cancelled"))) == 1
+    assert json.loads(store.export(job,"success")) == []
     runner.close()
 
 

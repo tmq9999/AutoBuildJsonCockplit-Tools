@@ -2,21 +2,32 @@
 
 ## Implemented
 
-- Tasks 1–6: strict account/proxy parsing, PKCE and single-use callback handling,
+- Tasks 1–8: strict account/proxy parsing, PKCE and single-use callback handling,
   signed token validation, pinned CheckLive HTTP integration, safe challenge
   classification, atomic result exports, bounded worker scheduling, protected
-  FastAPI and manual callback APIs.
+  FastAPI, manual callback APIs and approved local Vietnamese dashboard.
 - Independent backend review completed; important findings for environment proxy
   interference, phone-error classification and disk-full recovery were reproduced
   by failing tests and fixed. Unicode password separators were likewise corrected.
 - Actual local server startup, unauthorized API response and admin-session exchange
   checked with synthetic data. No real account login was performed.
+- Whole-project independent review completed. Reproduced and fixed both Important
+  findings: stale history responses could disable Stop/polling after Start; disk
+  failure could leave unfinished rows indefinitely queued/running. Regression tests
+  now cover current snapshot/history/exports and persistent disk failure.
+- Final checks: 107 Python tests, 5 Node tests, and real Chrome acceptance passed.
+  Ruff, compileall, wheel/sdist build and isolated installed-wheel UI smoke passed.
+  Chrome acceptance covers login, file import/filter, parallel/proxy jobs, five
+  export downloads, manual callback, Stop, reload/history, logout and 390px mobile.
+  No external browser requests and no provider login occurred in these tests.
 
-## Still pending
+## Known verification limits and deferred minor
 
-- Task 7: user approval of [Superdesign draft v2](https://p.superdesign.dev/draft/9de80bba-e738-47a7-bb54-cbb124bfc7d9), then local UI implementation and browser checks.
-- Task 8: final UI/API acceptance, whole-project review and final packaging/handoff.
-- Live provider compatibility and Windows behavior remain unverified.
+- Live provider compatibility and Windows permissions/locking remain unverified.
+  No user-selected real account has been run through OAuth.
+- HTTP 429 is safely reported as RATE_LIMITED without automatic retry, but the
+  provider's optional Retry-After duration is not yet displayed.
+- Two upstream Starlette/TestClient deprecation warnings remain in the Python suite.
 
 ## Execution decisions
 
@@ -32,3 +43,9 @@
 
 The public API's added history route and single-process filesystem lock support
 restart recovery without changing the successful-export schema.
+
+Reviewer scope decisions: live OAuth is not inferred from synthetic tests (cost:
+provider changes may still require follow-up); Windows behavior is explicitly
+unverified (cost: deployment there needs a local check). Final packaging/docs were
+verified by the implementer. Approved Superdesign layout was implemented with local
+assets and inspected through local Chrome screenshots, not a second remote design.

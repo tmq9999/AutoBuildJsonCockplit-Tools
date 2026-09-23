@@ -144,6 +144,10 @@ cho chính người dùng chạy tool. Không đưa `data/`, `.env`, account ho�
 Nếu đĩa vẫn đầy khi khởi động lại, cấu hình đã có được đọc mà không ghi lại; API
 chạy chế độ degraded để tải kết quả đã xác nhận, từ chối batch mới cho đến khi
 giải phóng dung lượng và khởi động lại.
+Nếu lỗi ghi xảy ra giữa batch, account đang xử lý chuyển thành lỗi và account chưa
+chạy chuyển thành cancelled. Khi đĩa không ghi được cả trạng thái lỗi, các báo cáo
+đó là bản phục hồi trong RAM (`batch_error.recovery_view`); tải chúng trước khi thoát.
+Các success đã được xác nhận trên đĩa vẫn được giữ nguyên.
 Password/secret đầu vào chỉ giữ trong bộ nhớ; restart không tự tiếp tục tài khoản
 chưa xử lý, chúng chuyển thành cancelled với lý do interrupted. Kết quả đã lưu vẫn
 tải được. Lỗi đĩa dừng batch và không báo success giả.
@@ -174,6 +178,7 @@ Browser test sử dụng Chrome sẵn trên máy; đặt `CHROME_PATH` nếu kh�
 Test auth dùng methods thực từ checkout cố định với HTTP giả; không dùng token
 trong `json.txt` hay gửi request đăng nhập account thật. Hai cảnh báo deprecation
 của bộ TestClient hiện xuất hiện với các dependency mới nhất, không phải test lỗi.
+HTTP 429 hiện báo RATE_LIMITED nhưng chưa hiển thị thời gian Retry-After của provider.
 
 ## Bản nháp giao diện
 

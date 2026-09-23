@@ -104,7 +104,7 @@ class Runner:
             with self._lock:
                 self._errors[job] = {"code":error.code, "reason":error.reason}
             try:
-                self.store.set_batch(job, "error", error)
+                self.store.fail_batch(job, error)
             except FlowError:
                 pass
         finally:

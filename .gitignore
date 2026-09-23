@@ -12,5 +12,6 @@ data/
 .superdesign/
 node_modules/
 accounts*.txt
+account.txt
 proxy*.txt
 .coverage

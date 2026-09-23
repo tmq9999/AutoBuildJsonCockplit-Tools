@@ -13,6 +13,8 @@ not the product OAuth transport (which remains HTTP).
 Checks:
 
 - Local login/cookie/CSRF; stale initial session lookup cannot undo a new login.
+- Delayed history refresh cannot clear a just-accepted active batch; Stop stays
+  enabled and status polling continues.
 - UTF-8 file import, validation, filtered-row accounting, sequential/parallel options.
 - Proxy batch with synthetic success/error/phone-verification results.
 - Status filter and exact five JSON export downloads.

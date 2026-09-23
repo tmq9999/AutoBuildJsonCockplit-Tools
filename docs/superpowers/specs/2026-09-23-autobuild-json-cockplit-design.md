@@ -1,7 +1,7 @@
 # AutoBuildJsonCockplit-Tools — đặc tả thiết kế HTTP
 
 Ngày: 2026-09-23  
-Trạng thái: Người dùng đã duyệt đặc tả qua yêu cầu “triển khai đi”; đang lập kế hoạch, chưa triển khai sản phẩm.
+Trạng thái: Đã duyệt và triển khai; UI Superdesign v2 đã được duyệt/ghép. Xem `docs/implementation-status.md` cho kiểm chứng và giới hạn.
 
 ## 1. Mục tiêu và lựa chọn đã thống nhất
 
@@ -195,4 +195,4 @@ Không coi test giả lập pass là bằng chứng OAuth live thành công. Bà
 
 Người dùng duyệt hoặc sửa đặc tả này. Sau khi duyệt, tạo implementation plan bằng skill `writing-plans`, rồi trình kế hoạch và phương thức thực thi để người dùng chọn trước khi viết product code/cài dependencies. Tài liệu này không thay cho kế hoạch đã duyệt.
 
-Thư mục project hiện chỉ được tạo để chứa tài liệu thiết kế; chưa khởi tạo Git nên chưa có commit đặc tả. Không commit tài liệu vào repo tham chiếu của người dùng.
+Project đã có Git riêng trên nhánh `feat/http-oauth`; không sửa hoặc commit vào repo tham chiếu của người dùng.

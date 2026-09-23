@@ -137,6 +137,29 @@ class RunStore:
             data["batch_error"] = {"code":error.code, "reason":error.reason} if error else None
             self._save(data)
 
+    def fail_batch(self, job_id, error):
+        """Terminalize unfinished work, preserving every durably confirmed success.
+
+        If the disk remains unwritable, all readers share the same explicitly
+        degraded in-memory view. The previous disk snapshot remains recoverable.
+        """
+        with self._lock:
+            data = copy.deepcopy(self._read(job_id))
+            data["status"] = "error"
+            data["batch_error"] = {"code":error.code, "reason":error.reason}
+            for row in data["rows"]:
+                if row["status"] == "running":
+                    row.update(status="error",code=error.code,reason=error.reason,timestamp=timestamp())
+                elif row["status"] == "queued":
+                    row.update(status="cancelled",code="CANCELLED",reason=FlowError("CANCELLED").reason,timestamp=timestamp())
+            try:
+                self._save(data)
+            except FlowError as exc:
+                if exc.code != "STORAGE_ERROR":
+                    raise
+                data["batch_error"]["recovery_view"] = True
+                self._cache[job_id] = data
+
     def snapshot(self, job_id):
         with self._lock:
             data = self._read(job_id)

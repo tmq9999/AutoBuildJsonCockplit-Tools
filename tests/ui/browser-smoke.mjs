@@ -115,8 +115,39 @@ try {
   await page.locator('#mode').selectOption('sequential');
   await page.locator('#validate-btn').click();
   await page.waitForFunction(() => !document.querySelector('#start-btn').disabled);
+  let historySeen;
+  const historyStarted = new Promise(resolve => { historySeen=resolve; });
+  let releaseHistory;
+  const historyGate = new Promise(resolve => { releaseHistory=resolve; });
+  let historyDone;
+  const historyFulfilled = new Promise(resolve => { historyDone=resolve; });
+  let delayedHistory=false;
+  await page.route(origin+'/api/jobs', async route => {
+    if (route.request().method()==='GET' && !delayedHistory) {
+      delayedHistory=true;
+      const stale=await route.fetch();
+      const oldBody=await stale.body();
+      historySeen(); await historyGate;
+      await route.fulfill({status:200,contentType:'application/json',body:oldBody});
+      historyDone();
+      return;
+    }
+    return route.continue();
+  });
+  await page.locator('#refresh-btn').click();
+  await historyStarted;
+  const started = page.waitForResponse(response=>response.url()===origin+'/api/jobs' && response.request().method()==='POST');
   await page.locator('#start-btn').click();
+  const accepted = await started;
+  const activeID=(await accepted.json()).id;
+  await page.waitForResponse(response=>response.url()===origin+'/api/jobs/'+activeID);
+  releaseHistory();
+  await historyFulfilled;
+  await page.unroute(origin+'/api/jobs');
   await page.waitForFunction(() => document.querySelector('#job-status').dataset.status === 'running');
+  await page.waitForTimeout(200);
+  assert.ok(await page.locator('#stop-btn').isEnabled(), 'Stale history must not clear a newly accepted active batch');
+  await page.waitForResponse(response=>response.url()===origin+'/api/jobs/'+activeID, {timeout:5000});
   await page.locator('#stop-btn').click();
   await page.waitForFunction(() => document.querySelector('#job-status').dataset.status === 'cancelled');
   assert.equal(await page.locator('[data-count="cancelled"]').textContent(), '2');

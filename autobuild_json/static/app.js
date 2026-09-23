@@ -40,9 +40,9 @@ export function mountDashboard(doc) {
   const win = doc.defaultView;
   const $ = id => doc.getElementById(id);
   const state = {authenticated:false,validCount:0,authReady:false,storageReady:false,busy:false,activeJob:null,
-    job:null,csrf:'',generation:0,inputRevision:0,page:0,manual:null,manualBusy:false};
+    job:null,csrf:'',generation:0,jobRevision:0,inputRevision:0,page:0,manual:null,manualBusy:false};
   const controllers = new Set();
-  let pollTimer, pollController, refreshFlight;
+  let pollTimer, pollController, refreshFlight, refreshRevision;
 
   function notice(text, kind='error') { $('message').textContent=text; $('message').className='notice '+kind; $('message').hidden=!text; }
   function controls() {
@@ -63,7 +63,7 @@ export function mountDashboard(doc) {
     $('open-link').hidden=true; $('open-link').removeAttribute('href');
   }
   function resetSession() {
-    state.generation++; state.authenticated=false; state.csrf=''; state.validCount=0; state.job=null; state.activeJob=null;
+    state.generation++; state.jobRevision++; state.authenticated=false; state.csrf=''; state.validCount=0; state.job=null; state.activeJob=null;
     state.busy=false; state.manualBusy=false; clearTimeout(pollTimer);
     for (const c of controllers) c.abort(); controllers.clear();
     for (const id of ['accounts-text','proxies-text','admin-token','manual-proxy','manual-email','accounts-file']) $(id).value='';
@@ -131,30 +131,39 @@ export function mountDashboard(doc) {
     pollController=new AbortController();
     try {
       const job=await request(`/api/jobs/${id}`,{controller:pollController});
+      if (state.activeJob!==id) return;
       if (state.job?.id===selected && selected===id) { state.job=job; renderJob(); }
-      if (!shouldPoll(job,false)) { state.activeJob=null; await refresh(false); }
+      if (!shouldPoll(job,false)) { state.activeJob=null; state.jobRevision++; await refresh(false); }
     } catch(error) { report(error); }
     finally { pollController=null; controls(); schedulePoll(); }
   }
   async function refresh(selectLatest=false) {
-    if (refreshFlight) return refreshFlight;
-    refreshFlight=(async()=>{
+    const revision=state.jobRevision;
+    if (refreshFlight && refreshRevision===revision) return refreshFlight;
+    refreshRevision=revision;
+    const operation=(async()=>{
       const [health,jobs]=await Promise.all([request('/api/health'),request('/api/jobs')]);
+      if (revision!==state.jobRevision) return;
+      const activeID=jobs.find(job=>shouldPoll(job,false))?.id || null;
+      const id=selectLatest?(activeID || jobs[0]?.id):(state.job?.id || activeID || jobs[0]?.id);
+      const job=id?await request(`/api/jobs/${id}`):null;
+      if (revision!==state.jobRevision) return;
       state.authReady=health.auth_ready; state.storageReady=health.storage_ready;
       $('connection-status').textContent=health.storage_ready?(health.auth_ready?'Sẵn sàng · '+win.location.host:'Auth chưa sẵn sàng'):'Chỉ đọc · lỗi lưu trữ';
       $('readiness').hidden=health.auth_ready && health.storage_ready;
       $('readiness').textContent=!health.storage_ready?REASONS.STORAGE_ERROR+' Chỉ tải được kết quả đã lưu; khởi động lại sau khi sửa lỗi.':!health.auth_ready?'CheckLive chưa sẵn sàng. Chạy scripts/setup_checklive.py, kiểm tra CHECKLIVE_PATH rồi khởi động lại. OAuth thủ công vẫn dùng được.':'';
-      state.activeJob=jobs.find(job=>shouldPoll(job,false))?.id || null;
-      const id=selectLatest?(state.activeJob || jobs[0]?.id):(state.job?.id || state.activeJob || jobs[0]?.id);
+      state.activeJob=activeID;
+      if (job && id===activeID && !shouldPoll(job,false)) state.activeJob=null;
       $('job-history').replaceChildren(new Option('Chọn batch đã lưu',''));
       for (const job of jobs) $('job-history').append(new Option(`${new Date(job.created_at).toLocaleString('vi-VN')} · ${BATCH[job.status] || job.status}`,job.id));
-      if (id) { const job=await request(`/api/jobs/${id}`); state.job=job; $('job-history').value=id; }
+      if (job) { state.job=job; $('job-history').value=id; }
       renderJob(); schedulePoll();
     })();
-    try { await refreshFlight; } finally { refreshFlight=null; }
+    refreshFlight=operation;
+    try { await operation; } finally { if (refreshFlight===operation) refreshFlight=null; }
   }
   async function signedIn(csrf) {
-    state.generation++;
+    state.generation++; state.jobRevision++;
     for (const controller of controllers) controller.abort();
     controllers.clear();
     state.csrf=csrf; state.authenticated=true;
@@ -203,6 +212,7 @@ export function mountDashboard(doc) {
     try {
       const result=await request('/api/jobs',{method:'POST',body:{accounts_text:$('accounts-text').value,proxies_text:$('proxies-text').value,
         mode:$('mode').value,workers:Number($('workers').value),timeout:Number($('timeout').value)}});
+      state.jobRevision++;
       $('accounts-text').value=''; $('proxies-text').value=''; state.validCount=0; state.activeJob=result.id; state.page=0;
       $('validation-summary').textContent='Đã nhận batch; dữ liệu bí mật đã được xóa khỏi ô nhập.';
       state.job=await request(`/api/jobs/${result.id}`); await refresh(false);
@@ -211,13 +221,14 @@ export function mountDashboard(doc) {
   });
   $('stop-btn').addEventListener('click',async()=>{
     if (!state.activeJob) return;
-    state.busy=true; controls();
+    state.jobRevision++; state.busy=true; controls();
     try { await request(`/api/jobs/${state.activeJob}/stop`,{method:'POST',body:{}}); await refresh(false); }
     catch(error) { report(error); } finally { state.busy=false; controls(); }
   });
   $('refresh-btn').addEventListener('click',()=>refresh(false).catch(report));
   $('job-history').addEventListener('change',async()=>{
     const id=$('job-history').value; if (!id) return;
+    state.jobRevision++;
     try { const job=await request(`/api/jobs/${id}`); if ($('job-history').value===id) { state.job=job; state.page=0; renderJob(); } }
     catch(error) { report(error); }
   });
