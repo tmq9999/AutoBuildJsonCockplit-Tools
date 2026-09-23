@@ -9,5 +9,7 @@ before redistributing their source. The checkout is local and excluded from buil
 
 Only the authentication library is integrated. Its CLI, database, subscription
 checker and output writer are not executed. Debug output is disabled. Optional
-sibling SentinelVM imports are isolated; CAPTCHA/Turnstile challenges return
-`ACTION_REQUIRED`. HTTP endpoints can change; offline tests do not prove live login.
+sibling SentinelVM imports are isolated; Sentinel metadata follows the pinned
+upstream fallback/optional-VM behavior. Actual CAPTCHA/Turnstile pages, redirects,
+or HTTP rejection responses return safe action/blocked errors. HTTP endpoints can
+change; offline tests do not prove live login.

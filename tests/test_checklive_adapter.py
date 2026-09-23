@@ -1,8 +1,10 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 import pytest
-from autobuild_json.checklive_adapter import CheckliveProcessor, load_checklive
+from autobuild_json.checklive_adapter import AuthTransport, CheckliveProcessor, guarded_auth, load_checklive
+from autobuild_json.errors import FlowError
 from autobuild_json.input_parser import parse_accounts
 from autobuild_json.oauth import OAuthSessions
 from autobuild_json.models import SuccessRecord, TokenSet, AccountIdentity
@@ -51,12 +53,71 @@ def test_detects_phone_and_email(settings, context, payload, status):
     assert result.status == status
     assert raw.closed
 
-def test_sentinel_required_turnstile_does_not_fallback(settings, context):
+@pytest.mark.parametrize("turnstile", [{"dx":"challenge"}, {"required":False,"dx":"challenge"}, {"required":True,"dx":"challenge"}])
+def test_sentinel_metadata_preserves_upstream_token_and_continues_to_email(context, monkeypatch, turnstile):
+    module = load_checklive(Path(".deps/Check-Account-ChatGPT"))
+    assert module.sentinel.HAS_SENTINEL_VM is False
+    monkeypatch.setattr(module.sentinel, "_generate_requirements_token", lambda *args, **kwargs:"synthetic-p")
+    payload = {"token":"synthetic-challenge-token", "turnstile":turnstile}
+    upstream_http = SimpleNamespace(post=lambda *args, **kwargs:Response(payload))
+    upstream_token = json.loads(module.sentinel.get_sentinel_token(
+        upstream_http, device_id="fixture-device", flow="authorize_continue"))
+    raw = RawSession([Response(payload), Response({"page":{"type":"login_password"}})])
+    transport = AuthTransport(None, context, raw)
+    auth = guarded_auth(module, transport)
+    auth.device_id = "fixture-device"
+    try:
+        response = auth.authorize_continue("u@example.com")
+        assert response == {"page":{"type":"login_password"}}
+        assert len(raw.requests) == 2
+        sent = json.loads(raw.requests[1]["headers"]["openai-sentinel-token"])
+        assert sent == upstream_token
+        assert sent["t"] == ""
+        assert raw.requests[1]["url"] == "https://auth.openai.com/api/accounts/authorize/continue"
+        assert raw.requests[1]["json"]["username"]["value"] == "u@example.com"
+    finally:
+        transport.close()
+
+
+@pytest.mark.parametrize("status,code", [(403,"AUTH_BLOCKED"), (429,"RATE_LIMITED")])
+def test_real_sentinel_http_rejection_keeps_precise_stage(settings, context, status, code):
     module = load_checklive(Path(".deps/Check-Account-ChatGPT"))
     responses = sequence()
-    responses[4] = Response({"token":"t", "turnstile":{"required":True,"dx":"challenge"}})
+    responses[4] = Response({"error":{"message":"must-not-leak-response"}}, status=status)
+    raw = RawSession(responses)
+    processor = CheckliveProcessor(settings, OAuthSessions(settings), None, module=module, raw_factory=lambda:raw)
+    result = processor(parse_accounts("u@example.com|p|JBSWY3DPEHPK3PXP").accounts[0], None, context)
+    assert result.error.code == code
+    assert result.error.stage == "sentinel"
+    assert len(raw.requests) == 5
+    assert "must-not-leak-response" not in str(result.error)
+    assert raw.closed
+
+
+def test_provider_rejects_email_after_sentinel_not_mislabeled_as_metadata_challenge(context):
+    module = load_checklive(Path(".deps/Check-Account-ChatGPT"))
+    raw = RawSession([
+        Response({"token":"synthetic-token", "turnstile":{"dx":"challenge"}}),
+        Response(status=403),
+    ])
+    transport = AuthTransport(None, context, raw)
+    try:
+        with pytest.raises(FlowError) as error:
+            guarded_auth(module, transport).authorize_continue("u@example.com")
+        assert error.value.code == "AUTH_BLOCKED"
+        assert len(raw.requests) == 2
+    finally:
+        transport.close()
+
+
+def test_actual_captcha_page_still_stops_before_password(settings, context):
+    module = load_checklive(Path(".deps/Check-Account-ChatGPT"))
+    responses = sequence()
+    responses[5] = Response({"page":{"type":"captcha"}})
     raw = RawSession(responses)
     processor = CheckliveProcessor(settings, OAuthSessions(settings), None, module=module, raw_factory=lambda:raw)
     result = processor(parse_accounts("u@example.com|p|JBSWY3DPEHPK3PXP").accounts[0], None, context)
     assert result.error.code == "ACTION_REQUIRED"
-    assert len(raw.requests) == 5
+    assert result.error.stage == "email"
+    assert len(raw.requests) == 6
+    assert raw.closed

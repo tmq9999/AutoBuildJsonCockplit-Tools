@@ -36,6 +36,7 @@ def detect_challenge(payload, url):
 
 
 def inspect_response(response, url):
+    stage = "sentinel" if urlsplit(url).hostname == "sentinel.openai.com" else "authentication"
     try:
         payload = response.json()
     except ValueError:
@@ -44,21 +45,21 @@ def inspect_response(response, url):
         payload = {}
     challenge = detect_challenge(payload, url) or detect_challenge({}, response.headers.get("Location", ""))
     if challenge:
-        raise FlowError(challenge, "authentication")
+        raise FlowError(challenge, stage)
     error = payload.get("error")
     code = error.get("code") if isinstance(error, dict) else error
     if code == "account_deactivated":
-        raise FlowError("ACCOUNT_DEACTIVATED", "authentication")
+        raise FlowError("ACCOUNT_DEACTIVATED", stage)
     if code == "invalid_state" or response.status_code == 409:
-        raise FlowError("INVALID_STATE", "authentication")
+        raise FlowError("INVALID_STATE", stage)
     if response.status_code == 401:
-        raise FlowError("MFA_ERROR" if "/mfa/" in url else "INVALID_CREDENTIALS", "authentication")
+        raise FlowError("MFA_ERROR" if "/mfa/" in url else "INVALID_CREDENTIALS", stage)
     if response.status_code == 429:
-        raise FlowError("RATE_LIMITED", "authentication")
+        raise FlowError("RATE_LIMITED", stage)
     if response.status_code >= 400:
-        raise FlowError("AUTH_BLOCKED", "authentication")
-    if urlsplit(url).hostname == "sentinel.openai.com":
-        turnstile = payload.get("turnstile")
-        if isinstance(turnstile, dict) and (turnstile.get("required") or turnstile.get("dx")):
-            raise FlowError("ACTION_REQUIRED", "sentinel")
+        raise FlowError("AUTH_BLOCKED", stage)
+    # A successful Sentinel metadata response is input to the pinned client,
+    # not proof of a user-facing verification wall. In particular, `dx` alone
+    # must not preempt upstream's token construction/fallback. Actual challenge
+    # pages/redirects and HTTP rejection statuses above still stop the attempt.
     return payload

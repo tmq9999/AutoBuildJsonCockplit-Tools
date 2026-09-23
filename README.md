@@ -134,9 +134,10 @@ tool chỉ kiểm soát proxy của HTTP token exchange.
 account ID và email lấy từ ID token đã xác thực chữ ký/issuer/audience/thời hạn.
 Token ChatGPT session không được dùng giả làm token Codex.
 
-Phone verification có nhãn chính xác `Phone number verify`. Email OTP, CAPTCHA,
-Turnstile hoặc workspace không xác định được sẽ báo yêu cầu thao tác riêng;
-không tự giải xác minh điện thoại và không thêm solver ngoài repo.
+Phone verification có nhãn chính xác `Phone number verify`. Trang/redirect CAPTCHA-
+Turnstile hoặc workspace không xác định được sẽ báo yêu cầu thao tác riêng. Metadata
+Sentinel `dx` được xử lý giống code CheckLive gốc; chỉ metadata không bị coi là CAPTCHA.
+Không tự giải xác minh điện thoại và không thêm solver ngoài repo.
 
 `data/runs/<id>/run.json` là snapshot bền vững và **chứa token của kết quả thành công**.
 File có quyền 0600 và thư mục 0700 trên POSIX. Trên Windows cần hạn chế ACL thư mục

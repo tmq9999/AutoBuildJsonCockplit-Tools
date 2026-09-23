@@ -20,6 +20,11 @@
   Chrome acceptance covers login, file import/filter, parallel/proxy jobs, five
   export downloads, manual callback, Stop, reload/history, logout and 390px mobile.
   No external browser requests and no provider login occurred in these tests.
+- Sentinel parity fix: the adapter no longer turns successful `turnstile.dx` metadata
+  into an invented `ACTION_REQUIRED` before the pinned upstream fallback/optional VM
+  path runs. Offline parity tests cover metadata, provider rejection, and CAPTCHA
+  page branches. The optional VM is absent from the pinned checkout, so provider
+  challenges requiring it remain unsupported.
 
 ## Known verification limits and deferred minor
 

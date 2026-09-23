@@ -98,7 +98,10 @@ def guarded_auth(module, transport):
             return transport.request(method, url, **kwargs)
 
         def _get_sentinel_token(self, flow="password_verify"):
-            value = super()._get_sentinel_token(flow)
+            try:
+                value = super()._get_sentinel_token(flow)
+            except FlowError as exc:
+                raise FlowError(exc.code, "sentinel") from None
             if transport.fatal_error:
                 raise transport.fatal_error
             transport.context.check()
@@ -167,7 +170,7 @@ class CheckliveProcessor:
                 return RunResult("success", record=record, attempt=attempt)
             except Exception as exc:
                 if isinstance(exc, FlowError):
-                    error = FlowError(exc.code, stage)
+                    error = FlowError(exc.code, "sentinel" if exc.stage == "sentinel" else stage)
                 elif isinstance(exc, self.module.InvalidCredentialsError):
                     error = FlowError("MFA_ERROR" if stage == "totp" else "INVALID_CREDENTIALS", stage)
                 elif isinstance(exc, self.module.AccountDeactivatedError):

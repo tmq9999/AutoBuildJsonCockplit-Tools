@@ -14,3 +14,5 @@ def test_pinned_dependency_loads_without_solver():
     assert callable(module.AuthSession.verify_password)
     assert not module.sentinel.HAS_SENTINEL_VM
     assert module.config.DEBUG is False
+    assert module.config.WORKSPACE_ROOT.name.startswith("autobuild-checklive-")
+    assert module.config.WORKSPACE_ROOT != Path(module.config.__file__).resolve().parent.parent.parent
