@@ -1,0 +1,185 @@
+"""Serialize accounting by customer/key; never hold locks during provider I/O."""
+from contextlib import asynccontextmanager
+from dataclasses import asdict
+from datetime import timedelta, timezone
+import json
+from uuid import uuid4
+
+from sqlalchemy import text
+
+from ..errors import GatewayError
+from ..identity.policy import KeyPolicy
+from .records import Hold
+from .units import weighted_micro
+
+TERMINAL = {"completed", "released", "adjusted"}
+
+
+class Ledger:
+    def __init__(self, db, *, clock=None):
+        self.db = db
+        self.clock = clock
+
+    async def _now(self, session):
+        return (self.clock() if self.clock else await session.scalar(text("SELECT clock_timestamp()"))).astimezone(timezone.utc)
+
+    async def _lock_key(self, session, key_id):
+        owner = await session.scalar(text("SELECT customer_id FROM api_keys WHERE id=:id"), {"id": key_id})
+        if owner is None:
+            raise GatewayError("invalid_api_key", 401, "auth")
+        enabled = await session.scalar(text("SELECT enabled FROM customers WHERE id=:id FOR UPDATE"), {"id": owner})
+        key = (await session.execute(text("SELECT * FROM api_keys WHERE id=:id FOR UPDATE"),
+                                     {"id": key_id})).mappings().one()
+        return owner, enabled, key
+
+    @asynccontextmanager
+    async def _request(self, request_id):
+        async with self.db.sessions.begin() as session:
+            key_id = await session.scalar(text("SELECT key_id FROM requests WHERE id=:id"), {"id": request_id})
+            if key_id is None:
+                raise GatewayError("not_found", 404, "quota")
+            _, _, key = await self._lock_key(session, key_id)
+            row = (await session.execute(text("SELECT * FROM requests WHERE id=:id FOR UPDATE"),
+                                         {"id": request_id})).mappings().one()
+            yield session, row, key
+
+    async def _buckets(self, session, key_id, periods, policy, delta):
+        for window in ("total", "day", "month"):
+            params = {"key": key_id, "window": window, "period": periods[window]}
+            await session.execute(text("INSERT INTO quota_buckets(key_id,window_kind,period) VALUES (:key,:window,:period) "
+                                       "ON CONFLICT DO NOTHING"), params)
+            row = (await session.execute(text("SELECT spent,held FROM quota_buckets WHERE key_id=:key "
+                                               "AND window_kind=:window AND period=:period FOR UPDATE"), params)).mappings().one()
+            limit = getattr(policy, window + "_micro")
+            if delta > 0 and limit is not None and row["spent"] + row["held"] + delta > limit:
+                raise GatewayError("quota_exceeded", 429, "quota")
+            await session.execute(text("UPDATE quota_buckets SET held=held+:delta WHERE key_id=:key "
+                                       "AND window_kind=:window AND period=:period"), dict(params, delta=delta))
+
+    async def reserve(self, admission):
+        async with self.db.sessions.begin() as session:
+            owner, enabled, key = await self._lock_key(session, admission.principal.key_id)
+            now = await self._now(session)
+            if (owner != admission.principal.customer_id or not enabled or not key["enabled"] or key["revoked_at"]
+                    or key["version"] != admission.principal.policy_version
+                    or (key["expires_at"] is not None and key["expires_at"] <= now)):
+                raise GatewayError("invalid_api_key", 401, "auth")
+            policy = KeyPolicy.model_validate(key["policy"])
+            override = next((rate for rate in policy.model_overrides if rate.model_id == admission.model_id), None)
+            input_micro = override.input_micro if override else admission.input_micro
+            output_micro = override.output_micro if override else admission.output_micro
+            amount = weighted_micro(admission.bounds.input_tokens, admission.bounds.output_tokens, input_micro, output_micro)
+            if (admission.protocol not in policy.protocols or
+                    not (policy.all_models or admission.model_id in policy.model_ids)):
+                raise GatewayError("permission_denied", 403, "policy")
+            if not now < admission.deadline <= now + timedelta(seconds=600):
+                raise GatewayError("invalid_request", 400, "quota")
+            await session.execute(text("UPDATE requests SET idempotency_digest=NULL, payload_digest=NULL "
+                "WHERE key_id=:key AND idempotency_expires_at <= :now"), {"key": key["id"], "now": now})
+            duplicate = (await session.execute(text("SELECT id,payload_digest FROM requests WHERE id=:id OR "
+                "(key_id=:key AND idempotency_digest=:digest) LIMIT 1"),
+                {"id": admission.request_id, "key": key["id"], "digest": admission.idempotency_digest})).mappings().first()
+            if duplicate:
+                if duplicate["payload_digest"] != admission.payload_digest:
+                    raise GatewayError("payload_mismatch", 409, "quota")
+                raise GatewayError("duplicate_request", 409, "quota")
+            rpm = await session.scalar(text("SELECT count(*) FROM requests WHERE key_id=:key AND admitted_at > :cutoff"),
+                                       {"key": key["id"], "cutoff": now - timedelta(seconds=60)})
+            if rpm >= policy.rpm:
+                raise GatewayError("rate_limited", 429, "quota", 60)
+            active = await session.scalar(text("SELECT count(*) FROM requests WHERE key_id=:key "
+                "AND state IN ('reserved','dispatched') AND deadline > :now"), {"key": key["id"], "now": now})
+            if active >= policy.concurrency:
+                raise GatewayError("concurrency_limit", 429, "quota")
+            periods = {"total": "all", "day": now.strftime("%Y-%m-%d"), "month": now.strftime("%Y-%m")}
+            await self._buckets(session, key["id"], periods, policy, amount)
+            await session.execute(text("""INSERT INTO requests
+                (id,key_id,model_id,policy_version,protocol,state,admitted_at,deadline,periods,input_micro,
+                 output_micro,input_bound,output_bound,hold,idempotency_digest,payload_digest,idempotency_expires_at)
+                VALUES (:id,:key,:model,:version,:protocol,'reserved',:now,:deadline,CAST(:periods AS jsonb),
+                        :im,:om,:ib,:ob,:hold,:digest,:payload,:expiry)"""),
+                {"id": admission.request_id, "key": key["id"], "model": admission.model_id,
+                 "version": key["version"], "protocol": admission.protocol, "now": now,
+                 "deadline": admission.deadline, "periods": json.dumps(periods), "im": input_micro,
+                 "om": output_micro, "ib": admission.bounds.input_tokens, "ob": admission.bounds.output_tokens,
+                 "hold": amount, "digest": admission.idempotency_digest, "payload": admission.payload_digest,
+                 "expiry": now + timedelta(hours=24) if admission.idempotency_digest else None})
+        return Hold(admission.request_id, admission.principal.key_id, amount)
+
+    async def mark_dispatched(self, request_id, attempt_id):
+        async with self._request(request_id) as (session, row, _):
+            count = await session.scalar(text("SELECT count(*) FROM attempts WHERE request_id=:id"), {"id": request_id})
+            if row["state"] != "reserved" or count >= 2 or row["deadline"] <= await self._now(session):
+                raise GatewayError("invalid_state", 409, "quota")
+            await session.execute(text("INSERT INTO attempts(id,request_id) VALUES (:attempt,:id)"),
+                                  {"attempt": attempt_id, "id": request_id})
+            await session.execute(text("UPDATE requests SET state='dispatched' WHERE id=:id"), {"id": request_id})
+
+    async def mark_rejected(self, request_id, attempt_id, evidence):
+        async with self._request(request_id) as (session, row, _):
+            if row["state"] != "dispatched" or evidence != "rejected_before_generation":
+                raise GatewayError("invalid_state", 409, "quota")
+            result = await session.execute(text("UPDATE attempts SET status='rejected' WHERE id=:attempt "
+                "AND request_id=:id AND status='started' RETURNING id"), {"attempt": attempt_id, "id": request_id})
+            if result.scalar_one_or_none() is None:
+                raise GatewayError("invalid_state", 409, "quota")
+            await session.execute(text("UPDATE requests SET state='reserved' WHERE id=:id"), {"id": request_id})
+
+    async def resize(self, hold, bounds):
+        async with self._request(hold.request_id) as (session, row, key):
+            if row["state"] != "reserved" or hold.key_id != key["id"]:
+                raise GatewayError("invalid_state", 409, "quota")
+            amount = weighted_micro(bounds.input_tokens, bounds.output_tokens, int(row["input_micro"]), int(row["output_micro"]))
+            await self._buckets(session, key["id"], row["periods"], KeyPolicy.model_validate(key["policy"]), amount - int(row["hold"]))
+            await session.execute(text("UPDATE requests SET hold=:amount,input_bound=:ib,output_bound=:ob WHERE id=:id"),
+                                  {"id": row["id"], "amount": amount, "ib": bounds.input_tokens, "ob": bounds.output_tokens})
+            return Hold(row["id"], key["id"], amount)
+
+    async def _finalize(self, session, row, charge, state, *, usage=None, actor=None, reason=None):
+        for window, period in row["periods"].items():
+            await session.execute(text("UPDATE quota_buckets SET held=held-:hold,spent=spent+:charge "
+                "WHERE key_id=:key AND window_kind=:window AND period=:period"),
+                {"hold": row["hold"], "charge": charge, "key": row["key_id"], "window": window, "period": period})
+        await session.execute(text("INSERT INTO usage_ledger(id,request_id,entry_kind,amount_micro,source,actor,reason) "
+            "VALUES (:entry,:id,'settlement',:amount,:source,:actor,:reason)"),
+            {"entry": uuid4(), "id": row["id"], "amount": charge,
+             "source": "admin_adjusted" if actor else "provider" if usage else "not_dispatched", "actor": actor, "reason": reason})
+        await session.execute(text("UPDATE requests SET state=:state,usage=CAST(:usage AS jsonb),reason=:reason WHERE id=:id"),
+            {"id": row["id"], "state": state, "usage": json.dumps(asdict(usage)) if usage else None, "reason": reason})
+
+    async def settle(self, request_id, usage):
+        async with self._request(request_id) as (session, row, _):
+            if row["state"] in TERMINAL:
+                return
+            if row["state"] not in {"dispatched", "usage_pending"}:
+                raise GatewayError("invalid_state", 409, "quota")
+            charge = weighted_micro(usage.input_tokens, usage.output_tokens, int(row["input_micro"]), int(row["output_micro"]))
+            await self._finalize(session, row, min(charge, int(row["hold"])), "completed", usage=usage,
+                                 reason="usage_exceeded_bound" if charge > row["hold"] else None)
+
+    async def release_unspent(self, request_id, evidence):
+        async with self._request(request_id) as (session, row, _):
+            if row["state"] in TERMINAL:
+                return
+            if row["state"] != "reserved" or evidence != "not_dispatched":
+                raise GatewayError("invalid_state", 409, "quota")
+            await self._finalize(session, row, 0, "released")
+
+    async def mark_pending(self, request_id, reason):
+        async with self._request(request_id) as (session, row, _):
+            if row["state"] in TERMINAL:
+                return
+            if row["state"] not in {"dispatched", "usage_pending"}:
+                raise GatewayError("invalid_state", 409, "quota")
+            safe_reason = reason if reason in {"usage_missing", "timeout", "interrupted", "storage_error"} else "interrupted"
+            await session.execute(text("UPDATE requests SET state='usage_pending',reason=:reason WHERE id=:id"),
+                                  {"id": request_id, "reason": safe_reason})
+
+    async def adjust(self, request_id, amount_micro, actor, reason):
+        if (type(amount_micro) is not int or amount_micro < 0 or not actor or not reason
+                or len(actor) > 100 or len(reason) > 500 or any(ord(c) < 32 for c in actor + reason)):
+            raise GatewayError("invalid_request")
+        async with self._request(request_id) as (session, row, _):
+            if row["state"] != "usage_pending" or amount_micro > row["hold"]:
+                raise GatewayError("invalid_state", 409, "quota")
+            await self._finalize(session, row, amount_micro, "adjusted", actor=actor, reason=reason)
