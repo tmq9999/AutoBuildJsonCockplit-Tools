@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing Python >=3.10/FastAPI/Pydantic/Uvicorn; PostgreSQL 17; SQLAlchemy 2 async sessions with psycopg 3; Alembic migrations; HTTPX/httpcore for gateway HTTP; cryptography AES-GCM; existing curl_cffi for legacy OAuth. Plain JavaScript/CSS admin UI, pytest/pytest-asyncio, Node tests, existing Chrome/Playwright-core development harness.
 
-**Spec:** `docs/superpowers/specs/2026-09-24-api-gateway-design.md` — approved by the user's “triển khai đi” after receiving commit `4b7872f`. This plan is awaiting review and execution-method selection; no product implementation has started.
+**Spec:** `docs/superpowers/specs/2026-09-24-api-gateway-design.md` — approved by the user's “triển khai đi” after receiving commit `4b7872f`. Plan and recommended Native execution approved by “duyệt” after commit `e409a8f`; execution began in isolated branch `feat/api-gateway`.
 
 ## Global Constraints
 

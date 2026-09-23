@@ -1,5 +1,6 @@
 include README.md THIRD_PARTY.md .env.example
 include scripts/setup_checklive.py
+include scripts/gateway_testdb.py
 include package.json package-lock.json
 recursive-include tests *.py
 recursive-include tests/ui *.mjs *.md
@@ -8,3 +9,4 @@ prune .deps
 prune data
 prune .superdesign
 prune .superpowers
+prune .worktrees
