@@ -99,3 +99,38 @@ provider changes may still require follow-up); Windows behavior is explicitly
 unverified (cost: deployment there needs a local check). Final packaging/docs were
 verified by the implementer. Approved Superdesign layout was implemented with local
 assets and inspected through local Chrome screenshots, not a second remote design.
+
+## API gateway development checkpoint — 2026-09-24
+
+Isolated branch `feat/api-gateway`, worktree `.worktrees/api-gateway` relative to the
+original checkout. Original running OAuth service and real account/result files
+were not changed or used as test inputs. No merge, push or public deployment yet.
+
+Implemented backend milestones: PostgreSQL migrations; encrypted upstream vault;
+customer/client-key services; atomic weighted quota and independent upstream cost
+budgets; provider/model registry; egress guard; proxy pools/Kiot lifecycle; OpenAI
+Chat/Responses, Anthropic, Gemini and Ollama core codecs; Codex token import/refresh;
+legacy OAuth batch proxy bridge; initial private administration APIs; operations
+CLI, recovery and encrypted snapshot/empty-target restore.
+
+Evidence from this checkpoint:
+
+- 388 Python tests passed, including real PostgreSQL and SDK HTTP tests.
+- SDKs: OpenAI 3.19.1, Anthropic 1.8.0, Google GenAI 2.25.0, Ollama 0.6.2.
+- 8 Node UI tests and existing Chrome browser smoke passed.
+- Ruff, compileall, diff whitespace checks and build --no-isolation passed.
+- One upstream Google GenAI Python deprecation warning remains.
+
+Not complete: new administration UI and its browser acceptance, remaining admin
+CRUD/probes/playground details, comprehensive cross-protocol capability matrix and
+final independent branch review. Live Codex inference/Kiot/third-party provider
+verification is not established by synthetic upstream tests. Do not treat the
+development branch as production-ready or fully compatible with all vendor APIs.
+
+Superdesign `/service/` draft v3 awaits user approval:
+https://p.superdesign.dev/draft/9da57406-2110-462f-a8ee-0f293bc9c332
+The draft uses synthetic data and is not yet an implemented admin screen.
+
+The per-plan ledger is `.superpowers/sdd/2026-09-24-api-gateway/progress.md` in the
+worktree. Tasks 1–16 have completion evidence there; Task 17 is partial awaiting
+UI approval; Tasks 18/19 have backend/SDK evidence but are not final release gates.

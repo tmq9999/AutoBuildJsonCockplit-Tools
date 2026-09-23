@@ -1,5 +1,14 @@
 # AutoBuildJsonCockplit-Tools
 
+## API gateway đang phát triển
+
+Nhánh `feat/api-gateway` có backend gateway riêng cho OpenAI, Anthropic, Gemini,
+Ollama; quản lý key/quota/provider và proxy/KiotProxy. Đây chưa phải bản phát hành
+production: UI quản trị mới đang chờ duyệt, review cuối nhánh và live smoke còn thiếu.
+Không thay đổi lệnh chạy OAuth local mặc định hoặc tự mở dịch vụ ra Internet.
+Xem [vận hành gateway](docs/gateway-operations.md) và
+[ma trận tương thích đã kiểm thử](docs/gateway-compatibility.md).
+
 Tool local dùng HTTP để đăng nhập tài khoản được phép sử dụng, thực hiện OAuth Codex
 và xuất JSON tương thích mẫu của Auto-Oauth-Codex-9Router. Không cần chạy 9router.
 

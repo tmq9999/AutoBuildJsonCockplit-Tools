@@ -40,5 +40,5 @@ async def gateway_environment(db, *, respond=None, quota=1_000_000_000_000):
     engine = Engine(db, catalog, ledger, ProxyManager(PgLeaseStore(db)), transport, catalog.vault)
     app = create_gateway_app(identity, catalog, engine, allowed_hosts={"127.0.0.1:8788"})
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8788") as client:
-        yield SimpleNamespace(client=client, secret=issued.secret, key_id=issued.key_id, ledger=ledger, engine=engine,
+        yield SimpleNamespace(app=app, client=client, secret=issued.secret, key_id=issued.key_id, ledger=ledger, engine=engine,
                               upstream_requests=sent, provider_id=provider, credential_id=credential, binding=binding)

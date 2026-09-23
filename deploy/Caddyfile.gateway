@@ -1,0 +1,7 @@
+https://localhost:8443 {
+    tls internal
+    request_body {
+        max_size 16MB
+    }
+    reverse_proxy gateway:8788
+}

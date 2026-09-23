@@ -86,3 +86,11 @@ async def test_gateway_budget_holds_and_usage_cost_are_settled(pg_db):
         assert response.status_code == 200, response.text
         spent, held, _ = await budgets.balance(budget)
         assert spent == Decimal("0.000019") and held == 0
+
+
+async def test_public_health_does_not_reveal_registry_or_keys(pg_db):
+    async with gateway_environment(pg_db) as env:
+        result = await env.client.get("/health")
+        assert result.status_code == 200
+        assert result.json() == {"status": "ok"}
+        assert env.secret not in result.text

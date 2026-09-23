@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import text
 
 from ..errors import GatewayError
 from ..protocols.openai_chat import OpenAIChatCodec
@@ -49,6 +50,17 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
             return {"data": rows, "has_more": False, "first_id": rows[0]["id"] if rows else None, "last_id": rows[-1]["id"] if rows else None}
         return {"object": "list", "data": [{"id": model.model_id, "object": "model", "created": 0, "owned_by": "gateway"}
                                            for model in values]}
+
+    @app.get("/health")
+    async def health():
+        try:
+            async with engine.db.sessions() as session:
+                revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
+            if revision is None:
+                raise GatewayError("storage_unavailable", 503)
+            return {"status": "ok"}
+        except SQLAlchemyError:
+            return JSONResponse({"status": "unavailable"}, status_code=503)
 
     @app.post("/v1/chat/completions")
     async def chat(request: Request):

@@ -14,6 +14,12 @@ class ServiceSettings(BaseSettings):
     database_url: SecretStr | None = None
     master_key_file: Path | None = None
     request_timeout: int = Field(default=180, ge=1, le=600)
+    allowed_hosts: tuple[str, ...] = ("127.0.0.1:8788", "localhost:8788")
+    tls_proxy_configured: bool = False
+    trusted_proxy_ips: tuple[str, ...] = ()
+    private_origins: tuple[str, ...] = ()
+    allowed_networks: tuple[str, ...] = ()
+    trusted_egress_proxies: tuple[str, ...] = ()
 
     @field_validator("database_url")
     @classmethod
@@ -28,4 +34,6 @@ class ServiceSettings(BaseSettings):
     def enabled_config(self):
         if self.enabled and (self.database_url is None or self.master_key_file is None):
             raise ValueError("Enabled gateway requires database and master-key configuration")
+        if self.host not in {"127.0.0.1", "localhost", "::1"} and (not self.tls_proxy_configured or not self.allowed_hosts or not self.trusted_proxy_ips):
+            raise ValueError("Public bind requires explicit TLS proxy, trusted IPs and allowed hosts")
         return self

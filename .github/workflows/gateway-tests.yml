@@ -1,0 +1,37 @@
+name: Gateway contracts
+on: [push, pull_request]
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.14']
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: abgw_test_00000000000000000000000000000000
+          POSTGRES_USER: abgw_test
+          POSTGRES_PASSWORD: synthetic-ci-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U abgw_test'
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      AUTOBUILD_TEST_DATABASE_URL: postgresql+psycopg://abgw_test:synthetic-ci-only@127.0.0.1:5432/abgw_test_00000000000000000000000000000000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: python -m venv .venv
+      - run: .venv/bin/python -m pip install -e '.[dev,service,gateway-test]' -r requirements/gateway-sdk-tests.lock
+      - run: .venv/bin/python scripts/setup_checklive.py
+      - run: .venv/bin/python -m pytest -q
+      - run: .venv/bin/python -m ruff check .
+      - run: .venv/bin/python -m build
+      - run: npm ci
+      - run: npm run test:ui

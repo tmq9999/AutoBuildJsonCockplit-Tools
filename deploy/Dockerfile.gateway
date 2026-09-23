@@ -1,0 +1,9 @@
+FROM python:3.12-slim
+WORKDIR /app
+COPY pyproject.toml MANIFEST.in README.md THIRD_PARTY.md ./
+COPY autobuild_json ./autobuild_json
+RUN pip install --no-cache-dir '.[service]'
+RUN useradd --create-home --uid 10001 gateway
+USER gateway
+ENTRYPOINT ["python", "-m", "autobuild_json.gateway"]
+CMD ["serve"]

@@ -1,0 +1,14 @@
+.git
+.worktrees
+.venv
+.deps
+.superpowers
+.superdesign
+data
+dist
+build
+node_modules
+.env*
+account*.txt
+proxy*.txt
+**/__pycache__

@@ -63,6 +63,11 @@ class Vault:
         self._keys = dict(keys)
         self.active = active
 
+    def derive_key(self, key_id, purpose):
+        if key_id not in self._keys or purpose not in {"client-key-hmac", "backup-v1"}:
+            raise ValueError("invalid_keyring")
+        return hmac.new(self._keys[key_id], ("abgw:derive:"+purpose).encode(), hashlib.sha256).digest()
+
     @staticmethod
     def _aad(kind, record_id):
         if not isinstance(kind, str) or not KEY_ID.fullmatch(kind) or not isinstance(record_id, UUID):

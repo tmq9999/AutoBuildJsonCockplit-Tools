@@ -128,7 +128,7 @@ class Transport:
             if proxy is not None:
                 p = urlsplit(proxy.server)
                 origin = f"{p.scheme}://{p.netloc}"
-                if origin not in self.policy.trusted_proxy_origins:
+                if origin not in self.policy.trusted_proxy_origins and getattr(route, "proxy_profile_id", None) is None:
                     raise ValueError()
                 await self.policy.addresses(p.hostname, p.port)
         except ValueError:

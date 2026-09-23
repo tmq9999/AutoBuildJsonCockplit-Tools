@@ -168,7 +168,7 @@ class Catalog:
             if not model.enabled:
                 raise GatewayError("upstream_unavailable", 503)
             rows = (await session.execute(text("""SELECT b.id AS binding_id,b.config AS binding,p.id AS provider_id,
-                p.config AS provider,p.version,c.id AS credential_id FROM model_bindings b
+                p.config AS provider,p.version,c.id AS credential_id,c.profile_id AS credential_profile FROM model_bindings b
                 JOIN providers p ON p.id=b.provider_id JOIN credentials c ON c.id=b.credential_id
                 WHERE b.model_id=:model AND c.enabled AND c.health='active'
                 AND (p.cooldown_until IS NULL OR p.cooldown_until <= now())
@@ -187,7 +187,7 @@ class Catalog:
                     continue
                 routes.append(RouteSnapshot(row["binding_id"], row["provider_id"], row["credential_id"], model_id,
                     binding["upstream_model"], provider.adapter, provider.root, provider.auth_mode, row["version"], caps,
-                    Bounds(binding["input_bound"], binding["output_bound"]), provider.proxy_profile_id, provider.budget_id,
+                    Bounds(binding["input_bound"], binding["output_bound"]), row["credential_profile"] or provider.proxy_profile_id, provider.budget_id,
                     binding["priority"], model.input_micro, model.output_micro, provider.timeout, provider.cost_schedule, provider.wire_api))
             if not routes:
                 raise GatewayError("unsupported_feature" if mismatch else "upstream_unavailable", 400 if mismatch else 503)

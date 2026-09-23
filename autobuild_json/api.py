@@ -56,6 +56,8 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None, g
                 yield
             finally:
                 await run_in_threadpool(app.state.runner.close)
+                if gateway_services is not None:
+                    await gateway_services.close()
         finally:
             lock.release()
 

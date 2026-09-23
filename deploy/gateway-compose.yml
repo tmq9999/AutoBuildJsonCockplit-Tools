@@ -1,0 +1,44 @@
+# Template only. No public bind; review credentials, TLS and network policy first.
+services:
+  database:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: gateway
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${GATEWAY_DB_PASSWORD:?Set a private database password}
+    volumes:
+      - gateway-db:/var/lib/postgresql/data
+    networks: [internal]
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    environment:
+      AUTOBUILD_GATEWAY_DATABASE_URL: ${GATEWAY_DATABASE_URL:?Set private postgresql+psycopg URL}
+      AUTOBUILD_GATEWAY_MASTER_KEY_FILE: /run/secrets/keyring.json
+      AUTOBUILD_GATEWAY_HOST: 0.0.0.0
+      AUTOBUILD_GATEWAY_ALLOWED_HOSTS: '["localhost:8443"]'
+      AUTOBUILD_GATEWAY_TLS_PROXY_CONFIGURED: 'true'
+      AUTOBUILD_GATEWAY_TRUSTED_PROXY_IPS: '["172.30.90.3"]'
+    volumes:
+      - ${GATEWAY_KEYRING_FILE:?Set existing private keyring file}:/run/secrets/keyring.json:ro
+    networks: [internal, edge]
+    depends_on: [database]
+  tls:
+    image: caddy:2
+    ports: ["127.0.0.1:8443:8443"]
+    volumes:
+      - ./Caddyfile.gateway:/etc/caddy/Caddyfile:ro
+    networks:
+      edge:
+        ipv4_address: 172.30.90.3
+    depends_on: [gateway]
+networks:
+  internal:
+    internal: true
+  edge:
+    ipam:
+      config:
+        - subnet: 172.30.90.0/24
+volumes:
+  gateway-db:
