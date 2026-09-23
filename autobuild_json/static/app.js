@@ -38,6 +38,8 @@ export function displayReason(row) {
   if (row.code==='REQUEST_TIMEOUT') return `Timeout${requestLabel?' · '+requestLabel:''}${details.curl_code!=null?' · curl '+details.curl_code:''}`;
   if (row.code==='HTTP_ERROR' || row.code==='AUTH_BLOCKED' || row.code==='RATE_LIMITED') return `${details.http_status?`HTTP ${details.http_status} · `:''}${requestLabel || REASONS[row.code]}`;
   if (row.code==='OAUTH_PARSE_ERROR') return `Không đọc được lựa chọn ${details.selection_kind || 'OAuth'} (${details.candidate_count ?? 0} lựa chọn)`;
+  if (row.code==='EMAIL_OTP_REQUIRED') return `${details.http_status?`HTTP ${details.http_status} · `:''}${requestLabel || 'Email OTP'}${details.redirect_path?' · redirect → '+details.redirect_path:''} · TOTP chưa được kiểm tra`;
+  if (row.code==='WORKSPACE_SELECTION_REQUIRED') return `Không chọn được workspace (${details.candidate_count ?? 0} lựa chọn)`;
   return REASONS[row.code] || REASONS.UNEXPECTED_ERROR;
 }
 export async function readInputFile(file) {

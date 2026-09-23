@@ -44,6 +44,20 @@ test('diagnostic error details explain network and HTTP failures without secrets
   assert.equal(displayReason({code:'HTTP_ERROR', details:{endpoint:'/x',message:'password-secret'}}).includes('password-secret'), false);
 });
 
+test('email route reports observed redirect rather than blaming the TOTP secret', () => {
+  const reason=displayReason({code:'EMAIL_OTP_REQUIRED',details:{http_status:302,
+    method:'GET',host:'auth.openai.com',endpoint:'/api/accounts/authorize',
+    evidence:'redirect',redirect_path:'/email-verification'}});
+  assert.match(reason,/HTTP 302/);
+  assert.match(reason,/redirect → \/email-verification/);
+  assert.match(reason,/TOTP chưa được kiểm tra/);
+  assert.equal(reason.includes('Sai'),false);
+});
+
+test('real multiple workspace error includes candidate count', () => {
+  assert.match(displayReason({code:'WORKSPACE_SELECTION_REQUIRED',details:{selection_kind:'workspace',candidate_count:2}}),/2 lựa chọn/);
+});
+
 test('UTF-8 file read preserves passwords, rejects invalid bytes and oversized files', async () => {
   const content = '\ufeffu@example.com| p:word |JBSWY3DPEHPK3PXP\r\n';
   assert.equal(await readInputFile(new Blob([content])), content.replace('\ufeff',''));

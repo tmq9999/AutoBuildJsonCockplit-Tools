@@ -26,7 +26,12 @@ class OAuthNavigator:
 
     def _workspaces(self, html):
         text = html.replace('\\"', '"')
-        ids = set(re.findall(r'"(?:workspace_id|workspaceId)"\s*:\s*"([0-9a-fA-F-]{36})"', text))
+        ids = set()
+        for raw in re.findall(r'"(?:workspace_id|workspaceId)"\s*:\s*"([0-9a-fA-F-]{36})"', text):
+            try:
+                ids.add(str(UUID(raw)))
+            except ValueError:
+                continue
         cookies = getattr(self.transport, "cookies", {})
         value = unquote(str(cookies.get("oai-client-auth-session", "")))
         selected, available = set(), set()
@@ -57,7 +62,9 @@ class OAuthNavigator:
                     value = uuid_string(ws.get("id")) if isinstance(ws,dict) else None
                     if value:
                         available.add(value)
-        if len(selected) == 1 and (not available or selected <= available):
+        selected_matches_cookie = bool(available) and len(selected) == 1 and selected <= available
+        selected_matches_html = not available and len(selected) == 1 and (not ids or selected <= ids)
+        if selected_matches_cookie or selected_matches_html:
             return selected
         if selected:
             return ids | selected | available

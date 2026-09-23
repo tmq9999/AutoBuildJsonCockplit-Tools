@@ -101,3 +101,24 @@ def test_conflicting_selected_workspace_still_requires_explicit_choice(context):
     with pytest.raises(FlowError):
         OAuthNavigator(transport,context).complete("https://auth.openai.com/consent")
     assert len(transport.requests) == 1
+
+
+def test_cookie_selected_workspace_must_match_html_workspace(context):
+    selected = "11111111-1111-4111-8111-111111111111"
+    html_workspace = "22222222-2222-4222-8222-222222222222"
+    transport = FakeTransport(Response(text=json.dumps({"workspace_id":html_workspace})))
+    transport.cookies = {"oai-client-auth-session":quote(json.dumps({"workspace_id":selected}))}
+    with pytest.raises(FlowError) as result:
+        OAuthNavigator(transport,context).complete("https://auth.openai.com/consent")
+    assert result.value.code == "WORKSPACE_SELECTION_REQUIRED"
+    assert result.value.details["candidate_count"] == 2
+
+
+def test_same_workspace_uuid_case_does_not_make_two_choices(context):
+    workspace = "ABCDEFAB-1234-4123-8123-123456789ABC"
+    transport = FakeTransport(Response(text=json.dumps({"workspace_id":workspace})),
+        Response({"continue_url":"http://localhost:1455/auth/callback?code=c&state=s"}))
+    payload = {"workspaces":[{"id":workspace}]}
+    transport.cookies = {"oai-client-auth-session":base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")}
+    OAuthNavigator(transport,context).complete("https://auth.openai.com/consent")
+    assert transport.requests[1][2]["json"] == {"workspace_id":workspace.lower()}
