@@ -21,3 +21,10 @@ class GatewayError(Exception):
 
     def to_dict(self):
         return {"error": {"code": self.code, "message": self.code, "stage": self.stage}}
+
+
+class UpstreamRejected(GatewayError):
+    def __init__(self, status, retry_after=None):
+        super().__init__("rate_limited" if status == 429 else "upstream_error", 502, "upstream", retry_after)
+        self.upstream_status = status
+        self.safe_retry = status == 429
