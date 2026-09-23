@@ -28,3 +28,11 @@ class FakeTransport:
 
     def close(self):
         self.closed = True
+
+
+def success_result(email="u@example.com"):
+    from autobuild_json.models import RunResult, SuccessRecord, AccountIdentity, TokenSet
+    return RunResult("success", record=SuccessRecord(
+        id="00000000-0000-4000-8000-000000000001", email=email,
+        account=AccountIdentity(id="fake-account"),
+        tokens=TokenSet(id_token="fake-id", access_token="fake-access", refresh_token="fake-refresh")))
