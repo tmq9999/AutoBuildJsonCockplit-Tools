@@ -67,6 +67,10 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None, g
     def authorized(request: Request):
         return admins.require(request)
 
+    if gateway_services is not None:
+        from .gateway.admin.routes import create_admin_router
+        app.include_router(create_admin_router(gateway_services, authorized))
+
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
         # Pydantic error input/locations can contain caller credentials. Return no

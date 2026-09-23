@@ -34,17 +34,24 @@ class IdentityService:
             await self._audit(session, "customer.created", identity)
         return identity
 
-    async def set_customer_enabled(self, customer_id, enabled, *, version):
+    async def set_customer_enabled(self, customer_id, enabled, *, version, name=None):
         if type(enabled) is not bool:
             raise GatewayError("invalid_request")
+        fields = {"enabled": enabled, "version": version+1}
+        if name is not None:
+            if not isinstance(name, str) or not 1 <= len(name.strip()) <= 200 or any(ord(c) < 32 for c in name):
+                raise GatewayError("invalid_request")
+            fields["name"] = name.strip()
         async with self.db.sessions.begin() as session:
             result = await session.execute(update(customers).where(customers.c.id == customer_id,
-                customers.c.version == version).values(enabled=enabled, version=version + 1).returning(customers.c.id))
+                customers.c.version == version).values(**fields).returning(customers.c.id))
             if result.scalar_one_or_none() is None:
                 raise GatewayError("version_conflict", 409)
             await self._audit(session, "customer.enabled" if enabled else "customer.disabled", customer_id)
 
-    async def create_key(self, customer_id, policy: KeyPolicy):
+    async def create_key(self, customer_id, policy: KeyPolicy, name=""):
+        if not isinstance(name, str) or len(name) > 200 or any(ord(c) < 32 for c in name):
+            raise GatewayError("invalid_request")
         identity = uuid4()
         prefix, secret = issue_key()
         async with self.db.sessions.begin() as session:
@@ -54,7 +61,7 @@ class IdentityService:
                 raise GatewayError("permission_denied", 403)
             await session.execute(insert(api_keys).values(id=identity, customer_id=customer_id,
                 prefix=prefix, secret_digest=key_digest(secret, self._pepper), policy=policy.model_dump(mode="json"),
-                enabled=policy.enabled, expires_at=policy.expires_at))
+                enabled=policy.enabled, expires_at=policy.expires_at, name=name))
             await self._audit(session, "key.created", identity)
         return IssuedKey(identity, secret, 1)
 
