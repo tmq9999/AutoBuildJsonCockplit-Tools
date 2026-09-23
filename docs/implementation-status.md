@@ -10,12 +10,13 @@
   interference, phone-error classification and disk-full recovery were reproduced
   by failing tests and fixed. Unicode password separators were likewise corrected.
 - Actual local server startup, unauthorized API response and admin-session exchange
-  checked with synthetic data. No real account login was performed.
+  were initially checked with synthetic data; subsequent authorized live trial
+  details are recorded below.
 - Whole-project independent review completed. Reproduced and fixed both Important
   findings: stale history responses could disable Stop/polling after Start; disk
   failure could leave unfinished rows indefinitely queued/running. Regression tests
   now cover current snapshot/history/exports and persistent disk failure.
-- Final checks: 107 Python tests, 5 Node tests, and real Chrome acceptance passed.
+- Baseline checks: 107 Python tests, 5 Node tests, and real Chrome acceptance passed.
   Ruff, compileall, wheel/sdist build and isolated installed-wheel UI smoke passed.
   Chrome acceptance covers login, file import/filter, parallel/proxy jobs, five
   export downloads, manual callback, Stop, reload/history, logout and 390px mobile.
@@ -25,11 +26,18 @@
   path runs. Offline parity tests cover metadata, provider rejection, and CAPTCHA
   page branches. The optional VM is absent from the pinned checkout, so provider
   challenges requiring it remain unsupported.
+- Sentinel fix verification: 114 Python tests and 5 Node tests passed, Ruff/compile/
+  build passed, and focused independent review found no Critical/Important blocker.
+  The app was restarted to load the fix. A single authorized live retry of input
+  row 1 advanced through email and password to TOTP, then reported
+  `ACCOUNT_DEACTIVATED` at `totp`. This proves the former premature metadata stop
+  was removed, not successful token issuance. Its saved job is
+  `98333df4-a0a2-4b88-9767-7764e4b70250`.
 
 ## Known verification limits and deferred minor
 
-- Live provider compatibility and Windows permissions/locking remain unverified.
-  No user-selected real account has been run through OAuth.
+- Successful live OAuth token issuance and Windows permissions/locking remain
+  unverified. The live retry reached TOTP but produced no success record.
 - HTTP 429 is safely reported as RATE_LIMITED without automatic retry, but the
   provider's optional Retry-After duration is not yet displayed.
 - Two upstream Starlette/TestClient deprecation warnings remain in the Python suite.

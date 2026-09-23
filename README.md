@@ -4,7 +4,8 @@ Tool local dùng HTTP để đăng nhập tài khoản được phép sử dụn
 và xuất JSON tương thích mẫu của Auto-Oauth-Codex-9Router. Không cần chạy 9router.
 
 Giao diện tiếng Việt đã ghép vào FastAPI tại `/`, theo bản Superdesign đã duyệt.
-Chưa chạy thử OAuth bằng tài khoản thật. Endpoint đăng nhập nội bộ có thể thay đổi;
+Đã thử đăng nhập thật sau bản sửa Sentinel: tới TOTP nhưng phản hồi báo tài khoản
+bị vô hiệu hóa; chưa xác nhận OAuth thành công. Endpoint đăng nhập nội bộ có thể thay đổi;
 test giả lập không bảo đảm tất cả tài khoản sẽ đăng nhập thành công.
 
 ## Cài đặt
