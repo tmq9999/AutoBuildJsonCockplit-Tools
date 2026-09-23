@@ -26,10 +26,11 @@ class GatewayStreamResponse(Response):
                     parent.cancel()
                     return
         watcher = None if scope.get('gateway_disconnect_guard') else asyncio.create_task(watch())
+        events = self.prepared.events()
         try:
             await send({"type": "http.response.start", "status": 200, "headers": self.raw_headers})
             try:
-                async for event in self.prepared.events():
+                async for event in events:
                     for chunk in self.codec.encode_event(event):
                         await asyncio.wait_for(send({"type": "http.response.body", "body": chunk, "more_body": True}), 60)
             except Exception as exc:
@@ -44,4 +45,9 @@ class GatewayStreamResponse(Response):
             if watcher:
                 watcher.cancel()
                 await asyncio.gather(watcher, return_exceptions=True)
-            await asyncio.wait_for(asyncio.shield(self.prepared.close()), 5)
+            async def cleanup():
+                try:
+                    await events.aclose()
+                finally:
+                    await self.prepared.close()
+            await asyncio.wait_for(asyncio.shield(cleanup()), 5)

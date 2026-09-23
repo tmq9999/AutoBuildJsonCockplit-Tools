@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
@@ -208,6 +209,7 @@ class PreparedCall:
         self.scope = scope
         self.collector = EventCollector("chatcmpl-"+request_id.hex, route.public_model_id)
         self.closed = self.settled = self.started = False
+        self._close_task = None
 
     async def _save_usage(self, usage):
         cost = estimate_cost(usage, self.route.cost_schedule)
@@ -262,9 +264,23 @@ class PreparedCall:
         return self.collector.result()
 
     async def close(self):
-        if self.closed:
-            return
-        self.closed = True
+        # Generator finalization and HTTP disconnect may both call close. All
+        # callers must join the same cleanup, not return when it merely started.
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close_once())
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(self._close_task)
+                break
+            except asyncio.CancelledError:
+                if self._close_task.cancelled():
+                    raise
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError()
+
+    async def _close_once(self):
         try:
             if not self.settled:
                 if self.budget_attempt is not None:
@@ -274,4 +290,7 @@ class PreparedCall:
             try:
                 await self.stream.cancel()
             finally:
-                await self.stack.aclose()
+                try:
+                    await self.stack.aclose()
+                finally:
+                    self.closed = True

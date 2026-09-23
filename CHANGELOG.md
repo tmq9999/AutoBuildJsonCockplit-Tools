@@ -32,6 +32,8 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
   Python matrix jobs chạy độc lập để giữ đầy đủ kết quả khi một job lỗi.
 - Browser test gateway tôn trọng `AUTOBUILD_TEST_POSTGRES_BIN` và database URL
   test-only như bộ pytest, không bắt buộc binary nằm trong thư mục checkout.
+- CI Python 3.10 phát hiện race cleanup sau disconnect: đóng request single-flight,
+  chờ accounting/lease hoàn tất và đóng async generator rõ ràng trước khi teardown.
 - Adapter/egress preflight trước dispatch, không giữ quota cho request chưa gửi.
 - Recheck OAuth health dưới refresh lease, không replay grant không rõ kết quả.
 - Chờ blocking HTTP kết thúc trước khi giải phóng proxy lúc cancellation.
@@ -57,6 +59,9 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
   một Google GenAI deprecation warning trên Python 3.14.
 - Sau private publish: local suite tăng thành 449 tests, gồm ba regression cho
   cấu hình PostgreSQL của browser test; Chrome gateway và build vẫn qua.
+- Bản sửa cleanup tiếp theo: 450 tests qua trên Python 3.10 và 3.14, 12 Node,
+  hai Chrome E2E và build qua. Regression đảm bảo mọi concurrent close chờ cùng
+  accounting/lease cleanup; không báo closed trước khi thực sự hoàn tất.
 - Review độc lập có 10 Important findings; implementer tái hiện và sửa bằng
   regression tests. Không tuyên bố reviewer đã duyệt lại sau fix.
 - Gateway chưa live-verify provider/Kiot/Codex inference bằng key thật; chưa

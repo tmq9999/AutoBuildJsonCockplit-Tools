@@ -1,5 +1,21 @@
 # Implementation status
 
+## Private repository and portability follow-up — 2026-09-24
+
+Merged gateway code into the primary checkout, created default branch `main`,
+and pushed to private `tmq9999/AutoBuildJsonCockplit-Tools`. README/CHANGELOG now
+cover onboarding and known limits. Gitleaks scanned tracked Git history; two exact
+false-positive fingerprints are public dependency commit SHAs, not credentials.
+Ignored real account/token/config files were not uploaded.
+
+Continued after publication: corrected GitHub Actions PostgreSQL healthcheck
+quoting, made browser test PostgreSQL configuration portable, and reproduced/fixed
+a concurrent cleanup race surfaced on Python 3.10 CI. A second close now awaits
+the existing cleanup task; stream generators are explicitly closed on disconnect.
+Local full suites: 450 passed on Python 3.10 and 3.14; 12 Node tests and both Chrome
+E2E passed; Ruff/build passed. GitHub CI status is authoritative for each pushed SHA.
+No running OAuth service was restarted and no live provider keys were used.
+
 ## Current API gateway handoff — 2026-09-24
 
 Approved Superdesign v3 implemented locally at `/service/` on the private admin

@@ -117,3 +117,39 @@ async def test_asgi_disconnect_cancels_real_prepared_call(pg_db):
         await GatewayStreamResponse(prepared, codec)({"type": "http"}, receive, send)
         assert prepared.closed and prepared.stream.response.raw.is_closed
         assert not any(b"[DONE]" in item.get("body", b"") for item in output)
+
+
+async def test_concurrent_close_waits_for_accounting_and_lease_cleanup(pg_db, monkeypatch):
+    import asyncio
+    from sqlalchemy import text
+    from autobuild_json.gateway.identity.policy import Principal
+    from autobuild_json.gateway.protocols.openai_chat import OpenAIChatCodec
+
+    async with gateway_environment(pg_db) as env:
+        async with pg_db.sessions() as session:
+            row = (await session.execute(text("SELECT customer_id,version FROM api_keys WHERE id=:id"),
+                                         {"id": env.key_id})).one()
+        prepared = await env.engine.prepare(Principal(row[0], env.key_id, row[1]),
+                                            OpenAIChatCodec().decode(BODY, {}), env.engine.meta(BODY))
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = env.ledger.mark_pending
+        calls = []
+
+        async def delayed(*args):
+            calls.append(args[0])
+            entered.set()
+            await release.wait()
+            await original(*args)
+
+        monkeypatch.setattr(env.ledger, "mark_pending", delayed)
+        first = asyncio.create_task(prepared.close())
+        await entered.wait()
+        second = asyncio.create_task(prepared.close())
+        await asyncio.sleep(0)
+        returned_early = second.done()
+        closed_early = prepared.closed
+        release.set()
+        await asyncio.gather(first, second)
+        assert not returned_early and not closed_early
+        assert prepared.closed and prepared.stream.response.raw.is_closed
+        assert len(calls) == 1

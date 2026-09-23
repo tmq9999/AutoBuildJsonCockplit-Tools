@@ -195,7 +195,7 @@ loopback, port tường minh, tên `abgw_test_<32 ký tự hex>`, role được 
 Không dùng database thật. Chrome dùng `/usr/bin/google-chrome` hoặc `CHROME_PATH`.
 Test không gọi account/model thật; provider I/O dùng dữ liệu tổng hợp.
 
-Checkpoint local: **449 Python tests, 12 Node tests, hai Chrome E2E**, lint/build qua.
+Checkpoint local: **450 Python tests trên cả 3.10/3.14, 12 Node tests, hai Chrome E2E**, lint/build qua.
 Xem [compatibility](docs/gateway-compatibility.md) và
 [review resolution](docs/gateway-review-resolution.md). CI kiểm tra Python 3.10/3.14;
 test local không thay thế trạng thái CI hiện tại.
