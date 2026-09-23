@@ -10,7 +10,7 @@ class GatewayStreamResponse(Response):
     media_type = "text/event-stream"
 
     def __init__(self, prepared, codec):
-        super().__init__(content=None, status_code=200, media_type=self.media_type,
+        super().__init__(content=None, status_code=200, media_type=getattr(codec, "media_type", self.media_type),
                          headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
         self.raw_headers = [(key, value) for key, value in self.raw_headers if key != b"content-length"]
         self.prepared, self.codec = prepared, codec

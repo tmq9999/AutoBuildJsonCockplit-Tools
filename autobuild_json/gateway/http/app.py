@@ -10,6 +10,7 @@ from .auth import client_secret
 from .boundary import GatewayBoundary
 from .streaming import GatewayStreamResponse
 from .gemini_routes import gemini_router
+from .ollama_routes import ollama_router
 
 
 def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
@@ -21,6 +22,8 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
         headers = {"Cache-Control": "no-store"}
         if error.retry_after is not None:
             headers["Retry-After"] = str(error.retry_after)
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"error": error.code}, status_code=error.status, headers=headers)
         if request.url.path.startswith("/v1beta/"):
             status = {400: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED", 404: "NOT_FOUND",
                       429: "RESOURCE_EXHAUSTED", 503: "UNAVAILABLE"}.get(error.status, "INTERNAL")
@@ -110,4 +113,5 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
         return {"input_tokens": await engine.count_tokens(principal, decoded, engine.meta(body, protocol="anthropic"))}
 
     app.include_router(gemini_router(identity, catalog, engine))
+    app.include_router(ollama_router(identity, catalog, engine))
     return app

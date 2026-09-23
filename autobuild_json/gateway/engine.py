@@ -17,6 +17,7 @@ from .protocols.common import EventCollector
 from .providers.openai import OpenAIAdapter
 from .providers.anthropic import AnthropicAdapter
 from .providers.gemini import GeminiAdapter
+from .providers.ollama import OllamaAdapter
 from .proxy.config import ProxySelection
 from .secrets import Ciphertext
 from .routing.continuations import ContinuationStore, ContinuationScope, ContinuationBinding
@@ -41,7 +42,8 @@ class Engine:
         self.budgets = BudgetService(db)
         self.continuations = ContinuationStore(db, vault)
         self.adapters = {"openai_compatible": OpenAIAdapter(transport, self.credential),
-                         "anthropic": AnthropicAdapter(transport, self.credential), "gemini": GeminiAdapter(transport, self.credential)}
+                         "anthropic": AnthropicAdapter(transport, self.credential), "gemini": GeminiAdapter(transport, self.credential),
+                         "ollama": OllamaAdapter(transport, self.credential)}
 
     async def credential(self, route):
         async with self.db.sessions() as session:
