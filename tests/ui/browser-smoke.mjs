@@ -37,6 +37,8 @@ try {
   const errors = [], external = [];
   let releaseRestore;
   const restoreGate = new Promise(resolve => { releaseRestore=resolve; });
+  let restoreDone;
+  const restoreSettled = new Promise(resolve => { restoreDone=resolve; });
   let delayedRestore = false;
   page.on('pageerror', error => errors.push(error.message));
   await context.route('**/*', route => {
@@ -48,7 +50,10 @@ try {
     if (route.request().method()==='GET' && !delayedRestore) {
       delayedRestore=true;
       await restoreGate;
-      return route.fulfill({status:401,contentType:'application/json',body:'{"error":"UNAUTHORIZED"}'}).catch(()=>{});
+      try { await route.fulfill({status:401,contentType:'application/json',body:'{"error":"UNAUTHORIZED"}'}); }
+      catch { /* The application intentionally aborts stale session lookup. */ }
+      finally { restoreDone(); }
+      return;
     }
     return route.continue();
   });
@@ -58,6 +63,7 @@ try {
   await page.locator('#login-btn').click();
   await page.locator('#dashboard').waitFor({state:'visible'});
   releaseRestore();
+  await restoreSettled;
   await page.waitForTimeout(150);
   assert.ok(await page.locator('#dashboard').isVisible(), 'A stale session-restore response must not undo a new login');
   await page.unroute(origin+'/api/session');

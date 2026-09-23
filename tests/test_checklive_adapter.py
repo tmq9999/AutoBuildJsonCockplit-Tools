@@ -94,6 +94,9 @@ def test_real_sentinel_http_rejection_keeps_precise_stage(settings, context, sta
     result = processor(parse_accounts("u@example.com|p|JBSWY3DPEHPK3PXP").accounts[0], None, context)
     assert result.error.code == code
     assert result.error.stage == "sentinel"
+    assert result.error.details["http_status"] == status
+    assert result.error.details["method"] == "POST"
+    assert result.error.details["endpoint"] == "/backend-api/sentinel/req"
     assert len(raw.requests) == 5
     assert "must-not-leak-response" not in str(result.error)
     assert raw.closed
@@ -141,3 +144,27 @@ def test_actual_captcha_page_still_stops_before_password(settings, context):
     assert result.error.stage == "email"
     assert len(raw.requests) == 6
     assert raw.closed
+
+
+def test_email_redirect_details_survive_processor_runner_and_export(settings):
+    from autobuild_json.results import RunStore
+    from autobuild_json.runner import Runner
+    module = load_checklive(Path(".deps/Check-Account-ChatGPT"))
+    responses = sequence()
+    responses[3] = Response(status=302, location="/email-verification?private=do-not-export")
+    raw = RawSession(responses)
+    processor = CheckliveProcessor(settings, OAuthSessions(settings), None, module=module, raw_factory=lambda:raw)
+    store = RunStore(settings.data_dir / "runs")
+    runner = Runner(store, processor)
+    try:
+        job = runner.start(parse_accounts("u@example.com|p|JBSWY3DPEHPK3PXP"), [], "sequential", 1, 180)
+        runner.wait(job, 3)
+        row = json.loads(store.export(job, "errors"))[0]
+        assert row["stage"] == "authorize" and row["code"] == "EMAIL_OTP_REQUIRED"
+        assert row["details"] == {"host":"auth.openai.com", "endpoint":"/oauth/authorize" if
+            urlsplit(raw.requests[3]["url"]).path == "/oauth/authorize" else "/api/accounts/authorize",
+            "method":"GET", "http_status":302, "redirect_path":"/email-verification", "evidence":"redirect"}
+        assert runner.get(job)["rows"][0]["details"] == row["details"]
+        assert "do-not-export" not in repr(row)
+    finally:
+        runner.close()

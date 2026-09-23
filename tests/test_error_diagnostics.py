@@ -74,3 +74,19 @@ def test_transport_errors_have_actual_type_and_not_raw_exception(context, except
     assert result.value.details["method"] == "GET"
     assert result.value.details.get("curl_code") == curl_code
     assert "private" not in str(result.value) and "secret" not in repr(result.value.details)
+
+
+def test_runner_preserves_details_of_raised_flow_error(tmp_path):
+    from autobuild_json.runner import Runner
+    details = {"http_status":503, "method":"GET", "host":"chatgpt.com", "endpoint":"/api/auth/providers"}
+    def processor(account, proxy, context):
+        raise FlowError("HTTP_ERROR","providers",details=details)
+    store = RunStore(tmp_path)
+    runner = Runner(store,processor)
+    try:
+        job = runner.start(parse_accounts("u@example.com|p|JBSWY3DPEHPK3PXP"),[],"sequential",1,180)
+        runner.wait(job,3)
+        assert runner.get(job)["rows"][0]["details"] == details
+        assert json.loads(store.export(job,"errors"))[0]["details"] == details
+    finally:
+        runner.close()

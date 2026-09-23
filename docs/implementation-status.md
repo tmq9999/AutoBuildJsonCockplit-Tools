@@ -58,6 +58,18 @@
   all three tokens saved privately in that run's `success.json`.
 - No pasted browser cookies, CSRF token, device ID or logging ID were reused. A
   homepage request appeared only later as the server's post-login callback redirect.
+- Diagnostics hardening: error exports/UI now show only allowlisted HTTP status,
+  method, host/path, curl code, provider code/page/redirect and candidate counts.
+  Raw response bodies, query strings, cookies, passwords and exception messages are
+  discarded. Email OTP rows 8/10 now show observed HTTP 302 `/email-verification`
+  and explicitly state that TOTP was not checked; workspace errors show candidate
+  count and distinguish zero candidates from multiple candidates.
+- Workspace consistency fix: UUIDs from HTML/cookies are normalized and a cookie
+  selected workspace is used only when it is consistent with available choices.
+  Row 20 was live-verified again after this fix: success, complete 10-stage flow,
+  token exchange 200/JWKS 200; saved job `5bc612ba-64a4-4fab-8ca0-65d2807696d4`.
+- Final diagnostics/selection regression suite: 152 Python tests, 8 Node tests,
+  Chrome acceptance; Ruff and build checks pass.
 
 ### Remaining limits
 

@@ -41,9 +41,12 @@ def test_invalid_identity(settings, signed_tokens, overrides):
     with pytest.raises(FlowError):
         TokenService().complete(grant(settings), FakeTransport(Response(make(**overrides)), Response(jwks)))
 
-def test_exchange_not_retried(settings):
-    transport = FakeTransport(FlowError("NETWORK_ERROR"))
+@pytest.mark.parametrize("code", ["NETWORK_ERROR", "REQUEST_TIMEOUT"])
+def test_exchange_not_retried(settings, code):
+    details = {"curl_code":28, "endpoint":"/oauth/token", "method":"POST", "host":"auth.openai.com"}
+    transport = FakeTransport(FlowError(code, details=details))
     with pytest.raises(FlowError) as error:
         TokenService().complete(grant(settings), transport)
     assert error.value.code == "TOKEN_EXCHANGE_UNCERTAIN"
+    assert error.value.details == details
     assert len(transport.requests) == 1
