@@ -131,6 +131,8 @@ class RunStore:
             raise ValueError("Invalid batch status")
         with self._lock:
             data = copy.deepcopy(self._read(job_id))
+            if data["status"] in {"completed", "cancelled", "error"} and status in {"queued", "running", "stopping"}:
+                return
             data["status"] = status
             data["batch_error"] = {"code":error.code, "reason":error.reason} if error else None
             self._save(data)

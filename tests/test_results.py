@@ -66,3 +66,11 @@ def test_concurrent_updates_not_lost(tmp_path):
     with ThreadPoolExecutor(8) as pool:
         list(pool.map(update, report.accounts))
     assert store.snapshot(job)["counts"]["success"] == 20
+
+
+def test_late_stop_never_reopens_completed_batch(tmp_path, report):
+    store = RunStore(tmp_path)
+    job = store.create(report)
+    store.set_batch(job, "completed")
+    store.set_batch(job, "stopping")
+    assert store.snapshot(job)["status"] == "completed"
