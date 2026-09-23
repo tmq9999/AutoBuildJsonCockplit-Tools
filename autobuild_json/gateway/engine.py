@@ -10,11 +10,12 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 
 from .errors import GatewayError, UpstreamRejected
-from .metering.records import Admission, Bounds
+from .metering.records import Admission, Bounds, Usage
 from .metering.budgets import BudgetService
 from .metering.costs import estimate_cost
 from .protocols.common import EventCollector
 from .providers.openai import OpenAIAdapter
+from .providers.anthropic import AnthropicAdapter
 from .proxy.config import ProxySelection
 from .secrets import Ciphertext
 from .routing.continuations import ContinuationStore, ContinuationScope, ContinuationBinding
@@ -38,7 +39,8 @@ class Engine:
         self.proxy_resolver = proxy_resolver
         self.budgets = BudgetService(db)
         self.continuations = ContinuationStore(db, vault)
-        self.adapters = {"openai_compatible": OpenAIAdapter(transport, self.credential)}
+        self.adapters = {"openai_compatible": OpenAIAdapter(transport, self.credential),
+                         "anthropic": AnthropicAdapter(transport, self.credential)}
 
     async def credential(self, route):
         async with self.db.sessions() as session:
@@ -58,6 +60,36 @@ class Engine:
             payload = hmac.new(self.digest_key, b"abgw:payload:"+json.dumps(body, sort_keys=True,
                                separators=(",", ":")).encode(), hashlib.sha256).digest()
         return RequestMeta(uuid4(), now, now+timedelta(seconds=180), claim, payload, protocol)
+
+    async def count_tokens(self, principal, request, meta):
+        routes = await self.catalog.candidates(principal, request)
+        route = next((r for r in routes if hasattr(self.adapters.get(r.adapter), "count")), None)
+        if route is None:
+            raise GatewayError("unsupported_feature")
+        if route.budget_id is not None:
+            # A provider charging for counting needs an explicit cost policy.
+            raise GatewayError("unsupported_feature")
+        await self.ledger.reserve(Admission(meta.request_id, principal, route.public_model_id, Bounds(0, 0), 0, 0,
+                                           meta.deadline, protocol=meta.protocol))
+        selection = ProxySelection("direct")
+        dispatched = False
+        try:
+            if route.proxy_profile_id is not None:
+                if self.proxy_resolver is None:
+                    raise GatewayError("proxy_not_ready", 503)
+                selection = await self.proxy_resolver(route.proxy_profile_id)
+            async with self.proxies.acquire(selection, meta.request_id, meta.deadline) as lease:
+                await self.ledger.mark_dispatched(meta.request_id, uuid4())
+                dispatched = True
+                count = await self.adapters[route.adapter].count(request, route, lease)
+                await self.ledger.settle(meta.request_id, Usage(0, 0))
+                return count
+        except BaseException:
+            if dispatched:
+                await self.ledger.mark_pending(meta.request_id, "interrupted")
+            else:
+                await self.ledger.release_unspent(meta.request_id, "not_dispatched")
+            raise
 
     async def prepare(self, principal, request, meta):
         routes = await self.catalog.candidates(principal, request)
