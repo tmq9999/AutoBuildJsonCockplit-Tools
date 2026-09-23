@@ -4,6 +4,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ..errors import GatewayError
 from ..protocols.openai_chat import OpenAIChatCodec
+from ..protocols.openai_responses import ResponsesCodec
 from .auth import client_secret
 from .boundary import GatewayBoundary
 from .streaming import GatewayStreamResponse
@@ -42,6 +43,21 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
         decoded = codec.decode(body, {})
         meta = engine.meta(body, request.headers.get("idempotency-key"))
         prepared = await engine.prepare(principal, decoded, meta)
+        codec.response_id = prepared.collector.id
+        if decoded.stream:
+            return GatewayStreamResponse(prepared, codec)
+        return JSONResponse(codec.encode_result(await prepared.collect()), headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/responses")
+    async def responses(request: Request):
+        principal = await identity.authenticate(client_secret(request), "openai")
+        try:
+            body = await request.json()
+        except ValueError:
+            raise GatewayError("invalid_request") from None
+        codec = ResponsesCodec()
+        decoded = codec.decode(body, {})
+        prepared = await engine.prepare(principal, decoded, engine.meta(body, request.headers.get("idempotency-key")))
         codec.response_id = prepared.collector.id
         if decoded.stream:
             return GatewayStreamResponse(prepared, codec)

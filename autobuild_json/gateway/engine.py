@@ -17,6 +17,7 @@ from .protocols.common import EventCollector
 from .providers.openai import OpenAIAdapter
 from .proxy.config import ProxySelection
 from .secrets import Ciphertext
+from .routing.continuations import ContinuationStore, ContinuationScope, ContinuationBinding
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class Engine:
         self.digest_key = digest_key
         self.proxy_resolver = proxy_resolver
         self.budgets = BudgetService(db)
+        self.continuations = ContinuationStore(db, vault)
         self.adapters = {"openai_compatible": OpenAIAdapter(transport, self.credential)}
 
     async def credential(self, route):
@@ -59,6 +61,13 @@ class Engine:
 
     async def prepare(self, principal, request, meta):
         routes = await self.catalog.candidates(principal, request)
+        scope = ContinuationScope(principal.customer_id, principal.key_id, routes[0].public_model_id)
+        if request.continuation:
+            binding = await self.continuations.resolve(request.continuation, scope)
+            routes = [route for route in routes if route.binding_id == binding.route_id and route.credential_id == binding.credential_id]
+            if not routes:
+                raise GatewayError("invalid_state")
+            request = request.model_copy(update={"continuation": binding.upstream_id})
         route = routes[0]
         if route.adapter not in self.adapters:
             raise GatewayError("upstream_unavailable", 503)
@@ -116,7 +125,7 @@ class Engine:
                     if not exc.safe_retry or number == 1 or len(routes) < 2 or routes[1].provider_id == selected.provider_id:
                         raise
                     continue
-                return PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt)
+                return PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt, scope)
             raise GatewayError("upstream_unavailable", 503)
         except BaseException:
             try:
@@ -132,10 +141,11 @@ class Engine:
 
 
 class PreparedCall:
-    def __init__(self, engine, stack, stream, request_id, route, attempt_id, budget_attempt=None):
+    def __init__(self, engine, stack, stream, request_id, route, attempt_id, budget_attempt=None, scope=None):
         self.engine, self.stack, self.stream = engine, stack, stream
         self.request_id, self.route, self.attempt_id = request_id, route, attempt_id
         self.budget_attempt = budget_attempt
+        self.scope = scope
         self.collector = EventCollector("chatcmpl-"+request_id.hex, route.public_model_id)
         self.closed = self.settled = self.started = False
 
@@ -154,6 +164,14 @@ class PreparedCall:
         self.started = True
         try:
             async for event in self.stream.events:
+                if event.kind == "started" and event.response_id is not None:
+                    handle = self.collector.id
+                    if "continuation" in self.route.capabilities:
+                        handle = await self.engine.continuations.issue(self.scope, ContinuationBinding(
+                            self.route.binding_id, self.route.credential_id, event.response_id,
+                            datetime.now(timezone.utc)+timedelta(hours=24)))
+                    self.collector.id = handle
+                    event = event.model_copy(update={"response_id": handle})
                 self.collector.feed(event)
                 if event.kind == "finished":
                     usage = self.collector.usage

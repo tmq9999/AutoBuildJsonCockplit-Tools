@@ -188,7 +188,7 @@ class Catalog:
                 routes.append(RouteSnapshot(row["binding_id"], row["provider_id"], row["credential_id"], model_id,
                     binding["upstream_model"], provider.adapter, provider.root, provider.auth_mode, row["version"], caps,
                     Bounds(binding["input_bound"], binding["output_bound"]), provider.proxy_profile_id, provider.budget_id,
-                    binding["priority"], model.input_micro, model.output_micro, provider.timeout, provider.cost_schedule))
+                    binding["priority"], model.input_micro, model.output_micro, provider.timeout, provider.cost_schedule, provider.wire_api))
             if not routes:
                 raise GatewayError("unsupported_feature" if mismatch else "upstream_unavailable", 400 if mismatch else 503)
             priority = min(route.priority for route in routes)

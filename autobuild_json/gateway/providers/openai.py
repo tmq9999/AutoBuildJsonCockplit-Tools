@@ -8,6 +8,8 @@ from ..errors import GatewayError, UpstreamRejected
 from ..metering.records import Usage
 from ..protocols.frames import SSEDecoder
 from ..protocols.openai_chat import OpenAIChatCodec
+from ..protocols.openai_responses import ResponsesCodec
+from .responses_events import responses_events
 from ..transport.http import OutboundRequest
 
 
@@ -101,16 +103,17 @@ class OpenAIAdapter:
     @asynccontextmanager
     async def open(self, request, route, lease):
         request.validate_provider("openai_compatible")
-        body = OpenAIChatCodec().upstream_body(request, route.upstream_model)
+        native = getattr(route, "wire_api", "chat") == "responses"
+        body = (ResponsesCodec() if native else OpenAIChatCodec()).upstream_body(request, route.upstream_model)
         secret = await self.credential_resolver(route)
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
         auth_mode = getattr(route, "auth_mode", "bearer")
         auth = None if auth_mode == "none" else ("Authorization", "Bearer "+secret)
-        call = OutboundRequest("POST", "chat/completions", body, auth_header=auth, deadline=time.monotonic()+remaining)
+        call = OutboundRequest("POST", "responses" if native else "chat/completions", body, auth_header=auth, deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status != 200:
                 if response.status in {400, 401, 403, 404, 422, 429}:
                     retry = response.headers.get("retry-after", "")
                     raise UpstreamRejected(response.status, min(int(retry), 86400) if retry.isdigit() else None)
                 raise GatewayError("rate_limited" if response.status == 429 else "upstream_error", 502, "upstream")
-            yield ProviderStream(response, chat_events(response))
+            yield ProviderStream(response, responses_events(response) if native else chat_events(response))

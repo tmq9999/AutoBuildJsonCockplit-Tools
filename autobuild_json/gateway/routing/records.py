@@ -16,6 +16,7 @@ class ProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     name: str = Field(min_length=1, max_length=200)
     adapter: Adapter
+    wire_api: Literal["chat", "responses"] = "chat"
     root: str
     enabled: bool = True
     auth_mode: Literal["bearer", "x-api-key", "x-goog-api-key", "none", "oauth"] = "bearer"
@@ -89,3 +90,4 @@ class RouteSnapshot:
     output_micro: int
     timeout: int
     cost_schedule: CostSchedule | None = None
+    wire_api: str = "chat"

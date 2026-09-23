@@ -103,6 +103,7 @@ class InferenceEvent(StrictRecord):
     finish_reason: FinishReason | None = None
     usage: Usage | None = None
     error_code: str | None = None
+    response_id: str | None = Field(default=None, repr=False)
 
 
 class InferenceResult(StrictRecord):
