@@ -28,6 +28,8 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ### Fixed
 
+- GitHub Actions: quote healthcheck PostgreSQL đúng cho Docker arguments; hai
+  Python matrix jobs chạy độc lập để giữ đầy đủ kết quả khi một job lỗi.
 - Adapter/egress preflight trước dispatch, không giữ quota cho request chưa gửi.
 - Recheck OAuth health dưới refresh lease, không replay grant không rõ kết quả.
 - Chờ blocking HTTP kết thúc trước khi giải phóng proxy lúc cancellation.

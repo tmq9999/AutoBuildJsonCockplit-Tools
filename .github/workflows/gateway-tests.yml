@@ -4,6 +4,7 @@ jobs:
   python:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python: ['3.10', '3.14']
     services:
@@ -15,7 +16,7 @@ jobs:
           POSTGRES_PASSWORD: synthetic-ci-only
         ports: ['5432:5432']
         options: >-
-          --health-cmd 'pg_isready -U abgw_test'
+          --health-cmd "pg_isready -U abgw_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       AUTOBUILD_TEST_DATABASE_URL: postgresql+psycopg://abgw_test:synthetic-ci-only@127.0.0.1:5432/abgw_test_00000000000000000000000000000000
