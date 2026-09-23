@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 import pytest
+from curl_cffi.requests import Cookies
 from autobuild_json.checklive_adapter import AuthTransport, CheckliveProcessor, guarded_auth, load_checklive
 from autobuild_json.errors import FlowError
 from autobuild_json.input_parser import parse_accounts
@@ -13,7 +14,7 @@ from tests.fakes import Response
 class RawSession:
     def __init__(self, responses):
         self.responses = responses
-        self.cookies = {}
+        self.cookies = Cookies()
         self.requests = []
         self.closed = False
     def request(self, **kwargs):
@@ -29,7 +30,9 @@ class RawSession:
         self.closed = True
 
 def sequence(password_payload=None):
-    return [Response(), Response({"csrfToken":"fake-csrf"}), Response({"url":"https://auth.openai.com/oauth/authorize?state=login"}), Response(),
+    providers = {"openai":{"id":"openai", "name":"openai", "type":"oauth",
+        "signinUrl":"https://chatgpt.com/api/auth/signin/openai", "callbackUrl":"https://chatgpt.com/api/auth/callback/openai"}}
+    return [Response(providers), Response({"csrfToken":"fake-csrf"}), Response({"url":"https://auth.openai.com/api/accounts/authorize?state=login"}), Response(),
         Response({"token":"fake-sentinel"}), Response({"page":{"type":"login_password"}}),
         Response({"token":"fake-sentinel"}), Response(password_payload or {"continue_url":"https://chatgpt.com/"}), Response()]
 
@@ -43,6 +46,8 @@ def test_real_upstream_methods_through_adapter(settings, context):
     assert raw.closed
     assert any(r.get("json") == {"password":"private-pass"} for r in raw.requests)
     assert not any(urlsplit(r["url"]).hostname == "localhost" for r in raw.requests)
+    assert [urlsplit(r["url"]).path for r in raw.requests[:3]] == [
+        "/api/auth/providers", "/api/auth/csrf", "/api/auth/signin/openai"]
 
 @pytest.mark.parametrize("payload,status", [({"page":{"type":"phone_verification"}},"phone_verify"), ({"page":{"type":"email_otp_verification"}},"error")])
 def test_detects_phone_and_email(settings, context, payload, status):

@@ -4,9 +4,20 @@ Tool local dùng HTTP để đăng nhập tài khoản được phép sử dụn
 và xuất JSON tương thích mẫu của Auto-Oauth-Codex-9Router. Không cần chạy 9router.
 
 Giao diện tiếng Việt đã ghép vào FastAPI tại `/`, theo bản Superdesign đã duyệt.
-Đã thử đăng nhập thật sau bản sửa Sentinel: tới TOTP nhưng phản hồi báo tài khoản
-bị vô hiệu hóa; chưa xác nhận OAuth thành công. Endpoint đăng nhập nội bộ có thể thay đổi;
+Đã thử đăng nhập thật sau bản sửa Sentinel: 1 tài khoản đã trả bộ token OAuth hợp lệ
+và batch dừng ngay ở thành công đầu tiên. Endpoint đăng nhập nội bộ có thể thay đổi;
 test giả lập không bảo đảm tất cả tài khoản sẽ đăng nhập thành công.
+
+Luồng khởi tạo đã cập nhật theo capture: `GET /api/auth/providers` →
+`GET /api/auth/csrf` → `POST /api/auth/signin/openai`. Không tải trang chủ trước
+khi bắt đầu. `auth_session_logging_id` và `ext-oai-did` là hai UUID v4 mới cho mỗi
+attempt; giữ cùng cookie jar qua ba request, không dùng cookie từ capture.
+Signin có `prompt=login`, `screen_hint=login_or_signup`, `login_hint`, hai UUID;
+form body được URL-encode đúng chuẩn. Request trang chủ vẫn có thể xuất hiện
+**sau** MFA nếu callback của server redirect về `/`.
+
+Đã kiểm chứng một lần OAuth thật với luồng này và nhận đủ ba token. Việc bỏ request
+khởi tạo trang chủ không bảo đảm mọi request mạng khác sẽ hết timeout.
 
 ## Cài đặt
 

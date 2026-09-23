@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 
 from .challenges import continuation, inspect_response
 from .errors import FlowError
+from .login_bootstrap import initialize_login
 from .models import RunResult
 from .navigation import OAuthNavigator
 from .oauth import ISSUER
@@ -54,7 +55,7 @@ def load_checklive(path: Path):
                 return original_config(*args, **kwargs)
 
             module.sentinel._config = bounded_config
-            required = ("visit_homepage", "get_csrf_token", "get_auth_url", "init_oauth", "authorize_continue", "verify_password", "mfa_issue_challenge", "mfa_verify")
+            required = ("_common_headers", "init_oauth", "authorize_continue", "verify_password", "mfa_issue_challenge", "mfa_verify")
             if not all(callable(getattr(module.AuthSession, name, None)) for name in required):
                 raise ValueError()
             return module
@@ -136,9 +137,13 @@ class CheckliveProcessor:
                 transport = AuthTransport(proxy, context, self.raw_factory() if self.raw_factory else None)
                 auth = guarded_auth(self.module, transport)
                 oauth = self.oauth_sessions.create(account.email, proxy)
-                auth.visit_homepage()
-                csrf = auth.get_csrf_token()
-                login_url = auth.get_auth_url(account.email, csrf)
+                def bootstrap_stage(value):
+                    nonlocal stage
+                    stage = value
+                    context.on_stage(stage, attempt)
+                login_url = initialize_login(auth, account.email, bootstrap_stage)
+                stage = "authorize"
+                context.on_stage(stage, attempt)
                 auth.init_oauth(login_url)
                 stage = "email"
                 context.on_stage(stage, attempt)

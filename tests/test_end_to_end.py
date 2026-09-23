@@ -8,6 +8,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from curl_cffi.requests import Cookies
 
 from autobuild_json.api import create_app
 from autobuild_json.checklive_adapter import CheckliveProcessor, load_checklive
@@ -29,15 +30,19 @@ def test_full_auth_totp_token_pipeline(settings, mfa_status, expected):
     token = jwt.encode(claims, key, algorithm="RS256", headers={"kid":"test-key"})
     calls, closed = [], []
     class Raw:
-        cookies = {}
+        def __init__(self):
+            self.cookies = Cookies()
         def request(self, **kwargs):
             url, body = kwargs["url"], kwargs.get("json", {})
             path = urlsplit(url).path
             calls.append((path, body))
-            if path == "/api/auth/csrf":
+            if path == "/api/auth/providers":
+                response = Response({"openai":{"id":"openai", "type":"oauth", "name":"openai",
+                    "signinUrl":"https://chatgpt.com/api/auth/signin/openai", "callbackUrl":"https://chatgpt.com/api/auth/callback/openai"}})
+            elif path == "/api/auth/csrf":
                 response = Response({"csrfToken":"fake"})
             elif path == "/api/auth/signin/openai":
-                response = Response({"url":"https://auth.openai.com/log-in"})
+                response = Response({"url":"https://auth.openai.com/api/accounts/authorize"})
             elif path == "/backend-api/sentinel/req":
                 response = Response({"token":"fake-sentinel"})
             elif path == "/api/accounts/authorize/continue":
@@ -55,7 +60,7 @@ def test_full_auth_totp_token_pipeline(settings, mfa_status, expected):
             elif path == "/.well-known/jwks.json":
                 response = Response({"keys":[jwk]})
             else:
-                assert path in {"/", "/log-in", "/api/accounts/mfa/issue_challenge"}
+                assert path in {"/", "/api/accounts/authorize", "/api/accounts/mfa/issue_challenge"}
                 response = Response()
             kwargs["content_callback"](response.content)
             return response
@@ -87,3 +92,4 @@ def test_full_auth_totp_token_pipeline(settings, mfa_status, expected):
             row = client.get(f"/api/jobs/{job}/exports/{kind}").json()[0]
             assert row["code"] == ("PHONE_VERIFY" if expected=="phone_verify" else "MFA_ERROR")
     assert len(closed) == 1
+    assert [path for path, _ in calls[:3]] == ["/api/auth/providers", "/api/auth/csrf", "/api/auth/signin/openai"]

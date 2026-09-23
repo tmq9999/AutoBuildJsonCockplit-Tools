@@ -9,6 +9,7 @@ MESSAGES = {
     "TIMEOUT": "Account deadline exceeded",
     "RATE_LIMITED": "Rate limited; try again later",
     "AUTH_BLOCKED": "Authentication blocked by provider",
+    "AUTH_BOOTSTRAP_ERROR": "Unexpected providers, CSRF or sign-in response",
     "ACTION_REQUIRED": "Additional verification requires manual action",
     "INVALID_STATE": "Invalid, expired or already consumed OAuth state",
     "OAUTH_DENIED": "OAuth authorization was denied",

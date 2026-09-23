@@ -1,11 +1,12 @@
 const STATUS = {queued:'Chờ',running:'Đang chạy',success:'Thành công',error:'Lỗi',phone_verify:'Phone number verify',cancelled:'Đã hủy'};
 const BATCH = {queued:'Đang chờ',running:'Đang chạy',stopping:'Đang dừng…',completed:'Đã xử lý xong',cancelled:'Đã dừng',error:'Batch gặp lỗi'};
-const STAGES = {queued:'Chờ',initialize:'Khởi tạo phiên HTTP',email:'Email',password:'Mật khẩu',totp:'TOTP 2FA',codex_oauth:'OAuth Codex',token_exchange:'Đổi token',complete:'Hoàn tất',authentication:'Xác thực',batch:'Batch',processing:'Xử lý'};
+const STAGES = {queued:'Chờ',initialize:'Khởi tạo phiên HTTP',providers:'Lấy auth provider',csrf:'Lấy CSRF',signin:'Khởi tạo đăng nhập',authorize:'Mở authorize',sentinel:'Sentinel',email:'Email',password:'Mật khẩu',totp:'TOTP 2FA',codex_oauth:'OAuth Codex',token_exchange:'Đổi token',complete:'Hoàn tất',authentication:'Xác thực',batch:'Batch',processing:'Xử lý'};
 const REASONS = {
   INVALID_CREDENTIALS:'Email hoặc mật khẩu không hợp lệ.', ACCOUNT_DEACTIVATED:'Tài khoản đã bị vô hiệu hóa.',
   MFA_ERROR:'Xác minh TOTP không thành công.', EMAIL_OTP_REQUIRED:'Cần xác minh mã qua email.', PHONE_VERIFY:'Phone number verify',
   PROXY_ERROR:'Không kết nối được proxy.', NETWORK_ERROR:'Lỗi kết nối mạng.', TIMEOUT:'Quá thời gian xử lý tài khoản.',
   RATE_LIMITED:'Nhà cung cấp giới hạn tần suất. Hãy thử lại sau.', AUTH_BLOCKED:'Nhà cung cấp chặn luồng đăng nhập.',
+  AUTH_BOOTSTRAP_ERROR:'Phản hồi providers, CSRF hoặc signin không đúng định dạng mong đợi.',
   ACTION_REQUIRED:'Cần thao tác xác minh bổ sung.', INVALID_STATE:'Phiên OAuth không hợp lệ, hết hạn hoặc đã dùng.',
   OAUTH_DENIED:'OAuth bị từ chối.', WORKSPACE_SELECTION_REQUIRED:'Cần chọn workspace thủ công.',
   TOKEN_EXCHANGE_ERROR:'Không đổi được mã OAuth.', TOKEN_EXCHANGE_UNCERTAIN:'Chưa rõ kết quả đổi token. Hãy tạo phiên OAuth mới.',
