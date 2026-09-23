@@ -6,6 +6,7 @@ SAFE_CODES = frozenset({
     "storage_unavailable", "usage_pending", "invalid_usage", "invalid_state", "duplicate_request",
     "invalid_keyring", "secret_unavailable", "reauth_required", "refresh_uncertain", "egress_denied",
     "payload_mismatch", "budget_exceeded",
+    "kiot_key_invalid", "kiot_unavailable", "kiot_allocation_uncertain",
 })
 SAFE_STAGES = frozenset({"auth", "policy", "storage", "quota", "proxy", "upstream", "stream", "request", "refresh"})
 
