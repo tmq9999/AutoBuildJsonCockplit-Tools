@@ -6,6 +6,7 @@ from decimal import Decimal, ROUND_CEILING
 import hashlib
 import hmac
 import json
+import time
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -96,9 +97,22 @@ class Engine:
                 selection = await self.proxy_resolver(route.proxy_profile_id)
             async with self.proxies.acquire(selection, meta.request_id, meta.deadline) as lease:
                 async with self.provider_limits.acquire(route,meta.deadline):
-                    await self.ledger.mark_dispatched(meta.request_id, uuid4())
+                    attempt = uuid4()
+                    await self.ledger.mark_dispatched(meta.request_id, attempt)
                     dispatched = True
-                    count = await self.adapters[route.adapter].count(request, route, lease)
+                    try:
+                        count = await self.adapters[route.adapter].count(request, route, lease)
+                    except UpstreamRejected as exc:
+                        received_at = time.monotonic()
+                        await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
+                        dispatched = False
+                        if exc.upstream_status == 429:
+                            await self.catalog.cooldown(route.provider_id, None,
+                                                        exc.retry_after if exc.retry_after is not None else 60,
+                                                        started_at=received_at)
+                            if exc.retry_after is not None:
+                                exc.retry_after = await self.catalog.retry_after(principal, request, binding_id=route.binding_id)
+                        raise
                     await self.ledger.settle(meta.request_id, Usage(0, 0))
                     return count
         except BaseException:
@@ -109,14 +123,18 @@ class Engine:
             raise
 
     async def prepare(self, principal, request, meta):
-        routes = await self.catalog.candidates(principal, request)
-        scope = ContinuationScope(principal.customer_id, principal.key_id, routes[0].public_model_id)
         if request.continuation:
+            model_id = await self.catalog.resolve_model(principal, request.model)
+            scope = ContinuationScope(principal.customer_id, principal.key_id, model_id)
             binding = await self.continuations.resolve(request.continuation, scope)
-            routes = [route for route in routes if route.binding_id == binding.route_id and route.credential_id == binding.credential_id]
+            routes = await self.catalog.candidates(principal, request, binding_id=binding.route_id)
+            routes = [route for route in routes if route.credential_id == binding.credential_id]
             if not routes:
                 raise GatewayError("invalid_state")
             request = request.model_copy(update={"continuation": binding.upstream_id})
+        else:
+            routes = await self.catalog.candidates(principal, request)
+            scope = ContinuationScope(principal.customer_id, principal.key_id, routes[0].public_model_id)
         route = routes[0]
         if route.adapter not in self.adapters:
             raise GatewayError("upstream_unavailable", 503)
@@ -136,6 +154,7 @@ class Engine:
         stack = AsyncExitStack()
         dispatched = False
         budget_attempt = None
+        hinted_providers = set()
         try:
             for number, selected in enumerate(routes[:2]):
                 validate_request(request,selected)
@@ -174,6 +193,9 @@ class Engine:
                 try:
                     stream = await stack.enter_async_context(self.adapters[selected.adapter].open(request, selected, lease))
                 except UpstreamRejected as exc:
+                    received_at = time.monotonic()
+                    if exc.upstream_status == 429 and exc.retry_after is not None:
+                        hinted_providers.add(selected.provider_id)
                     await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
                     dispatched = False
                     if budget_attempt is not None:
@@ -182,8 +204,19 @@ class Engine:
                     await stack.aclose()
                     stack = AsyncExitStack()
                     if exc.upstream_status == 429:
-                        await self.catalog.cooldown(selected.provider_id, None, exc.retry_after or 60)
+                        await self.catalog.cooldown(selected.provider_id, None,
+                                                    exc.retry_after if exc.retry_after is not None else 60,
+                                                    started_at=received_at)
                     if not exc.safe_retry or number == 1 or len(routes) < 2 or routes[1].provider_id == selected.provider_id:
+                        if exc.upstream_status == 429:
+                            # No promise for untried/unhinted providers. Re-read
+                            # local deadlines, including routes already cooling at
+                            # selection and longer concurrent cooldown updates.
+                            if {r.provider_id for r in routes} <= hinted_providers:
+                                exc.retry_after = await self.catalog.retry_after(
+                                    principal, request, binding_id=selected.binding_id if request.continuation else None)
+                            else:
+                                exc.retry_after = None
                         raise
                     continue
                 return PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt, scope)

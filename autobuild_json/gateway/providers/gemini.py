@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from ..contracts import InferenceEvent, Text, ToolCall
 from ..errors import GatewayError, UpstreamRejected
+from .retry import parse_retry_after
 from ..metering.records import Usage
 from ..protocols.gemini import GeminiCodec
 from ..protocols.frames import SSEDecoder
@@ -87,13 +88,15 @@ class GeminiAdapter:
         request.validate_provider("gemini")
         async with self.transport.open(route, lease.proxy, await self._call(request, route, lease, "streamGenerateContent")) as response:
             if response.status in {400, 401, 403, 404, 422, 429}:
-                raise UpstreamRejected(response.status)
+                raise UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
             if response.status != 200:
                 raise GatewayError("upstream_error", 502)
             yield ProviderStream(response, gemini_events(response))
 
     async def count(self, request, route, lease):
         async with self.transport.open(route, lease.proxy, await self._call(request, route, lease, "countTokens")) as response:
+            if response.status in {400, 401, 403, 404, 422, 429}:
+                raise UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
             if response.status != 200:
                 raise GatewayError("upstream_error", 502)
             payload = await response.read_json()

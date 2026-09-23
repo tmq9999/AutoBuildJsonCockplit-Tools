@@ -44,6 +44,29 @@ before claiming that support.
 
 ## Verification snapshot
 
+Rate-limit final local checkpoint: **549 Python tests on both 3.10 and 3.14**, 12
+Node tests, both Chrome E2E suites, Ruff/compileall/package build passed. Independent
+review and focused re-review found no remaining Critical/Important issues. One
+Minor error-ordering edge remains: an old continuation whose binding is reassigned
+to another credential may receive 429 while that replacement credential is cooling,
+rather than invalid_state. It is not dispatched on the replacement credential.
+
+Rate-limit follow-up: generation adapters and native Anthropic/Gemini counters
+preserve HTTP 429 and a bounded numeric/HTTP-date `Retry-After`. JSON error bodies
+follow the inbound protocol, including when a streaming request is rejected before
+opening its stream. Unknown/mixed/partially attempted fallback chains do not claim
+a retry time. A subsequent request blocked entirely by stored cooldowns receives
+the earliest local eligibility time instead. This is scheduling guidance, not a
+guarantee of upstream capacity. Automatic generation replay remains limited to
+one alternate provider after a definite 429 before generation; uncertain failures
+and started streams are not replayed. Structured/prose retry hints in provider
+response bodies are not parsed.
+
+Reference behavior was examined in FreeLLMAPI commit
+`1346b7d39ecbc71ac4c087fcdd36248ebdbde79b` (cooldown architecture and chain retry
+hints). The Python implementation and tests are independently written, with the
+gateway's own PostgreSQL accounting and conservative retry policy retained.
+
 2026-09-24 development run: 446 Python tests passed (including PostgreSQL, 40
 cross-protocol text cases and five SDK tests), 12 Node UI tests passed. One upstream google-genai Python
 deprecation warning remains. Existing Chrome OAuth browser smoke and Python package

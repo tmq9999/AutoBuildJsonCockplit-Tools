@@ -5,6 +5,7 @@ import time
 
 from ..contracts import InferenceEvent, Text, ToolCall
 from ..errors import GatewayError, UpstreamRejected
+from .retry import parse_retry_after
 from ..metering.records import Usage
 from ..protocols.anthropic import AnthropicCodec
 from ..protocols.frames import SSEDecoder
@@ -86,6 +87,8 @@ class AnthropicAdapter:
         call = OutboundRequest("POST", "messages/count_tokens", body, auth_header=auth_header(route.auth_mode,secret),
                               headers=(("anthropic-version", "2023-06-01"),), deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:
+            if response.status in {400, 401, 403, 404, 422, 429}:
+                raise UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
             if response.status != 200:
                 raise GatewayError("upstream_error", 502)
             payload = await response.read_json()
@@ -103,7 +106,7 @@ class AnthropicAdapter:
             headers=(("anthropic-version", "2023-06-01"),), deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status in {400, 401, 403, 404, 422, 429}:
-                raise UpstreamRejected(response.status)
+                raise UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
             if response.status != 200:
                 raise GatewayError("upstream_error", 502)
             yield ProviderStream(response, anthropic_events(response))

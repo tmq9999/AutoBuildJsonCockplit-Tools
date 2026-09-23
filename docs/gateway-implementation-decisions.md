@@ -2,6 +2,28 @@
 
 This is the exhaustive per-plan ruling record at the UI handoff; later entries supersede earlier checkpoint assumptions. Decisions are retained for review without including secrets or account data.
 
+## Rate-limit follow-up — 2026-09-24
+
+- User approved a bounded rate-limit/cooldown improvement after FreeLLMAPI
+  comparison; no UI/schema/provider expansion. TDD reproduced adapter, chain,
+  concurrent cooldown, count, cleanup-timing and continuation failures.
+- Keep provider-wide cooldown and at most one different-provider fallback. No
+  credential/IP rotation to evade limits, no ambiguous-generation/stream replay.
+  Read Retry-After only from bounded standard headers, not free-form error bodies.
+- Independent review identified cleanup restarting the deadline and omission of
+  previously cooled routes. Regression tests reproduce both and concurrent longer
+  cooldown; receipt-time deadlines and a fresh policy-scoped availability snapshot
+  fix them. Follow-up also reproduced/fixed cooled continuation binding handling.
+- Declined review suggestion to start cooldown after waiting for a database row
+  lock: Retry-After starts at rejection receipt, not transaction commit. Time spent
+  in cleanup/lock contention must count toward it; GREATEST preserves concurrent
+  later deadlines. Restarting at commit would prolong the provider-stated delay.
+- Retain known limits: synthetic provider/Kiot verification only, no production
+  restart/deployment or real account operations. These changes do not assert
+  additional resale rights or full vendor compatibility.
+
+## Original gateway implementation rulings
+
 - Ruling: “duyệt” approves the recommended Native execution and worktree setup in the written plan — no repeated approval prompt — cost if wrong: user can change execution method without losing work.
 
 - Ruling: Task 1's PostgreSQL setup may build official PostgreSQL 17 binaries in ignored worktree-local dependencies, without system installation — no Docker/PostgreSQL is installed — cost if wrong: local build time and disk only, no host service changes.

@@ -64,7 +64,7 @@ async def test_round_robin_and_provider_cooldown(pg_db):
     first, second = await catalog.candidates(principal, request), await catalog.candidates(principal, request)
     assert first[0].binding_id != second[0].binding_id
     await catalog.cooldown(provider, None, 60)
-    with pytest.raises(GatewayError, match="upstream_unavailable"):
+    with pytest.raises(GatewayError, match="rate_limited"):
         await catalog.candidates(principal, request)
 
 

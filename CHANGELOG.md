@@ -28,6 +28,21 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ### Fixed
 
+- Rate limit: thống nhất HTTP 429 và `Retry-After` (số giây/HTTP-date, tối đa 24h)
+  giữa 5 adapter generation và native Anthropic/Gemini token counting; không
+  truyền raw provider body/header ra client.
+- Chuỗi dự phòng trả hint sớm nhất chỉ khi mọi provider ứng viên đều đã bị
+  rate-limit và có hint hợp lệ; không lấy bừa giá trị của provider cuối. Giữ đúng
+  `Retry-After: 0`, không biến thành cooldown 60 giây.
+- PostgreSQL cooldown cập nhật tăng đơn điệu giữa các worker; chặn route snapshot
+  đã cũ trước dispatch. Toàn bộ tuyến hợp lệ đang cooldown trả 429 với lịch chờ
+  cục bộ, không gửi thêm upstream. Không thay đổi giới hạn tối đa hai attempt.
+- Token-count rejection được đánh dấu rejected và hoàn hold thay vì để usage
+  pending; quota/budget/proxy vẫn cleanup theo lifecycle hiện có.
+- Tính cooldown từ lúc nhận rejection, không cộng lại thời gian cleanup; hint
+  cuối phản ánh tuyến đã cooldown và cập nhật dài hơn từ worker khác. Responses
+  continuation dùng cooldown binding gốc, không bị đổi thành `invalid_state` chỉ
+  vì đang rate-limit; handle không hợp lệ vẫn bị từ chối.
 - GitHub Actions: quote healthcheck PostgreSQL đúng cho Docker arguments; hai
   Python matrix jobs chạy độc lập để giữ đầy đủ kết quả khi một job lỗi.
 - Browser test gateway tôn trọng `AUTOBUILD_TEST_POSTGRES_BIN` và database URL
@@ -55,6 +70,11 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ### Verification / limitations
 
+- Rate-limit follow-up: **549 tests** qua trên Python 3.10/3.14 (thêm 99 trường
+  hợp), 12 Node tests, hai Chrome E2E, Ruff/compile/build qua. Review độc lập và
+  focused re-review không còn Critical/Important. Còn một edge Minor về mã lỗi
+  của continuation cũ khi admin đổi credential của binding đang cooldown; không
+  dispatch sang credential mới. Một warning Google GenAI vẫn còn trên 3.14.
 - Local checkpoint: 446 Python, 12 Node, hai Chrome E2E, lint/compile/build qua;
   một Google GenAI deprecation warning trên Python 3.14.
 - Sau private publish: local suite tăng thành 449 tests, gồm ba regression cho

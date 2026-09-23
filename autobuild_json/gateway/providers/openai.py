@@ -5,6 +5,7 @@ import time
 
 from ..contracts import InferenceEvent, Text, ToolCall
 from ..errors import GatewayError, UpstreamRejected
+from .retry import parse_retry_after
 from ..metering.records import Usage
 from ..protocols.frames import SSEDecoder
 from ..protocols.openai_chat import OpenAIChatCodec
@@ -114,7 +115,6 @@ class OpenAIAdapter:
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status != 200:
                 if response.status in {400, 401, 403, 404, 422, 429}:
-                    retry = response.headers.get("retry-after", "")
-                    raise UpstreamRejected(response.status, min(int(retry), 86400) if retry.isdigit() else None)
+                    raise UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
                 raise GatewayError("rate_limited" if response.status == 429 else "upstream_error", 502, "upstream")
             yield ProviderStream(response, responses_events(response) if native else chat_events(response))

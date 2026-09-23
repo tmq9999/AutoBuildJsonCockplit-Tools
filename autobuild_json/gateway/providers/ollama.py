@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from ..contracts import InferenceEvent, Text, ToolCall
 from ..errors import GatewayError, UpstreamRejected
+from .retry import parse_retry_after
 from ..metering.records import Usage
 from ..protocols.ollama import OllamaCodec
 from ..protocols.frames import NDJSONDecoder
@@ -64,7 +65,7 @@ class OllamaAdapter:
         call = OutboundRequest("POST", "chat", body, auth_header=auth, deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status in {400, 401, 403, 404, 422, 429}:
-                raise UpstreamRejected(response.status)
+                raise UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
             if response.status != 200:
                 raise GatewayError("upstream_error", 502)
             yield ProviderStream(response, ollama_events(response))

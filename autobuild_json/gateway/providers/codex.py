@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import time
 
 from ..errors import GatewayError, UpstreamRejected
+from .retry import parse_retry_after
 from ..protocols.openai_responses import ResponsesCodec
 from ..transport.http import OutboundRequest
 from .openai import ProviderStream
@@ -32,7 +33,7 @@ class CodexAdapter:
             headers=(("chatgpt-account-id", account_id),), deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status in {400, 401, 403, 404, 422, 429}:
-                raise UpstreamRejected(response.status)
+                raise UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
             if response.status != 200:
                 raise GatewayError("upstream_error", 502)
             yield ProviderStream(response, responses_events(response))

@@ -25,6 +25,7 @@ class GatewayError(Exception):
 
 class UpstreamRejected(GatewayError):
     def __init__(self, status, retry_after=None):
-        super().__init__("rate_limited" if status == 429 else "upstream_error", 502, "upstream", retry_after)
+        super().__init__("rate_limited" if status == 429 else "upstream_error",
+                         429 if status == 429 else 502, "upstream", retry_after if status == 429 else None)
         self.upstream_status = status
         self.safe_retry = status == 429

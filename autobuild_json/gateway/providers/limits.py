@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from math import ceil
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -17,7 +18,7 @@ class ProviderLimits:
             provider = (
                 (
                     await session.execute(
-                        text("SELECT config,version FROM providers WHERE id=:id FOR UPDATE"),
+                        text("SELECT config,version,cooldown_until FROM providers WHERE id=:id FOR UPDATE"),
                         {"id": route.provider_id},
                     )
                 )
@@ -41,6 +42,12 @@ class ProviderLimits:
                 or not credential["enabled"]
             ):
                 raise GatewayError("upstream_unavailable", 503)
+            now = await session.scalar(text("SELECT clock_timestamp()"))
+            until = max((record["cooldown_until"] for record in (provider, credential)
+                         if record["cooldown_until"] is not None), default=now)
+            if until > now:
+                raise GatewayError("rate_limited", 429, "upstream",
+                                   min(86400, ceil((until - now).total_seconds())))
             for column, record_id, rpm, concurrency in (
                 (
                     "provider_id",

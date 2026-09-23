@@ -146,6 +146,26 @@ làm tròn. Usage thực và chi phí mua vào được lưu riêng.
 - Cửa sổ ngày/tháng theo UTC lúc nhận request; `null` = không giới hạn, `0` = hết.
 - Không tự replay generation không rõ kết quả hoặc khi đã bắt đầu stream.
 
+### Rate limit và cooldown
+
+- Upstream từ chối bằng HTTP 429 → gateway trả **429**, không gộp thành lỗi 502.
+  Áp dụng cho các adapter generation và native Anthropic/Gemini token counting;
+  body lỗi vẫn theo chuẩn API của client, không lộ nội dung/header bí mật upstream.
+- `Retry-After` nhận số giây hoặc HTTP-date, làm tròn lên và giới hạn 24 giờ.
+  Giá trị `0` được giữ; header thiếu/sai không được giả thành thời gian upstream hứa.
+- Chỉ thử tối đa một provider dự phòng sau 429 trước generation. Khi mọi provider
+  ứng viên đều bị giới hạn và đều có thời gian chờ hợp lệ, trả thời điểm sớm nhất
+  có thể thử lại. Nếu còn provider chưa thử hoặc có hint không rõ, bỏ header đó.
+- Cooldown dùng PostgreSQL, không bị worker khác rút ngắn; kiểm tra lại trước
+  dispatch. Nếu các tuyến đủ điều kiện đều đang cooldown, request mới nhận 429
+  và thời gian chờ còn lại theo lịch **cục bộ**, không gọi upstream.
+- Tính thời gian chờ từ lúc nhận rejection, không bắt đầu lại sau cleanup.
+  Hint cuối xét cả tuyến đã cooldown trước đó và cooldown dài hơn từ worker khác.
+  Responses continuation kiểm tra handle và giữ đúng cooldown của binding gốc.
+- Giữ cooldown toàn provider, không xoay credential/IP để né giới hạn. Thiếu hint
+  dùng cooldown cục bộ 60 giây; timeout, 5xx không rõ kết quả và stream đã mở không
+  tự replay. Request bị từ chối rõ ràng được trả phần quota/budget đã giữ.
+
 ## Proxy và KiotProxy
 
 Proxy tĩnh nhận URL, `host:port`, `host:port:user:pass` hoặc
@@ -195,7 +215,7 @@ loopback, port tường minh, tên `abgw_test_<32 ký tự hex>`, role được 
 Không dùng database thật. Chrome dùng `/usr/bin/google-chrome` hoặc `CHROME_PATH`.
 Test không gọi account/model thật; provider I/O dùng dữ liệu tổng hợp.
 
-Checkpoint local: **450 Python tests trên cả 3.10/3.14, 12 Node tests, hai Chrome E2E**, lint/build qua.
+Checkpoint local: **549 Python tests trên cả 3.10/3.14, 12 Node tests, hai Chrome E2E**, lint/build qua.
 Xem [compatibility](docs/gateway-compatibility.md) và
 [review resolution](docs/gateway-review-resolution.md). CI kiểm tra Python 3.10/3.14;
 test local không thay thế trạng thái CI hiện tại.

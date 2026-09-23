@@ -1,5 +1,21 @@
 # Implementation status
 
+## Rate-limit and cooldown follow-up — 2026-09-24
+
+User-approved bounded upgrade referencing FreeLLMAPI commit `1346b7d` behavior,
+independently implemented. Correct 429 wire errors and standard Retry-After for
+five generation adapters plus native counters; conservative chain hints; monotonic
+PostgreSQL cooldown and admission recheck; cleanup receipt-time accounting and
+binding-scoped continuation cooldown. No schema/UI change or real-account work.
+
+Final local verification: 549 Python tests on 3.10 and 3.14 (99 additions), 12 Node
+tests, both Chrome E2E, Ruff/compileall/build passed. Independent review findings
+were reproduced and fixed; focused re-review found no remaining Critical/Important
+issues. The minor stale continuation/reassigned-credential error ordering is
+documented in compatibility. No live provider/Kiot smoke or running-service restart.
+Implementation remains on `feat/api-gateway` pending integration choice; this
+checkpoint does not claim a new GitHub push or CI run.
+
 ## Private repository and portability follow-up — 2026-09-24
 
 Merged gateway code into the primary checkout, created default branch `main`,

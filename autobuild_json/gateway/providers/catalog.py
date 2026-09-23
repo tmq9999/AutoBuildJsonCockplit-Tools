@@ -1,6 +1,8 @@
 from dataclasses import asdict
 from datetime import timedelta
+from math import ceil
 import json
+import time
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -161,59 +163,93 @@ class Catalog:
             models = [ModelConfig.model_validate(config) for config in configs]
             return [m for m in models if m.enabled and (policy.all_models or m.model_id in policy.model_ids)]
 
-    async def candidates(self, principal, request):
+    async def _model_row(self, session, principal, requested_model):
+        policy = await self._policy(session, principal)
+        alias = await session.scalar(text("SELECT model_id FROM model_aliases WHERE alias=:alias"), {"alias": requested_model})
+        model_id = alias or requested_model
+        if not policy.all_models and model_id not in policy.model_ids:
+            raise GatewayError("permission_denied", 403, "policy")
+        model_row = (await session.execute(text("SELECT * FROM public_models WHERE id=:id FOR UPDATE"),
+                                           {"id": model_id})).mappings().first()
+        if model_row is None:
+            raise GatewayError("upstream_unavailable", 503)
+        model = ModelConfig.model_validate(model_row["config"])
+        if not model.enabled:
+            raise GatewayError("upstream_unavailable", 503)
+        return model_row, model
+
+    async def resolve_model(self, principal, requested_model):
+        """Resolve authorized model identity before looking up a continuation."""
         async with self.db.sessions.begin() as session:
-            policy = await self._policy(session, principal)
-            alias = await session.scalar(text("SELECT model_id FROM model_aliases WHERE alias=:alias"), {"alias": request.model})
-            model_id = alias or request.model
-            if not policy.all_models and model_id not in policy.model_ids:
-                raise GatewayError("permission_denied", 403, "policy")
-            model_row = (await session.execute(text("SELECT * FROM public_models WHERE id=:id FOR UPDATE"),
-                                               {"id": model_id})).mappings().first()
-            if model_row is None:
-                raise GatewayError("upstream_unavailable", 503)
-            model = ModelConfig.model_validate(model_row["config"])
-            if not model.enabled:
-                raise GatewayError("upstream_unavailable", 503)
-            rows = (await session.execute(text("""SELECT b.id AS binding_id,b.config AS binding,p.id AS provider_id,
-                p.config AS provider,p.version,c.id AS credential_id,c.profile_id AS credential_profile FROM model_bindings b
-                JOIN providers p ON p.id=b.provider_id JOIN credentials c ON c.id=b.credential_id
-                WHERE b.model_id=:model AND c.enabled AND c.health='active'
-                AND (p.cooldown_until IS NULL OR p.cooldown_until <= now())
-                AND (c.cooldown_until IS NULL OR c.cooldown_until <= now()) ORDER BY b.id"""),
-                {"model": model_id})).mappings().all()
-            routes, mismatch = [], False
-            for row in rows:
-                binding = row["binding"]
-                provider = ProviderConfig.model_validate(row["provider"])
-                if (not provider.enabled or not binding["enabled"]
-                        or not model.router_model and binding["identity"] != model.identity):
-                    continue
-                caps = frozenset(binding["capabilities"])
-                if not request.required_capabilities <= caps:
-                    mismatch = True
-                    continue
-                routes.append(RouteSnapshot(row["binding_id"], row["provider_id"], row["credential_id"], model_id,
-                    binding["upstream_model"], provider.adapter, provider.root, provider.auth_mode, row["version"], caps,
-                    Bounds(binding["input_bound"], binding["output_bound"]), row["credential_profile"] or provider.proxy_profile_id, provider.budget_id,
-                    binding["priority"], model.input_micro, model.output_micro, provider.timeout, provider.cost_schedule, provider.wire_api))
+            row, _ = await self._model_row(session, principal, requested_model)
+            return row["id"]
+
+    async def _candidate_state(self, session, principal, request, *, binding_id=None):
+        model_row, model = await self._model_row(session, principal, request.model)
+        model_id = model_row["id"]
+        rows = (await session.execute(text("""SELECT b.id AS binding_id,b.config AS binding,p.id AS provider_id,
+            p.config AS provider,p.version,c.id AS credential_id,c.profile_id AS credential_profile,
+            GREATEST(p.cooldown_until,c.cooldown_until) AS cooldown_until FROM model_bindings b
+            JOIN providers p ON p.id=b.provider_id JOIN credentials c ON c.id=b.credential_id
+            WHERE b.model_id=:model AND c.enabled AND c.health='active' ORDER BY b.id"""),
+            {"model": model_id})).mappings().all()
+        routes, mismatch, cooldowns = [], False, []
+        now = await session.scalar(text("SELECT clock_timestamp()"))
+        for row in rows:
+            if binding_id is not None and row["binding_id"] != binding_id:
+                continue
+            binding = row["binding"]
+            provider = ProviderConfig.model_validate(row["provider"])
+            if (not provider.enabled or not binding["enabled"]
+                    or not model.router_model and binding["identity"] != model.identity):
+                continue
+            caps = frozenset(binding["capabilities"])
+            if not request.required_capabilities <= caps:
+                mismatch = True
+                continue
+            if row["cooldown_until"] is not None and row["cooldown_until"] > now:
+                cooldowns.append(row["cooldown_until"])
+                continue
+            routes.append(RouteSnapshot(row["binding_id"], row["provider_id"], row["credential_id"], model_id,
+                binding["upstream_model"], provider.adapter, provider.root, provider.auth_mode, row["version"], caps,
+                Bounds(binding["input_bound"], binding["output_bound"]), row["credential_profile"] or provider.proxy_profile_id, provider.budget_id,
+                binding["priority"], model.input_micro, model.output_micro, provider.timeout, provider.cost_schedule, provider.wire_api))
+        if not routes and not cooldowns:
+            raise GatewayError("unsupported_feature" if mismatch else "upstream_unavailable", 400 if mismatch else 503)
+        retry_after = min(86400, max(0, ceil((min(cooldowns) - now).total_seconds()))) if cooldowns else 0
+        return model_row, routes, retry_after
+
+    async def retry_after(self, principal, request, *, binding_id=None):
+        """Read current eligibility without dispatching or advancing round-robin."""
+        async with self.db.sessions.begin() as session:
+            _, routes, delay = await self._candidate_state(session, principal, request, binding_id=binding_id)
+            # An eligible route means retry now; otherwise use the earliest
+            # locally stored cooldown deadline.
+            return 0 if routes else delay
+
+    async def candidates(self, principal, request, *, binding_id=None):
+        async with self.db.sessions.begin() as session:
+            model_row, routes, retry_after = await self._candidate_state(session, principal, request,
+                                                                          binding_id=binding_id)
             if not routes:
-                raise GatewayError("unsupported_feature" if mismatch else "upstream_unavailable", 400 if mismatch else 503)
+                raise GatewayError("rate_limited", 429, "upstream", retry_after)
             priority = min(route.priority for route in routes)
             first = [route for route in routes if route.priority == priority]
             rest = sorted((route for route in routes if route.priority != priority), key=lambda route: route.priority)
             offset = model_row["cursor"] % len(first)
-            await session.execute(text("UPDATE public_models SET cursor=(cursor+1)%2147483647 WHERE id=:id"), {"id": model_id})
+            await session.execute(text("UPDATE public_models SET cursor=(cursor+1)%2147483647 WHERE id=:id"), {"id": model_row["id"]})
             return first[offset:] + first[:offset] + rest
 
-    async def cooldown(self, provider_id, credential_id, seconds):
+    async def cooldown(self, provider_id, credential_id, seconds, *, started_at=None):
         if type(seconds) is not int or not 0 <= seconds <= 86400:
             raise GatewayError("invalid_request")
         async with self.db.sessions.begin() as session:
             now = await session.scalar(text("SELECT clock_timestamp()"))
+            # Retry-After starts at receipt, not after cleanup or database waits.
+            remaining = seconds if started_at is None else max(0, seconds - (time.monotonic() - started_at))
             if credential_id is None:
-                await session.execute(text("UPDATE providers SET cooldown_until=:until WHERE id=:id"),
-                                      {"until": now + timedelta(seconds=seconds), "id": provider_id})
+                await session.execute(text("UPDATE providers SET cooldown_until=GREATEST(cooldown_until,:until) WHERE id=:id"),
+                                      {"until": now + timedelta(seconds=remaining), "id": provider_id})
             else:
-                await session.execute(text("UPDATE credentials SET cooldown_until=:until WHERE id=:id AND provider_id=:provider"),
-                                      {"until": now + timedelta(seconds=seconds), "id": credential_id, "provider": provider_id})
+                await session.execute(text("UPDATE credentials SET cooldown_until=GREATEST(cooldown_until,:until) WHERE id=:id AND provider_id=:provider"),
+                                      {"until": now + timedelta(seconds=remaining), "id": credential_id, "provider": provider_id})
