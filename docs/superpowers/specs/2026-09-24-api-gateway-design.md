@@ -1,7 +1,9 @@
 # AutoBuildJsonCockplit-Tools — dịch vụ API đa chuẩn
 
 Ngày: 2026-09-24 (tiếp nối thiết kế ngày 2026-09-23).
-Trạng thái: **bản đặc tả chờ người dùng duyệt**.
+Trạng thái: **đã được người dùng duyệt** qua phản hồi “triển khai đi” ngày 2026-09-24,
+sau khi nhận đường dẫn đặc tả. Kế hoạch triển khai là cửa duyệt tiếp theo, chưa được
+duyệt tại thời điểm cập nhật này.
 
 Người dùng đã duyệt hướng sản phẩm, quota token quy đổi và bốn chuẩn API lõi.
 Yêu cầu bổ sung mới nhất là kết nối API/provider bên ngoài để cung cấp lại cho
