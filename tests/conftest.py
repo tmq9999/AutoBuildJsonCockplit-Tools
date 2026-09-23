@@ -4,6 +4,16 @@ import pytest
 from autobuild_json.settings import Settings
 from autobuild_json.models import AttemptContext
 
+
+@pytest.fixture(autouse=True)
+def deny_outbound_network(monkeypatch):
+    import socket
+    from curl_cffi import requests
+    def denied(*args, **kwargs):
+        raise AssertionError("Outbound network is forbidden in offline tests")
+    monkeypatch.setattr(socket.socket, "connect", denied)
+    monkeypatch.setattr(requests.Session, "request", denied)
+
 @pytest.fixture
 def settings(tmp_path):
     return Settings(data_dir=tmp_path, installation_id="00000000-0000-4000-8000-000000000001", admin_token="test-admin-token", _env_file=None)

@@ -27,3 +27,10 @@ def test_ignores_blank_not_extra_fields():
 def test_limits(text):
     with pytest.raises(FlowError):
         parse_accounts(text)
+
+
+def test_unicode_control_inside_password_is_not_a_row_separator():
+    password = "prefix\u0085middle\u2028suffix"
+    result = parse_accounts(f"u@example.com|{password}|{SECRET}\r\nv@example.com|p|{SECRET}")
+    assert len(result.accounts) == 2
+    assert result.accounts[0].password == password

@@ -40,7 +40,7 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None):
             await run_in_threadpool(prepare_settings, settings)
             admins = AdminSessions(settings.admin_token.get_secret_value())
             manual_oauth = oauth_sessions or OAuthSessions(settings)
-            await run_in_threadpool(store.recover_interrupted)
+            app.state.storage_ready = await run_in_threadpool(store.recover_interrupted, read_only_fallback=True)
             app.state.auth_ready = runner is not None
             app.state.runner = runner
             if runner is None:
@@ -103,7 +103,8 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None):
 
     @app.get("/api/health", dependencies=[Depends(authorized)])
     def health():
-        return {"status":"ok", "auth_ready":app.state.auth_ready}
+        return {"status":"ok" if app.state.storage_ready else "degraded", "auth_ready":app.state.auth_ready,
+                "storage_ready":app.state.storage_ready}
 
     @app.post("/api/accounts/validate", dependencies=[Depends(authorized)])
     def validate(payload: AccountText):
@@ -117,6 +118,8 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None):
 
     @app.post("/api/jobs", status_code=202, dependencies=[Depends(authorized)])
     def start(payload: JobInput):
+        if not app.state.storage_ready:
+            raise FlowError("STORAGE_ERROR", "storage")
         report = parse_accounts(payload.accounts_text.get_secret_value())
         proxies = parse_proxies(payload.proxies_text.get_secret_value())
         if not app.state.auth_ready:
@@ -133,6 +136,8 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None):
 
     @app.post("/api/jobs/{job_id}/stop", status_code=202, dependencies=[Depends(authorized)])
     def stop(job_id: str):
+        if not app.state.storage_ready:
+            raise FlowError("STORAGE_ERROR", "storage")
         app.state.runner.stop(job_id)
         return {"id":job_id, "stop_requested":True}
 

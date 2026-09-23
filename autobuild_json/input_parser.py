@@ -20,7 +20,11 @@ def parse_accounts(text: str) -> ParseReport:
             raise FlowError("INVALID_INPUT", "input")
     except UnicodeError:
         raise FlowError("INVALID_INPUT", "input") from None
-    lines = text.removeprefix("\ufeff").splitlines()
+    # Input records use CRLF/LF/CR, not Unicode separators that may be part of passwords.
+    normalized = text.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
     if len(lines) > MAX_LINES:
         raise FlowError("INVALID_INPUT", "input")
     accounts, rejected, duplicates, seen = [], [], [], set()

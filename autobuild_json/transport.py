@@ -1,7 +1,7 @@
 import json
 from urllib.parse import unquote, urljoin, urlsplit
 
-from curl_cffi import requests
+from curl_cffi import CurlOpt, requests
 
 from .errors import FlowError
 
@@ -33,6 +33,10 @@ class SafeTransport:
         self.proxy = proxy
         self.context = context
         self.raw = raw_session or requests.Session(impersonate="chrome", trust_env=False)
+        # curl_cffi's trust_env is not sufficient for libcurl environment variables.
+        # Options are applied last by the HTTP library, per session, never globally.
+        self.raw.curl_options = dict(getattr(self.raw, "curl_options", {}))
+        self.raw.curl_options.update({CurlOpt.PROXY:proxy.url if proxy else "", CurlOpt.NOPROXY:""})
         self.cookies = self.raw.cookies
 
     def request(self, method, url, **kwargs):

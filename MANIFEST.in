@@ -1,0 +1,8 @@
+include README.md THIRD_PARTY.md .env.example
+include scripts/setup_checklive.py
+recursive-include tests *.py
+recursive-include autobuild_json/static *.html *.css *.js
+prune .deps
+prune data
+prune .superdesign
+prune .superpowers

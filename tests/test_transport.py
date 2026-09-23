@@ -36,3 +36,28 @@ def test_response_limit(context):
             return Response()
     with pytest.raises(FlowError):
         SafeTransport(None, context, Huge()).request("GET", "https://auth.openai.com/oauth/authorize")
+
+
+def test_actual_curl_options_override_environment_proxy_policy(context, monkeypatch):
+    from curl_cffi import CurlOpt
+    from curl_cffi.requests.utils import set_curl_options
+    from autobuild_json.proxies import parse_proxies
+    monkeypatch.setenv("HTTPS_PROXY", "http://unwanted.invalid:8080")
+    monkeypatch.setenv("NO_PROXY", "*")
+    class RecordingCurl:
+        def __init__(self):
+            self.options = {}
+        def setopt(self, option, value):
+            self.options[option] = value
+    for proxy in (None, parse_proxies("chosen.invalid:8080")[0]):
+        transport = SafeTransport(proxy, context)
+        try:
+            curl = RecordingCurl()
+            # Execute the installed library's option assembly, without socket I/O.
+            set_curl_options(curl, "GET", "https://fixture.invalid/", params_list=[None, None],
+                headers_list=[None, None], cookies_list=[None, None], proxies_list=[None, None],
+                verify_list=[True, True], curl_options=transport.raw.curl_options)
+            assert curl.options[CurlOpt.PROXY] == (proxy.url if proxy else "")
+            assert curl.options[CurlOpt.NOPROXY] == ""
+        finally:
+            transport.close()

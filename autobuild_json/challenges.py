@@ -14,6 +14,13 @@ def continuation(payload):
 
 def detect_challenge(payload, url):
     payload = payload if isinstance(payload, dict) else {}
+    error = payload.get("error")
+    error_code = error.get("code") if isinstance(error, dict) else error
+    if isinstance(error_code, str) and error_code.lower() in {
+        "phone_verification", "phone_verification_required", "phone_number_verification_required",
+        "verify_phone", "phone_number_required", "sms_verification_required",
+    }:
+        return "PHONE_VERIFY"
     page = payload.get("page")
     kind = str(page.get("type", "")).lower() if isinstance(page, dict) else ""
     path = urlsplit(url).path.lower()

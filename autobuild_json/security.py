@@ -32,8 +32,10 @@ def prepare_settings(settings):
         if len(settings.admin_token.get_secret_value()) < 12:
             raise ValueError()
         uuid.UUID(settings.installation_id)
-        atomic_json(path, {"installation_id":settings.installation_id,
-            "admin_token":settings.admin_token.get_secret_value()})
+        desired = {"installation_id":settings.installation_id,
+            "admin_token":settings.admin_token.get_secret_value()}
+        if data != desired:
+            atomic_json(path, desired)
     except (ValueError, OSError):
         raise FlowError("CONFIGURATION_ERROR", "local_config") from None
     return settings

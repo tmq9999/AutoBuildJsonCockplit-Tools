@@ -173,7 +173,8 @@ class RunStore:
                 rows = [r for r in data["rows"] if r["status"] == status]
             return json.dumps(rows, ensure_ascii=False, indent=2).encode("utf-8")
 
-    def recover_interrupted(self):
+    def recover_interrupted(self, *, read_only_fallback=False):
+        storage_ready = True
         with self._lock:
             for item in self.list_runs():
                 data = copy.deepcopy(self._read(item["id"]))
@@ -184,4 +185,15 @@ class RunStore:
                         changed = True
                 if changed:
                     data["status"] = "cancelled"
-                    self._save(data)
+                    try:
+                        self._save(data)
+                    except FlowError as exc:
+                        if not read_only_fallback or exc.code != "STORAGE_ERROR":
+                            raise
+                        # Preserve durable records; report interruption/error in a
+                        # read-only in-memory view until the disk is writable again.
+                        data["status"] = "error"
+                        data["batch_error"] = {"code":exc.code, "reason":exc.reason}
+                        self._cache[data["id"]] = data
+                        storage_ready = False
+        return storage_ready

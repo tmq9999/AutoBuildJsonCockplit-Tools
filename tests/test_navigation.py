@@ -49,3 +49,14 @@ def test_multiple_workspaces_require_selection(context):
     with pytest.raises(FlowError) as err:
         OAuthNavigator(transport, context).complete("https://auth.openai.com/consent")
     assert err.value.code == "WORKSPACE_SELECTION_REQUIRED"
+
+
+@pytest.mark.parametrize("error", [{"code":"phone_verification"}, {"code":"phone_verification_required"}, "phone_verification_required"])
+def test_error_only_phone_challenges(error):
+    with pytest.raises(FlowError) as result:
+        inspect_response(Response({"error":error}, status=400), "https://auth.openai.com/api/accounts/password/verify")
+    assert result.value.code == "PHONE_VERIFY"
+
+
+def test_phone_profile_error_remains_negative():
+    assert detect_challenge({"error":{"code":"profile_update", "phone_number":None}}, "") is None

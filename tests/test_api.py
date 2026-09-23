@@ -56,3 +56,30 @@ def test_missing_dependency_keeps_validation_and_links_available(settings):
         assert response.status_code == 503
         assert str(settings.data_dir) not in response.text
         assert client.post("/api/oauth/links", json={"email":"u@example.com"}).status_code == 201
+
+
+def test_disk_full_restart_serves_confirmed_exports_read_only(settings, monkeypatch):
+    from autobuild_json.security import prepare_settings
+    from autobuild_json.results import RunStore
+    from autobuild_json.input_parser import parse_accounts
+    from tests.fakes import success_result
+    from autobuild_json.errors import FlowError
+    import autobuild_json.results as results
+    import autobuild_json.security as security
+    prepare_settings(settings)
+    report = parse_accounts("u@example.com|p|JBSWY3DPEHPK3PXP\nv@example.com|p|JBSWY3DPEHPK3PXP")
+    store = RunStore(settings.data_dir / "runs")
+    job = store.create(report)
+    store.update(job, report.accounts[0].account_job_id, status="success", stage="done", attempt=1, result=success_result())
+    def disk_full(*args):
+        raise FlowError("STORAGE_ERROR", "storage")
+    monkeypatch.setattr(results, "atomic_json", disk_full)
+    monkeypatch.setattr(security, "atomic_json", disk_full)
+    with TestClient(create_app(settings), base_url=ORIGIN) as client:
+        login = client.post("/api/session", headers={"Origin":ORIGIN}, json={"token":"test-admin-token"})
+        client.headers.update({"Origin":ORIGIN, "X-CSRF-Token":login.json()["csrf_token"]})
+        health = client.get("/api/health").json()
+        assert health["storage_ready"] is False
+        assert client.get(f"/api/jobs/{job}/exports/success").json()[0]["email"] == "u@example.com"
+        assert client.get(f"/api/jobs/{job}").json()["status"] == "error"
+        assert client.post("/api/jobs", json={"accounts_text":"x@example.com|p|JBSWY3DPEHPK3PXP"}).status_code == 507
