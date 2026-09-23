@@ -35,28 +35,37 @@ class LegacyProxySource:
         selection = slot.selection if slot else self.selection
         hard_deadline = datetime.now(timezone.utc)+timedelta(seconds=min(600, timeout+10))
         owner = UUID(account.account_job_id)
-        scope = self.manager.acquire(selection, owner, hard_deadline)
-        acquire = asyncio.create_task(scope.__aenter__())
-        while not acquire.done():
-            if context.cancel.is_set():
-                acquire.cancel()
-                await asyncio.gather(acquire, return_exceptions=True)
-                raise FlowError("CANCELLED", "proxy_acquire")
-            await asyncio.wait({acquire}, timeout=0.05)
-        lease = await acquire
-        context.deadline = time.monotonic()+min(timeout, (hard_deadline-datetime.now(timezone.utc)).total_seconds())
-        operation = None
+        parent=asyncio.current_task()
+        async def watch():
+            while not context.cancel.is_set():
+                await asyncio.sleep(.05)
+            parent.cancel()
+        watcher=asyncio.create_task(watch())
         try:
-            context.check()
-            operation = asyncio.create_task(asyncio.to_thread(processor, account, lease.proxy, context))
-            return await asyncio.shield(operation)
+            async with self.manager.acquire(selection,owner,hard_deadline) as lease:
+                context.deadline=time.monotonic()+min(timeout,(hard_deadline-datetime.now(timezone.utc)).total_seconds())
+                context.check()
+                operation=asyncio.create_task(asyncio.to_thread(processor,account,lease.proxy,context))
+                try:
+                    return await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    context.cancel.set()
+                    while not operation.done():
+                        try:
+                            await asyncio.shield(operation)
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            break
+                    if operation.done() and not operation.cancelled():
+                        operation.exception()
+                    raise
         except asyncio.CancelledError:
             context.cancel.set()
-            if operation:
-                await asyncio.gather(asyncio.shield(operation), return_exceptions=True)
             raise FlowError("CANCELLED", "proxy_acquire") from None
         finally:
-            await scope.__aexit__(None, None, None)
+            watcher.cancel()
+            await asyncio.gather(watcher,return_exceptions=True)
 
     def execute(self, account, slot, context, processor, timeout):
         context.on_stage("proxy_acquire", 1)

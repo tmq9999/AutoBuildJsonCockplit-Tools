@@ -59,10 +59,28 @@ class GatewayBoundary:
             if not message.get("more_body", False):
                 break
         replayed = False
+        disconnected=asyncio.Event()
+        parent=asyncio.current_task()
+        scope['gateway_disconnect_guard']=True
+        async def watch_disconnect():
+            while True:
+                if (await receive())['type']=='http.disconnect':
+                    disconnected.set()
+                    parent.cancel()
+                    return
+        watcher=asyncio.create_task(watch_disconnect())
         async def replay():
             nonlocal replayed
             if not replayed:
                 replayed = True
                 return {"type": "http.request", "body": bytes(body), "more_body": False}
-            return await receive()
-        await self.app(scope, replay, send)
+            await disconnected.wait()
+            return {'type':'http.disconnect'}
+        try:
+            await self.app(scope, replay, send)
+        except asyncio.CancelledError:
+            if not disconnected.is_set():
+                raise
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher,return_exceptions=True)

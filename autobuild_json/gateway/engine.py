@@ -19,6 +19,8 @@ from .providers.anthropic import AnthropicAdapter
 from .providers.gemini import GeminiAdapter
 from .providers.ollama import OllamaAdapter
 from .providers.codex import CodexAdapter
+from .providers.preflight import validate_request
+from .providers.limits import ProviderLimits
 from .accounts.imports import CredentialService
 from .proxy.config import ProxySelection
 from .secrets import Ciphertext
@@ -42,6 +44,7 @@ class Engine:
         self.digest_key = digest_key
         self.proxy_resolver = proxy_resolver
         self.budgets = BudgetService(db)
+        self.provider_limits=ProviderLimits(db)
         self.continuations = ContinuationStore(db, vault)
         self.credentials = CredentialService(db, vault, proxies, transport, profile_resolver=proxy_resolver)
         self.adapters = {"openai_compatible": OpenAIAdapter(transport, self.credential),
@@ -91,11 +94,12 @@ class Engine:
                     raise GatewayError("proxy_not_ready", 503)
                 selection = await self.proxy_resolver(route.proxy_profile_id)
             async with self.proxies.acquire(selection, meta.request_id, meta.deadline) as lease:
-                await self.ledger.mark_dispatched(meta.request_id, uuid4())
-                dispatched = True
-                count = await self.adapters[route.adapter].count(request, route, lease)
-                await self.ledger.settle(meta.request_id, Usage(0, 0))
-                return count
+                async with self.provider_limits.acquire(route,meta.deadline):
+                    await self.ledger.mark_dispatched(meta.request_id, uuid4())
+                    dispatched = True
+                    count = await self.adapters[route.adapter].count(request, route, lease)
+                    await self.ledger.settle(meta.request_id, Usage(0, 0))
+                    return count
         except BaseException:
             if dispatched:
                 await self.ledger.mark_pending(meta.request_id, "interrupted")
@@ -123,6 +127,7 @@ class Engine:
             raise GatewayError("invalid_request")
         if not codex:
             request = request.model_copy(update={"options": request.options.model_copy(update={"max_output_tokens": max_output})})
+        validate_request(request,route)
         bounds = Bounds(route.bounds.input_tokens, max_output)
         deadline = min(meta.deadline, datetime.now(timezone.utc)+timedelta(seconds=route.timeout))
         hold = await self.ledger.reserve(Admission(meta.request_id, principal, route.public_model_id, bounds,
@@ -132,6 +137,7 @@ class Engine:
         budget_attempt = None
         try:
             for number, selected in enumerate(routes[:2]):
+                validate_request(request,selected)
                 if selected.adapter not in self.adapters or max_output > selected.bounds.output_tokens:
                     raise GatewayError("upstream_unavailable", 503)
                 if (selected.adapter == "codex_oauth") != codex:
@@ -146,6 +152,8 @@ class Engine:
                 if codex:
                     await self.credentials.fresh_tokens(selected.credential_id, deadline)
                 lease = await stack.enter_async_context(self.proxies.acquire(selection, meta.request_id, deadline))
+                await self.transport._validate(selected,lease.proxy)
+                await stack.enter_async_context(self.provider_limits.acquire(selected,deadline))
                 attempt = uuid4()
                 # Resolve credential before dispatch flag so bad local config has no
                 # uncertain-charge side effect. Adapter repeats current enabled check.
@@ -158,7 +166,7 @@ class Engine:
                              price.cache_write_per_million or price.input_per_million]
                     upper = (selected.bounds.input_tokens*max(rates)+max_output*price.output_per_million)/1_000_000
                     await self.budgets.reserve(selected.budget_id, attempt, price.currency,
-                                               upper.quantize(Decimal("0.000000000001"), rounding=ROUND_CEILING))
+                                               upper.quantize(Decimal("0.000000000001"), rounding=ROUND_CEILING),request_id=meta.request_id)
                     budget_attempt = attempt
                 await self.ledger.mark_dispatched(meta.request_id, attempt)
                 dispatched = True
@@ -209,6 +217,11 @@ class PreparedCall:
             await session.execute(text("UPDATE attempts SET usage=CAST(:usage AS jsonb),cost=CAST(:cost AS jsonb),status='completed' WHERE id=:id"),
                                   {"usage": json.dumps(asdict(usage)), "id": self.attempt_id,
                                    "cost": json.dumps({"amount": str(cost.amount), "currency": cost.currency, "source": cost.source}) if cost else None})
+            bound=await session.execute(text('SELECT input_bound,output_bound FROM requests WHERE id=:id'),{'id':self.request_id})
+            input_bound,output_bound=bound.one()
+            if usage.input_tokens>input_bound or usage.output_tokens>output_bound:
+                await session.execute(text("UPDATE model_bindings SET config=jsonb_set(config,'{enabled}','false'::jsonb),version=version+1 WHERE id=:id"),{'id':self.route.binding_id})
+                await self.engine.catalog._audit(session,'binding.quarantined.usage_bound',self.route.binding_id)
 
     async def events(self):
         if self.started:

@@ -124,7 +124,11 @@ class AnthropicCodec:
         if event.kind == "block_started":
             self.indices[event.item_id] = event.index
             block = {"type": "tool_use", "id": event.block.call_id, "name": event.block.name, "input": {}} if isinstance(event.block, ToolCall) else content_block(event.block)
-            return [self._event("content_block_start", index=event.index, content_block=block)]
+            frames=[self._event("content_block_start", index=event.index, content_block=block)]
+            if isinstance(event.block,ToolCall) and event.block.arguments:
+                frames.append(self._event('content_block_delta',index=event.index,
+                    delta={'type':'input_json_delta','partial_json':event.block.arguments}))
+            return frames
         if event.kind in {"text_delta", "tool_delta"}:
             delta = {"type": "text_delta", "text": event.delta} if event.kind == "text_delta" else {"type": "input_json_delta", "partial_json": event.delta}
             return [self._event("content_block_delta", index=self.indices[event.item_id], delta=delta)]

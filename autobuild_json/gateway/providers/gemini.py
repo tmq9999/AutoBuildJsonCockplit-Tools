@@ -12,6 +12,7 @@ from ..protocols.gemini import GeminiCodec
 from ..protocols.frames import SSEDecoder
 from ..transport.http import OutboundRequest
 from .openai import ProviderStream
+from .preflight import auth_header
 
 
 def normalize_gemini_usage(payload):
@@ -78,7 +79,7 @@ class GeminiAdapter:
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
         model = route.upstream_model.removeprefix("models/")
         return OutboundRequest("POST", "models/"+quote(model, safe="")+":"+action, body,
-            auth_header=("x-goog-api-key", secret), deadline=time.monotonic()+remaining,
+            auth_header=auth_header(route.auth_mode,secret), deadline=time.monotonic()+remaining,
             query=(("alt", "sse"),) if action == "streamGenerateContent" else ())
 
     @asynccontextmanager

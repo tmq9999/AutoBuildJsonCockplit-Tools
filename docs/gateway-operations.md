@@ -1,8 +1,9 @@
-# Gateway operations (implementation in progress)
+# Gateway operations
 
-Backend gateway is opt-in and separate from the existing OAuth workbench. The
-new admin UI is awaiting design approval; administration APIs are implemented.
-Do not expose this development branch publicly before final review/SDK checks.
+Gateway is opt-in and separate from the existing OAuth workbench. The approved
+Vietnamese administration UI is implemented at `/service/` on the private admin
+listener. Independent review findings have regression fixes. Live provider contract
+verification and production deployment remain operator acceptance steps.
 
 ## Local setup
 
@@ -27,7 +28,10 @@ Run private admin in another process using `python -m autobuild_json.gateway adm
 it keeps existing local admin sessions/CSRF and mounts `/api/service/`. Default
 gateway address is `http://127.0.0.1:8788`, admin `http://127.0.0.1:8787`.
 Check whether the original admin/OAuth server is running before using the same port;
-use `admin --port 8789` to avoid interrupting it. Do not start two OAuth coordinators
+use `admin --port 8789` to avoid interrupting it. Open `http://127.0.0.1:8789/service/`
+for the new UI. Set a **different** `AUTOBUILD_DATA_DIR` if the original OAuth server
+is running; two admin coordinators must not own the same data directory.
+Do not start two OAuth coordinators
 against the same data directory. Existing `python -m autobuild_json` is unchanged.
 
 Run `python -m autobuild_json.gateway maintenance` for expired-request reconciliation.
@@ -43,7 +47,22 @@ Create customer → issue key → create provider and encrypted credential → c
 public model and binding → grant the key model/protocol/quota policy. New keys have
 zero total quota and an empty model allowlist. Quota fields are integer micro-token
 units: 1 token quy đổi = 1,000,000 micro-units. Decimal coefficient parsing is exact;
-never convert quota through JavaScript floating-point arithmetic.
+never convert quota through JavaScript floating-point arithmetic. Private admin
+API serializes micro-unit fields as decimal strings; it accepts validated digit
+strings or integers. The UI displays token units and converts with BigInt.
+
+The UI includes customers, key creation/edit/rotation/revocation, protocol/model
+permissions, quota and model coefficients, provider/credential configuration,
+model mapping, proxy profiles, OAuth import/refresh, usage/audit and a JSON
+playground. Playground uses a client key supplied in memory and charges that key;
+it does not grant admin bypass of model or quota policy. Provider discovery stages
+names for review and never publishes them automatically. Secrets remain write-only.
+
+Provider `rpm_limit` and `concurrency_limit` are database-authoritative and shared
+across customer keys. Credential defaults also cap RPM=600 and concurrency=16;
+the stricter provider/credential bound wins. A route reporting usage beyond its
+input/output bound is disabled for investigation, even with zero token coefficients.
+Customer charge stays capped by its reservation; actual upstream cost stays separate.
 
 Public endpoints require the issued client key. Admin cookies/tokens never work as
 upstream keys. Provider credentials are write-only. Supported core endpoints:

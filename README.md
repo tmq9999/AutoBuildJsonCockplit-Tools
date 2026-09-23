@@ -1,10 +1,11 @@
 # AutoBuildJsonCockplit-Tools
 
-## API gateway đang phát triển
+## API gateway và quản trị
 
-Nhánh `feat/api-gateway` có backend gateway riêng cho OpenAI, Anthropic, Gemini,
-Ollama; quản lý key/quota/provider và proxy/KiotProxy. Đây chưa phải bản phát hành
-production: UI quản trị mới đang chờ duyệt, review cuối nhánh và live smoke còn thiếu.
+Nhánh `feat/api-gateway` có gateway riêng cho OpenAI, Anthropic, Gemini,
+Ollama; UI quản trị tại `/service/` để quản lý key/quota/provider và proxy/KiotProxy.
+Đã có kiểm thử PostgreSQL, SDK, browser và bản sửa sau review độc lập. Live smoke
+với provider/Kiot thật và cấu hình production vẫn cần kiểm chứng khi triển khai.
 Không thay đổi lệnh chạy OAuth local mặc định hoặc tự mở dịch vụ ra Internet.
 Xem [vận hành gateway](docs/gateway-operations.md) và
 [ma trận tương thích đã kiểm thử](docs/gateway-compatibility.md).

@@ -10,6 +10,7 @@ from ..protocols.frames import SSEDecoder
 from ..protocols.openai_chat import OpenAIChatCodec
 from ..protocols.openai_responses import ResponsesCodec
 from .responses_events import responses_events
+from .preflight import auth_header
 from ..transport.http import OutboundRequest
 
 
@@ -108,7 +109,7 @@ class OpenAIAdapter:
         secret = await self.credential_resolver(route)
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
         auth_mode = getattr(route, "auth_mode", "bearer")
-        auth = None if auth_mode == "none" else ("Authorization", "Bearer "+secret)
+        auth = auth_header(auth_mode,secret)
         call = OutboundRequest("POST", "responses" if native else "chat/completions", body, auth_header=auth, deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status != 200:

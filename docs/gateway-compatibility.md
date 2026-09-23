@@ -35,21 +35,25 @@ before claiming that support.
   route uses a finite operator-configured model bound for reservation. Clients that
   always require this parameter cannot use that Codex route. No live Codex inference
   contract has been verified by this gateway implementation.
-- Model discovery via public APIs is filtered by client policy. Provider network
-  probes and remaining administration UI flows are still being completed.
+- Model discovery via public APIs is filtered by client policy. Private provider
+  discovery supports native model-list shapes and stages entries for admin review.
 - Public gateway requires a client key for every protocol, including Ollama. No key
   query parameter; Gemini `alt=sse` is an allowed nonsecret query.
-- The new UI remains a Superdesign draft awaiting approval; backend admin routes
-  are private and independently tested. Existing OAuth workbench UI remains unchanged.
+- The approved local admin UI is implemented at `/service/`. Existing OAuth workbench
+  now also offers explicit direct/fixed/pool/Kiot selections; old default payloads work.
 
 ## Verification snapshot
 
-2026-09-24 development run: 388 Python tests passed (including PostgreSQL and five
-SDK tests), eight existing Node UI tests passed. One upstream google-genai Python
+2026-09-24 development run: 446 Python tests passed (including PostgreSQL, 40
+cross-protocol text cases and five SDK tests), 12 Node UI tests passed. One upstream google-genai Python
 deprecation warning remains. Existing Chrome OAuth browser smoke and Python package
-build (`--no-isolation`, because ensurepip is absent) passed. No real account, Kiot
+build (`--no-isolation`, because ensurepip is absent) passed. New Chrome admin E2E
+covers customer/key CRUD, exact quota, provider/credential/model mapping, playground,
+Kiot profile, XSS safety, mobile and logout. No real account, Kiot
 key or third-party provider key was used.
-Final whole-branch independent review and new admin browser acceptance are pending.
+Independent whole-branch review found ten Important issues; they were addressed in
+one implementer RED/GREEN fix pass, not a second reviewer approval. See
+`gateway-review-resolution.md` for evidence and remaining operational limitations.
 
 Reproduce SDK checks after installing `requirements/gateway-sdk-tests.lock`:
 

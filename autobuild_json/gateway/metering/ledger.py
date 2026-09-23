@@ -155,7 +155,7 @@ class Ledger:
                 raise GatewayError("invalid_state", 409, "quota")
             charge = weighted_micro(usage.input_tokens, usage.output_tokens, int(row["input_micro"]), int(row["output_micro"]))
             await self._finalize(session, row, min(charge, int(row["hold"])), "completed", usage=usage,
-                                 reason="usage_exceeded_bound" if charge > row["hold"] else None)
+                                 reason="usage_exceeded_bound" if charge > row["hold"] or usage.input_tokens>row['input_bound'] or usage.output_tokens>row['output_bound'] else None)
 
     async def release_unspent(self, request_id, evidence):
         async with self._request(request_id) as (session, row, _):

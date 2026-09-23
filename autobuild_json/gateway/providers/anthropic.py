@@ -10,6 +10,7 @@ from ..protocols.anthropic import AnthropicCodec
 from ..protocols.frames import SSEDecoder
 from ..transport.http import OutboundRequest
 from .openai import ProviderStream
+from .preflight import auth_header
 
 
 def normalize_anthropic_usage(payload):
@@ -82,7 +83,7 @@ class AnthropicAdapter:
             body.pop(key, None)
         secret = await self.credential_resolver(route)
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
-        call = OutboundRequest("POST", "messages/count_tokens", body, auth_header=("x-api-key", secret),
+        call = OutboundRequest("POST", "messages/count_tokens", body, auth_header=auth_header(route.auth_mode,secret),
                               headers=(("anthropic-version", "2023-06-01"),), deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status != 200:
@@ -98,7 +99,7 @@ class AnthropicAdapter:
         body = AnthropicCodec().upstream_body(request, route.upstream_model)
         secret = await self.credential_resolver(route)
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
-        call = OutboundRequest("POST", "messages", body, auth_header=("x-api-key", secret),
+        call = OutboundRequest("POST", "messages", body, auth_header=auth_header(route.auth_mode,secret),
             headers=(("anthropic-version", "2023-06-01"),), deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status in {400, 401, 403, 404, 422, 429}:

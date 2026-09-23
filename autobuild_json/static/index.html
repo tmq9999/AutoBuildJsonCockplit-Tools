@@ -47,6 +47,8 @@
         <section class="card settings-card">
           <div class="section-title"><h2><span class="step">02</span> Cấu hình &amp; chạy</h2><span class="muted">HTTP sessions</span></div>
           <label for="proxies-text">Danh sách proxy <span class="muted">(tùy chọn)</span></label>
+          <label for="proxy-source">Nguồn proxy</label><select id="proxy-source"><option value="legacy">Proxy tĩnh / danh sách (trống = direct)</option><option value="direct">Direct — không proxy</option><option value="fixed">Một proxy cố định</option><option value="pool">Danh sách proxy</option><option value="kiotproxy">KiotProxy — mỗi dòng một API key</option></select>
+          <div class="options-grid"><div><label for="proxy-region">Vùng Kiot</label><select id="proxy-region"><option value="random">Ngẫu nhiên</option><option value="bac">Bắc</option><option value="trung">Trung</option><option value="nam">Nam</option></select></div><div><label for="proxy-protocol">Giao thức Kiot</label><select id="proxy-protocol"><option value="http">HTTP</option><option value="socks5">SOCKS5</option></select></div></div>
           <textarea id="proxies-text" class="mono proxy-area" spellcheck="false" placeholder="http://user:password@host:port"></textarea>
           <p class="hint">Trống = direct. Proxy xoay theo tài khoản, giữ nguyên trong mỗi phiên.</p>
           <div class="options-grid">

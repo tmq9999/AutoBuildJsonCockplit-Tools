@@ -15,7 +15,7 @@ from ..errors import GatewayError
 
 TABLES = ("customers", "api_keys", "audit_events", "providers", "config_versions", "credentials", "public_models",
           "model_aliases", "model_bindings", "discovered_models", "quota_buckets", "requests", "attempts", "usage_ledger",
-          "upstream_budgets", "upstream_reservations", "proxy_profiles", "proxy_leases", "proxy_health", "continuation_handles")
+          "upstream_budgets", "upstream_reservations", "proxy_profiles", "proxy_leases", "proxy_health", "continuation_handles",'provider_admissions')
 MAX_BACKUP = 64*1024*1024
 
 

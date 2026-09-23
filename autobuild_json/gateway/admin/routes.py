@@ -16,6 +16,7 @@ from ..routing.records import ProviderConfig, ModelConfig, BindingConfig
 from .schemas import CustomerInput, KeyInput, KeyUpdate, VersionInput, EnabledInput, CredentialInput, ProxyInput, AdjustmentInput, OAuthImportInput, PlaygroundInput
 from .usage import UsageReports
 from .serialization import ExactJSONResponse, exact_input
+from .schemas import CredentialRotateInput
 
 
 class SafeAdminRoute(APIRoute):
@@ -124,8 +125,8 @@ def create_admin_router(services, authorized):
         return {"id": await services.catalog.put_credential(identity, payload.secret.get_secret_value())}
 
     @router.post("/credentials/{identity}/rotate")
-    async def rotate_credential(identity: UUID, payload: CredentialInput):
-        await services.catalog.rotate_credential(identity, payload.secret.get_secret_value())
+    async def rotate_credential(identity: UUID, payload: CredentialRotateInput):
+        await services.catalog.rotate_credential(identity, payload.secret.get_secret_value(),expected_version=payload.version)
         return {"id": identity}
 
     @router.get("/models")
@@ -160,12 +161,31 @@ def create_admin_router(services, authorized):
     @router.get("/bindings")
     async def bindings():
         async with services.db.sessions() as session:
-            return list((await session.execute(text("SELECT config FROM model_bindings ORDER BY id"))).scalars())
+            return [dict(row['config'],version=row['version']) for row in
+                    (await session.execute(text("SELECT config,version FROM model_bindings ORDER BY id"))).mappings()]
 
     @router.post("/bindings", status_code=201)
     async def put_binding(payload: BindingConfig):
-        await services.catalog.put_binding(payload)
+        await services.catalog.put_binding(payload,create_only=True)
         return {"id": payload.id}
+
+    @router.put('/bindings/{identity}/{version}')
+    async def update_binding(identity:UUID,version:int,payload:BindingConfig):
+        if identity!=payload.id:
+            raise GatewayError('invalid_request')
+        await services.catalog.put_binding(payload,expected_version=version)
+        return {'id':identity,'version':version+1}
+
+    @router.delete('/models/{identity:path}')
+    async def delete_model(identity:str,payload:VersionInput):
+        async with services.db.sessions.begin() as session:
+            row=(await session.execute(text('SELECT config,version FROM public_models WHERE id=:id FOR UPDATE'),{'id':identity})).mappings().first()
+            if row is None or row['version']!=payload.version:
+                raise GatewayError('version_conflict',409)
+            config=dict(row['config'],enabled=False)
+            await session.execute(text('UPDATE public_models SET config=CAST(:config AS jsonb),version=version+1 WHERE id=:id'),{'id':identity,'config':json.dumps(config)})
+            await services.catalog._audit(session,'model.disabled',uuid4())
+        return {'id':identity,'disabled':True}
 
     @router.get("/proxies")
     async def proxies():

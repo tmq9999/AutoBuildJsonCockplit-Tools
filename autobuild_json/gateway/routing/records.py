@@ -24,6 +24,8 @@ class ProviderConfig(BaseModel):
     budget_id: UUID | None = None
     cost_schedule: CostSchedule | None = None
     timeout: int = Field(default=180, strict=True, ge=1, le=600)
+    rpm_limit: int = Field(default=600,strict=True,ge=1,le=100000)
+    concurrency_limit: int = Field(default=16,strict=True,ge=1,le=1000)
 
     @field_validator("root")
     @classmethod

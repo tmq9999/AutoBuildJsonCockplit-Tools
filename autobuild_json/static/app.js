@@ -29,6 +29,9 @@ export function summarizeRows(rows) {
 }
 export function shouldPoll(job, hidden) { return Boolean(job && !hidden && ['queued','running','stopping'].includes(job.status)); }
 export function canStart(state) { return state.authenticated && state.validCount>0 && state.authReady && state.storageReady && !state.busy && !state.activeJob; }
+export function proxyPayload(mode,text,region='random',protocol='http') {
+  return {proxy_mode:mode,proxies_text:['kiotproxy','direct'].includes(mode)?'':text,kiot_keys_text:mode==='kiotproxy'?text:'',proxy_region:region,proxy_protocol:protocol};
+}
 export function displayReason(row) {
   if (row.status==='phone_verify') return 'Phone number verify';
   if (!row.code && !['error','cancelled'].includes(row.status)) return '—';
@@ -61,7 +64,7 @@ export function mountDashboard(doc) {
     $('start-btn').disabled=!canStart(state);
     $('validate-btn').disabled=state.busy || !state.authenticated || !($('accounts-text').value.trim());
     $('stop-btn').disabled=!state.activeJob || state.busy || state.job?.status==='stopping';
-    for (const id of ['accounts-text','accounts-file','proxies-text','mode','timeout']) $(id).disabled=state.busy || Boolean(state.activeJob);
+    for (const id of ['accounts-text','accounts-file','proxies-text','proxy-source','proxy-region','proxy-protocol','mode','timeout']) $(id).disabled=state.busy || Boolean(state.activeJob);
     $('workers').disabled=state.busy || Boolean(state.activeJob) || $('mode').value==='sequential';
     for (const button of doc.querySelectorAll('[data-export]')) button.disabled=!state.job || !state.authenticated;
     $('generate-link-btn').disabled=state.manualBusy || !state.authenticated;
@@ -222,7 +225,7 @@ export function mountDashboard(doc) {
     event.preventDefault(); if (!canStart(state) || !$('batch-form').reportValidity()) return;
     state.busy=true; controls(); notice('');
     try {
-      const result=await request('/api/jobs',{method:'POST',body:{accounts_text:$('accounts-text').value,proxies_text:$('proxies-text').value,
+      const result=await request('/api/jobs',{method:'POST',body:{accounts_text:$('accounts-text').value,...proxyPayload($('proxy-source').value,$('proxies-text').value,$('proxy-region').value,$('proxy-protocol').value),
         mode:$('mode').value,workers:Number($('workers').value),timeout:Number($('timeout').value)}});
       state.jobRevision++;
       $('accounts-text').value=''; $('proxies-text').value=''; state.validCount=0; state.activeJob=result.id; state.page=0;

@@ -159,3 +159,31 @@ async def test_alias_budget_and_safe_proxy_deletion(pg_db):
         profile=(await client.post('/api/service/proxies',json={'name':'direct','mode':'direct'})).json()['id']
         assert (await client.request('DELETE',f'/api/service/proxies/{profile}',json={'version':1})).status_code==200
         assert (await client.get('/api/service/proxies')).json()==[]
+
+
+async def test_versioned_binding_edit_and_soft_model_delete(pg_db):
+    from uuid import uuid4
+    async with admin_env(pg_db) as (client,services):
+        client.headers.update({'x-test-session':'synthetic-session','x-csrf-token':'synthetic-csrf'})
+        provider=(await client.post('/api/service/providers',json={'name':'p','adapter':'openai_compatible','root':'https://provider.invalid/v1'})).json()['id']
+        credential=(await client.post(f'/api/service/providers/{provider}/credentials',json={'secret':'synthetic'})).json()['id']
+        await client.post('/api/service/models',json={'model_id':'family/m','identity':'m','enabled':True})
+        body={'id':str(uuid4()),'provider_id':provider,'credential_id':credential,'public_model_id':'family/m','upstream_model':'actual','identity':'m','input_bound':1000,'output_bound':100}
+        assert (await client.post('/api/service/bindings',json=body)).status_code==201
+        result=await client.put(f"/api/service/bindings/{body['id']}/1",json=dict(body,enabled=False))
+        assert result.status_code==200,result.text
+        assert (await client.put(f"/api/service/bindings/{body['id']}/1",json=body)).status_code==409
+        result=await client.request('DELETE','/api/service/models/family/m',json={'version':1})
+        assert result.status_code==200,result.text
+        assert (await client.get('/api/service/models')).json()[0]['enabled'] is False
+
+
+async def test_credential_rotate_accepts_ui_version_and_rejects_stale_editor(pg_db):
+    async with admin_env(pg_db) as (client,services):
+        client.headers.update({'x-test-session':'synthetic-session','x-csrf-token':'synthetic-csrf'})
+        provider=(await client.post('/api/service/providers',json={'name':'p','adapter':'openai_compatible','root':'https://provider.invalid/v1'})).json()['id']
+        identity=(await client.post(f'/api/service/providers/{provider}/credentials',json={'secret':'old-synthetic'})).json()['id']
+        result=await client.post(f'/api/service/credentials/{identity}/rotate',json={'secret':'new-synthetic','version':1})
+        assert result.status_code==200,result.text
+        result=await client.post(f'/api/service/credentials/{identity}/rotate',json={'secret':'stale-synthetic','version':1})
+        assert result.status_code==409

@@ -44,6 +44,10 @@ class CredentialInput(StrictInput):
     secret: SecretStr
 
 
+class CredentialRotateInput(CredentialInput):
+    version: int = Field(strict=True,ge=1)
+
+
 class ProxyInput(StrictInput):
     name: str = Field(min_length=1, max_length=200)
     mode: Literal["direct", "fixed", "pool", "kiotproxy"]

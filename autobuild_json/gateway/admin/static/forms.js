@@ -7,6 +7,7 @@ export function configForm(form,view,row,data){
   if(view==='budgets'){field(form,'currency','Đơn vị tiền tệ',{value:r.currency??'USD',required:true});field(form,'limit','Giới hạn chi phí upstream (trống = không giới hạn)',{value:r.budget_limit??''});form.append(node('p','Tạo budget riêng rồi gán ID cho provider. Không gộp quota của khách hoặc các đồng tiền khác nhau.',{class:'muted'}));}
   if(view==='providers'){
     field(form,'name','Tên provider',{value:r.name??'',required:true});field(form,'adapter','Chuẩn upstream',{choices:['openai_compatible','anthropic','gemini','ollama','codex_oauth'].map(x=>[x,x]),value:r.adapter??'openai_compatible'});
+    field(form,'rpm_limit','RPM tối đa của provider',{type:'number',value:r.rpm_limit??600});field(form,'concurrency_limit','Request đồng thời của provider',{type:'number',value:r.concurrency_limit??16});
     field(form,'root','Base URL (gồm /v1 hoặc /api)',{value:r.root??'',required:true});field(form,'wire_api','OpenAI wire API',{choices:[['chat','Chat Completions'],['responses','Responses']],value:r.wire_api??'chat'});
     field(form,'auth_mode','Xác thực upstream',{choices:['bearer','x-api-key','x-goog-api-key','none','oauth'].map(x=>[x,x]),value:r.auth_mode??'bearer'});
     field(form,'proxy_profile_id','Proxy profile',{choices:profiles,value:r.proxy_profile_id??''});field(form,'timeout','Timeout (1–600 giây)',{type:'number',value:r.timeout??180});field(form,'budget_id','Budget upstream ID (tùy chọn)',{value:r.budget_id??''});
@@ -28,7 +29,7 @@ export function configPayload(form,view,row){
   if(view==='aliases')return{alias:v('alias'),model_id:v('model_id')};
   if(view==='budgets')return{currency:v('currency'),limit:v('limit').trim()||null};
   if(view==='customers')return row?{name:v('name'),enabled:checked(form,'enabled'),version:row.version}:{name:v('name')};
-  if(view==='providers')return{name:v('name'),adapter:v('adapter'),root:v('root'),wire_api:v('wire_api'),auth_mode:v('auth_mode'),proxy_profile_id:v('proxy_profile_id')||null,budget_id:v('budget_id')||null,cost_schedule:v('cost_schedule').trim()?JSON.parse(v('cost_schedule')):null,timeout:Number(v('timeout')),enabled:checked(form,'enabled')};
+  if(view==='providers')return{name:v('name'),adapter:v('adapter'),root:v('root'),wire_api:v('wire_api'),auth_mode:v('auth_mode'),proxy_profile_id:v('proxy_profile_id')||null,budget_id:v('budget_id')||null,cost_schedule:v('cost_schedule').trim()?JSON.parse(v('cost_schedule')):null,timeout:Number(v('timeout')),rpm_limit:Number(v('rpm_limit')),concurrency_limit:Number(v('concurrency_limit')),enabled:checked(form,'enabled')};
   if(view==='credentials')return{secret:v('secret'),...(row?{version:row.version}:{})};
   if(view==='models')return{model_id:r.model_id??v('model_id'),identity:v('identity'),input_micro:decimalToMicro(v('input')),output_micro:decimalToMicro(v('output')),enabled:checked(form,'enabled'),router_model:checked(form,'router_model')};
   if(view==='bindings')return{id:r.id??crypto.randomUUID(),provider_id:v('provider_id'),credential_id:v('credential_id'),public_model_id:v('public_model_id'),upstream_model:v('upstream_model'),identity:v('identity'),input_bound:Number(v('input_bound')),output_bound:Number(v('output_bound')),capabilities:lines(v('capabilities')),priority:Number(v('priority')),enabled:checked(form,'enabled')};

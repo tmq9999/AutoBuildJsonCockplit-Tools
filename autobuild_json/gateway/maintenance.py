@@ -6,6 +6,8 @@ from sqlalchemy import text
 
 from .metering.ledger import Ledger
 from .metering.records import Usage
+from .metering.budgets import BudgetService
+from decimal import Decimal
 from .proxy.pg_leases import PgLeaseStore
 
 
@@ -27,12 +29,19 @@ class Maintenance:
         try:
             async with self.db.sessions() as session:
                 rows = (await session.execute(text("SELECT id,state FROM requests WHERE "
-                    "state IN ('reserved','dispatched','usage_pending') AND deadline<now()-interval '15 seconds' LIMIT 100"))).mappings().all()
+                    "(state IN ('reserved','dispatched','usage_pending') OR (state='released' AND EXISTS "
+                    "(SELECT 1 FROM upstream_reservations b WHERE b.request_id=requests.id AND b.state<>'settled'))) "
+                    "AND deadline<now()-interval '15 seconds' LIMIT 100"))).mappings().all()
             for row in rows:
                 if not await self.leases.assert_owner(lease):
                     break
-                if row["state"] == "reserved":
+                if row["state"] in {"reserved","released"}:
                     await self.ledger.release_unspent(row["id"], "not_dispatched")
+                    async with self.db.sessions() as session:
+                        unused=(await session.execute(text("SELECT b.attempt_id FROM upstream_reservations b LEFT JOIN attempts a ON a.id=b.attempt_id "
+                            "WHERE b.request_id=:id AND b.state<>'settled' AND (a.id IS NULL OR a.status='rejected')"),{'id':row['id']})).scalars().all()
+                    for attempt in unused:
+                        await BudgetService(self.db).settle(attempt,Decimal(0))
                 else:
                     async with self.db.sessions() as session:
                         evidence = (await session.execute(text("SELECT usage FROM attempts WHERE request_id=:id "

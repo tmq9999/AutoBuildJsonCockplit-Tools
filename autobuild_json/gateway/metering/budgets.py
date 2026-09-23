@@ -33,7 +33,7 @@ class BudgetService:
                                   {"id": identity, "currency": currency, "limit": limit})
         return identity
 
-    async def reserve(self, budget_id, attempt_id, currency, amount):
+    async def reserve(self, budget_id, attempt_id, currency, amount, *, request_id=None):
         money(amount)
         async with self.db.sessions.begin() as session:
             budget = (await session.execute(text("SELECT * FROM upstream_budgets WHERE id=:id FOR UPDATE"),
@@ -50,9 +50,9 @@ class BudgetService:
                 raise GatewayError("budget_exceeded", 503, "quota")
             await session.execute(text("UPDATE upstream_budgets SET held=held+:amount WHERE id=:id"),
                                   {"id": budget_id, "amount": amount})
-            await session.execute(text("INSERT INTO upstream_reservations(attempt_id,budget_id,amount) "
-                                       "VALUES (:attempt,:budget,:amount)"),
-                                  {"attempt": attempt_id, "budget": budget_id, "amount": amount})
+            await session.execute(text("INSERT INTO upstream_reservations(attempt_id,budget_id,amount,request_id) "
+                                       "VALUES (:attempt,:budget,:amount,:request)"),
+                                  {"attempt": attempt_id, "budget": budget_id, "amount": amount,'request':request_id})
 
     async def settle(self, attempt_id, actual):
         if actual is not None:

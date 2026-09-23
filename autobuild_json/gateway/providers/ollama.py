@@ -11,6 +11,7 @@ from ..protocols.ollama import OllamaCodec
 from ..protocols.frames import NDJSONDecoder
 from ..transport.http import OutboundRequest
 from .openai import ProviderStream
+from .preflight import auth_header
 
 
 async def ollama_events(response):
@@ -58,7 +59,7 @@ class OllamaAdapter:
     @asynccontextmanager
     async def open(self, request, route, lease):
         body = OllamaCodec().upstream_body(request, route.upstream_model)
-        auth = None if route.auth_mode == "none" else ("Authorization", "Bearer "+await self.credential_resolver(route))
+        auth = auth_header(route.auth_mode,await self.credential_resolver(route))
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
         call = OutboundRequest("POST", "chat", body, auth_header=auth, deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:

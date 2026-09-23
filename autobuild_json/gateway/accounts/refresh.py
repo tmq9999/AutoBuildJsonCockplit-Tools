@@ -16,6 +16,25 @@ def refresh_state(result):
     return {"success": "active", "invalid_grant": "reauth_required"}.get(result, "refresh_uncertain")
 
 
+async def run_http_thread(call, context):
+    task=asyncio.create_task(asyncio.to_thread(call))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        context.cancel.set()
+        # Cancellation cannot release the proxy while a blocking curl call is live.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                context.cancel.set()
+            except Exception:
+                break
+        if task.done() and not task.cancelled():
+            task.exception()
+        raise
+
+
 async def exchange_tokens(tokens, lease, deadline):
     context = AttemptContext(time.monotonic()+max(0, (deadline-datetime.now(timezone.utc)).total_seconds()),
                              threading.Event(), lambda *args: None)
@@ -36,7 +55,7 @@ async def exchange_tokens(tokens, lease, deadline):
         finally:
             transport.close()
     try:
-        return await asyncio.to_thread(exchange)
+        return await run_http_thread(exchange,context)
     except asyncio.CancelledError:
         context.cancel.set()
         raise
@@ -60,7 +79,7 @@ async def verify_tokens(tokens, account, email, lease, deadline):
         finally:
             transport.close()
     try:
-        await asyncio.to_thread(verify)
+        await run_http_thread(verify,context)
     except asyncio.CancelledError:
         context.cancel.set()
         raise

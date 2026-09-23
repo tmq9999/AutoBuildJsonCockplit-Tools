@@ -77,12 +77,16 @@ class Catalog:
                 raise GatewayError("not_found", 404)
             await self._audit(session, "credential.enabled" if enabled else "credential.disabled", identity)
 
-    async def rotate_credential(self, credential_id, secret):
+    async def rotate_credential(self, credential_id, secret, *, expected_version=None):
         if not isinstance(secret, str) or not 1 <= len(secret) <= 65536:
             raise GatewayError("invalid_request")
         cipher = self.vault.seal("credential", credential_id, secret.encode()).to_dict()
         async with self.db.sessions.begin() as session:
-            result = await session.scalar(text("UPDATE credentials SET encrypted_secret=CAST(:secret AS jsonb) "
+            if expected_version is not None:
+                current=await session.scalar(text('SELECT version FROM credentials WHERE id=:id FOR UPDATE'),{'id':credential_id})
+                if current!=expected_version:
+                    raise GatewayError('version_conflict',409)
+            result = await session.scalar(text("UPDATE credentials SET encrypted_secret=CAST(:secret AS jsonb),version=version+1 "
                 "WHERE id=:id RETURNING id"), {"id": credential_id, "secret": json_value(cipher)})
             if not result:
                 raise GatewayError("not_found", 404)
@@ -121,8 +125,11 @@ class Catalog:
             await session.execute(text("INSERT INTO model_aliases(alias,model_id) VALUES (:alias,:model) "
                 "ON CONFLICT(alias) DO UPDATE SET model_id=excluded.model_id"), {"alias": alias, "model": model_id})
 
-    async def put_binding(self, binding):
+    async def put_binding(self, binding, *, expected_version=None, create_only=False):
         async with self.db.sessions.begin() as session:
+            existing=await session.scalar(text('SELECT version FROM model_bindings WHERE id=:id FOR UPDATE'),{'id':binding.id})
+            if create_only and existing is not None or expected_version is not None and existing!=expected_version:
+                raise GatewayError('version_conflict',409)
             provider = await session.scalar(text("SELECT provider_id FROM credentials WHERE id=:id"), {"id": binding.credential_id})
             config = await session.scalar(text("SELECT config FROM public_models WHERE id=:id"), {"id": binding.public_model_id})
             if provider != binding.provider_id or config is None:
@@ -133,9 +140,10 @@ class Catalog:
             await session.execute(text("""INSERT INTO model_bindings(id,provider_id,credential_id,model_id,config)
                 VALUES (:id,:provider,:credential,:model,CAST(:config AS jsonb)) ON CONFLICT(id) DO UPDATE
                 SET provider_id=excluded.provider_id,credential_id=excluded.credential_id,
-                    model_id=excluded.model_id,config=excluded.config"""),
+                    model_id=excluded.model_id,config=excluded.config,version=model_bindings.version+1"""),
                 {"id": binding.id, "provider": binding.provider_id, "credential": binding.credential_id,
                  "model": binding.public_model_id, "config": json_value(asdict(binding))})
+            await self._audit(session,'binding.updated' if existing else 'binding.created',binding.id)
 
     async def _policy(self, session, principal):
         row = (await session.execute(text("""SELECT k.policy,k.version FROM api_keys k JOIN customers c ON c.id=k.customer_id

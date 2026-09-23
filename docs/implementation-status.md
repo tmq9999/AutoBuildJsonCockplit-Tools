@@ -1,5 +1,29 @@
 # Implementation status
 
+## Current API gateway handoff — 2026-09-24
+
+Approved Superdesign v3 implemented locally at `/service/` on the private admin
+listener. API key/customer/policy, provider/credential, model/mapping, proxy/Kiot,
+OAuth import/refresh, usage/audit, alias/budget and JSON playground are connected.
+Legacy OAuth screen now exposes proxy source/region/protocol without changing its
+default behavior. No real credentials/results were used in tests or migrated.
+
+Final evidence: **446 Python tests**, **12 Node tests**, both Chrome E2E suites,
+Ruff, compileall and package build passed. Tests include dedicated PostgreSQL 17.6,
+real SDK HTTP clients, 40 cross-protocol text/stream routes and lifecycle regressions.
+One upstream Google GenAI deprecation warning remains. Independent reviewer found
+ten Important issues; the author reproduced and fixed them, then ran the green
+full suite. There was no second review approval claim.
+
+See [review fixes](gateway-review-resolution.md), [operating instructions](gateway-operations.md),
+[compatibility limits](gateway-compatibility.md), and [implementation rulings](gateway-implementation-decisions.md).
+Live provider/Kiot/Codex-inference smoke tests and production configuration still
+require operator acceptance. Branch `feat/api-gateway` is separate from original
+`feat/http-oauth`; merge/push/public deployment are not performed.
+
+Sections below are historical checkpoints of the original OAuth tool and earlier
+gateway development; this section supersedes their pending-UI/review statements.
+
 ## Implemented
 
 - Tasks 1–8: strict account/proxy parsing, PKCE and single-use callback handling,

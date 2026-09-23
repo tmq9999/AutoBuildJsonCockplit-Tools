@@ -25,7 +25,7 @@ class GatewayStreamResponse(Response):
                     disconnected = True
                     parent.cancel()
                     return
-        watcher = asyncio.create_task(watch())
+        watcher = None if scope.get('gateway_disconnect_guard') else asyncio.create_task(watch())
         try:
             await send({"type": "http.response.start", "status": 200, "headers": self.raw_headers})
             try:
@@ -41,6 +41,7 @@ class GatewayStreamResponse(Response):
             if not disconnected:
                 raise
         finally:
-            watcher.cancel()
-            await asyncio.gather(watcher, return_exceptions=True)
+            if watcher:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
             await asyncio.wait_for(asyncio.shield(self.prepared.close()), 5)

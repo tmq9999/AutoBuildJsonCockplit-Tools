@@ -17,7 +17,7 @@ function dataset(){if(view==='oauth')return data.credentials?.filter(r=>r.accoun
 function rowValues(row){
   if(view==='aliases')return[row.alias,row.model_id];
   if(view==='budgets')return[row.id,row.currency,row.budget_limit??'Không giới hạn',row.spent,row.held];
-  if(view==='keys'){const owner=data.customers.find(c=>c.id===row.customer_id);return[row.name||row.prefix,owner?.name??'—',row.policy.total_micro===null?'Không giới hạn':microToDecimal(row.policy.total_micro),row.policy.protocols.join(', '),row.revoked_at?'Đã thu hồi':row.policy.enabled?'Hoạt động':'Đã khóa'];}
+  if(view==='keys'){const owner=data.customers.find(c=>c.id===row.customer_id),balance=data['key-balances']?.find(b=>b.key_id===row.key_id);const total=row.policy.total_micro===null?'Không giới hạn':microToDecimal(row.policy.total_micro);return[row.name||row.prefix,owner?.name??'—',`${microToDecimal(balance?.spent??'0')} dùng · ${microToDecimal(balance?.held??'0')} giữ / ${total}`,row.policy.protocols.join(', '),row.revoked_at?'Đã thu hồi':row.policy.enabled?'Hoạt động':'Đã khóa'];}
   if(view==='providers')return[row.config.name,row.config.adapter,row.config.root,row.config.enabled?'Hoạt động':'Đã tắt'];
   if(view==='models')return[row.model_id,row.identity,`${microToDecimal(row.input_micro)} / ${microToDecimal(row.output_micro)}`,row.enabled?'Hiển thị':'Ẩn'];
   if(view==='proxies')return[row.name,row.config.mode,row.config.region,row.version];
@@ -45,7 +45,7 @@ function savePath(row,form){const id=encodeURIComponent(row?.key_id??row?.id??ro
   if(view==='keys'||view==='customers')return['/api/service/'+view+(row?'/'+id:''),row?'PATCH':'POST'];
   if(view==='providers'||view==='proxies'||view==='models')return['/api/service/'+view+(row?`/${id}/${row.version}`:''),row?'PUT':'POST'];
   if(view==='credentials')return[row?`/api/service/credentials/${id}/rotate`:`/api/service/providers/${value(form,'provider_id')}/credentials`,'POST'];
-  if(view==='bindings')return['/api/service/bindings','POST'];
+  if(view==='bindings')return[row?`/api/service/bindings/${id}/${row.version}`:'/api/service/bindings',row?'PUT':'POST'];
   if(view==='oauth')return['/api/service/oauth/import','POST'];
   if(view==='usage')return[`/api/service/usage/${id}/adjust`,'POST'];
   return['/api/service/playground','POST'];
@@ -65,6 +65,7 @@ function edit(row=null){
   if(view==='keys'&&row&&!row.revoked_at){action($('editor'),'Đổi key',()=>guard(async()=>{if(!confirm('Key cũ sẽ mất hiệu lực cho request mới. Tiếp tục?'))return;const result=await api.request(`/api/service/keys/${row.key_id}/rotate`,{method:'POST',body:{version:row.version}});await load();edit(data.keys.find(k=>k.key_id===row.key_id));reveal(result.secret);}));action($('editor'),'Thu hồi key',()=>guard(async()=>{if(!confirm('Thu hồi key này? Usage/audit được giữ lại.'))return;await api.request(`/api/service/keys/${row.key_id}/revoke`,{method:'POST',body:{version:row.version}});await load();edit(data.keys.find(k=>k.key_id===row.key_id));}),'danger');}
   if(view==='providers'&&row){action($('editor'),'Lấy danh sách model',()=>guard(async()=>{const result=await api.request(`/api/service/providers/${row.id}/discover`,{method:'POST',body:{}});$('editor').append(node('pre',JSON.stringify(result,null,2)));}));action($('editor'),'Tắt provider',()=>guard(async()=>{await api.request(`/api/service/providers/${row.id}`,{method:'DELETE',body:{version:row.version}});await load();}),'danger');}
   if(view==='credentials'&&row)action($('editor'),row.enabled?'Tắt credential':'Bật credential',()=>guard(async()=>{await api.request(`/api/service/credentials/${row.id}`,{method:'PATCH',body:{version:row.version,enabled:!row.enabled}});await load();edit(data.credentials.find(c=>c.id===row.id));}));
+  if(view==='models'&&row)action($('editor'),'Ẩn / ngừng model',()=>guard(async()=>{await api.request(`/api/service/models/${encodeURIComponent(row.model_id)}`,{method:'DELETE',body:{version:row.version}});await load();edit(data.models.find(m=>m.model_id===row.model_id));}),'danger');
   if(view==='proxies'&&row){action($('editor'),'Xóa profile không còn dùng',()=>guard(async()=>{if(!confirm('Xóa cấu hình proxy này? Không gọi /out.'))return;await api.request(`/api/service/proxies/${row.id}`,{method:'DELETE',body:{version:row.version}});await load();$('editor').replaceChildren();}),'danger');if(row.config.mode==='kiotproxy')action($('editor'),'Giải phóng Kiot key…',()=>guard(async()=>{const index=prompt('Số thứ tự key (bắt đầu từ 1). Chỉ giải phóng khi không có request sử dụng.');if(index===null)return;await api.request(`/api/service/proxies/${row.id}/release`,{method:'POST',body:{key_index:Number(index)-1}});notice('Đã giải phóng key được chọn.');}));}
 }
 for(const button of document.querySelectorAll('[data-nav]'))button.addEventListener('click',()=>{if(busy)return;view=button.dataset.nav;selected=null;$('search').value='';$('editor').replaceChildren(node('p','Chọn bản ghi hoặc thêm mới.',{class:'muted'}));render();if(view==='playground')edit();});

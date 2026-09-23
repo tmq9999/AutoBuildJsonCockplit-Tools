@@ -97,6 +97,8 @@ class CredentialService:
             raise GatewayError("deadline_exceeded", 504, "refresh")
         try:
             row = await self._record(credential_id)
+            if row['health'] in {'reauth_required','refresh_uncertain'}:
+                raise GatewayError(row['health'],503,'refresh')
             if row["health"] == "active" and row["token_expires_at"] and row["token_expires_at"] > datetime.now(timezone.utc)+timedelta(seconds=60):
                 return self._tokens(row)
             if row["health"] == "refreshing":
