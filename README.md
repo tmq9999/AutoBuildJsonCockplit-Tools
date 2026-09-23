@@ -190,12 +190,12 @@ npm run test:gateway-browser
 ```
 
 Test binaries cần `initdb`/`pg_ctl`; tests tạo cluster tạm có password. Python
-integration tests cũng có thể dùng `AUTOBUILD_TEST_DATABASE_URL`: database test-only
+integration và gateway browser tests cũng có thể dùng `AUTOBUILD_TEST_DATABASE_URL`: database test-only
 loopback, port tường minh, tên `abgw_test_<32 ký tự hex>`, role được tạo/drop DB con.
 Không dùng database thật. Chrome dùng `/usr/bin/google-chrome` hoặc `CHROME_PATH`.
 Test không gọi account/model thật; provider I/O dùng dữ liệu tổng hợp.
 
-Checkpoint: **446 Python tests, 12 Node tests, hai Chrome E2E**, lint/build qua.
+Checkpoint local: **449 Python tests, 12 Node tests, hai Chrome E2E**, lint/build qua.
 Xem [compatibility](docs/gateway-compatibility.md) và
 [review resolution](docs/gateway-review-resolution.md). CI kiểm tra Python 3.10/3.14;
 test local không thay thế trạng thái CI hiện tại.

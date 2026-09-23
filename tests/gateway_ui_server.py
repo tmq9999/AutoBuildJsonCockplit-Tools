@@ -22,7 +22,7 @@ from autobuild_json.gateway.storage.db import make_database
 from autobuild_json.gateway.storage.migrate import upgrade
 from autobuild_json.gateway.transport.egress import EgressPolicy
 from autobuild_json.gateway.transport.http import Transport
-from scripts.gateway_testdb import test_database
+from scripts.gateway_testdb import test_database, validate_test_url
 from tests.fakes import success_result
 from tests.gateway.harness import chat_success
 
@@ -37,12 +37,22 @@ class TestServer(uvicorn.Server):
             signal.signal(signal.SIGTERM, previous)
 
 
+def database_options(environment, root):
+    url = environment.get("AUTOBUILD_TEST_DATABASE_URL")
+    if "AUTOBUILD_TEST_DATABASE_URL" in environment:
+        validate_test_url(url or "")
+    return {
+        "postgres_bin": environment.get("AUTOBUILD_TEST_POSTGRES_BIN") or root / ".deps/gateway-pg17/binary/bin",
+        "url": url,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    with test_database(postgres_bin=root / ".deps/gateway-pg17/binary/bin") as url:
+    with test_database(**database_options(os.environ, root)) as url:
         db = make_database(SecretStr(url))
         asyncio.run(upgrade(db))
 
