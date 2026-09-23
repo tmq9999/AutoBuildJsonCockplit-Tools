@@ -1,210 +1,226 @@
 # AutoBuildJsonCockplit-Tools
 
-## API gateway và quản trị
+Gateway API đa chuẩn và công cụ OAuth HTTP, kèm giao diện quản trị tiếng Việt.
+Admin quản lý khách hàng, API key, model, quota, hệ số token, provider bên ngoài
+và proxy; khách gọi model qua key riêng, không nhận credential upstream.
 
-Nhánh `feat/api-gateway` có gateway riêng cho OpenAI, Anthropic, Gemini,
-Ollama; UI quản trị tại `/service/` để quản lý key/quota/provider và proxy/KiotProxy.
-Đã có kiểm thử PostgreSQL, SDK, browser và bản sửa sau review độc lập. Live smoke
-với provider/Kiot thật và cấu hình production vẫn cần kiểm chứng khi triển khai.
-Không thay đổi lệnh chạy OAuth local mặc định hoặc tự mở dịch vụ ra Internet.
-Xem [vận hành gateway](docs/gateway-operations.md) và
-[ma trận tương thích đã kiểm thử](docs/gateway-compatibility.md).
+Code gateway được xây dựng riêng, tham khảo kiến trúc FreeLLMAPI, Cockpit Tools
+và 9router; không đóng gói source/sidecar của các project này.
 
-Tool local dùng HTTP để đăng nhập tài khoản được phép sử dụng, thực hiện OAuth Codex
-và xuất JSON tương thích mẫu của Auto-Oauth-Codex-9Router. Không cần chạy 9router.
+> Đã kiểm thử offline với PostgreSQL thật, SDK và Chrome. Chưa xác nhận live
+> Codex inference, KiotProxy hoặc provider bên ngoài bằng credential thật cho
+> gateway. Tương thích giao thức không tự cấp quyền resale dịch vụ.
 
-Giao diện tiếng Việt đã ghép vào FastAPI tại `/`, theo bản Superdesign đã duyệt.
-Đã thử đăng nhập thật sau bản sửa Sentinel: 1 tài khoản đã trả bộ token OAuth hợp lệ
-và batch dừng ngay ở thành công đầu tiên. Endpoint đăng nhập nội bộ có thể thay đổi;
-test giả lập không bảo đảm tất cả tài khoản sẽ đăng nhập thành công.
+## Chức năng
 
-Luồng khởi tạo đã cập nhật theo capture: `GET /api/auth/providers` →
-`GET /api/auth/csrf` → `POST /api/auth/signin/openai`. Không tải trang chủ trước
-khi bắt đầu. `auth_session_logging_id` và `ext-oai-did` là hai UUID v4 mới cho mỗi
-attempt; giữ cùng cookie jar qua ba request, không dùng cookie từ capture.
-Signin có `prompt=login`, `screen_hint=login_or_signup`, `login_hint`, hai UUID;
-form body được URL-encode đúng chuẩn. Request trang chủ vẫn có thể xuất hiện
-**sau** MFA nếu callback của server redirect về `/`.
+- **API key:** tạo, đổi secret, sửa tên/policy, khóa/thu hồi, hết hạn; secret chỉ
+  hiện một lần. Một khách hàng có thể sở hữu nhiều key.
+- **Model/quota:** allowlist model và giao thức, alias/mapping, quota tổng/ngày/
+  tháng, RPM/concurrency, hệ số input/output riêng theo model/key.
+- **Provider:** Base URL, chuẩn API/auth header, credential mã hóa, discovery có
+  bước chọn trước khi công bố; routing ưu tiên, round-robin, cooldown và budget.
+- **Proxy:** direct, proxy cố định, danh sách HTTP/HTTPS/SOCKS5 và KiotProxy
+  (mỗi dòng một API key; vùng Bắc/Trung/Nam/ngẫu nhiên).
+- **OAuth:** batch HTTP tuần tự/song song, PKCE/callback thủ công, import JSON,
+  refresh token có khóa chống gửi trùng; lỗi riêng và `Phone number verify`.
+- **Vận hành:** usage/audit, playground JSON, phục hồi request chưa quyết toán,
+  snapshot mã hóa và restore vào database trống.
 
-Đã kiểm chứng một lần OAuth thật với luồng này và nhận đủ ba token. Việc bỏ request
-khởi tạo trang chủ không bảo đảm mọi request mạng khác sẽ hết timeout.
+## Chuẩn API
 
-## Cài đặt
+| Client | Endpoint chính | Xác thực |
+|---|---|---|
+| OpenAI | `/v1/chat/completions`, `/v1/responses`, `/v1/models` | Bearer |
+| Anthropic | `/v1/messages`, `/v1/messages/count_tokens` | `x-api-key` hoặc Bearer; `anthropic-version` |
+| Gemini | `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:countTokens` | `x-goog-api-key` hoặc Bearer |
+| Ollama | `/api/chat`, `/api/generate`, `/api/tags`, `/api/show` | Bearer bắt buộc |
 
-Python 3.10+ và Git. Đã kiểm thử trong môi trường Python 3.14 trên Linux.
+Streaming dùng SSE hoặc NDJSON theo chuẩn client. Inbound protocol độc lập với
+provider; chẳng hạn Messages client có thể dùng model OpenAI-compatible.
+Tính năng không biểu diễn được trên tuyến được chọn phải trả lỗi, không giả hỗ trợ.
+Xem [ma trận tương thích](docs/gateway-compatibility.md).
+
+## Yêu cầu và kiến trúc
+
+Python **3.10+**, Git; PostgreSQL **17** cho gateway. Node/Chrome chỉ cần để phát
+triển hoặc kiểm thử UI, không cần để chạy ứng dụng đã đóng gói.
+
+| Thành phần | Địa chỉ mặc định | Vai trò |
+|---|---|---|
+| Private admin + OAuth | `http://127.0.0.1:8787` | Workbench `/`, quản trị `/service/` |
+| Gateway | `http://127.0.0.1:8788` | API client, không mount quản trị |
+| Maintenance | Không mở port | Đối soát request và dọn state hết hạn |
+
+PostgreSQL lưu policy, quota ledger, token/credential mã hóa và lease dùng chung.
+Master key ở ngoài database. Export OAuth cũ trong `data/` không tự được mã hóa
+bởi vault mới; bảo vệ riêng như mật khẩu.
+
+## Cài đặt gateway
 
 ```bash
+git clone git@github.com:tmq9999/AutoBuildJsonCockplit-Tools.git
+cd AutoBuildJsonCockplit-Tools
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install -e '.[service]'
+```
+
+Repo private: GitHub account/SSH key phải được cấp quyền. Windows dùng
+`.venv\Scripts\python.exe`. Linux thiếu `ensurepip` cần gói venv tương ứng;
+không ghi đè môi trường Python hệ thống.
+
+### Database và keyring
+
+Chuẩn bị PostgreSQL với database/role riêng. Các giá trị sau chỉ là ví dụ; thay
+trên máy của bạn, không commit cấu hình thật hoặc ghi password vào history dùng chung.
+
+```bash
+export AUTOBUILD_GATEWAY_DATABASE_URL='postgresql+psycopg://USER:URL_ENCODED_PASSWORD@127.0.0.1:5432/gateway'
+export AUTOBUILD_GATEWAY_MASTER_KEY_FILE='/absolute/private/keyring.json'
+.venv/bin/python -m autobuild_json.gateway init-keyring --key-file /absolute/private/keyring.json
+.venv/bin/python -m autobuild_json.gateway migrate
+```
+
+Thư mục chứa keyring phải tồn tại và có quyền riêng tư. Lệnh khởi tạo không ghi
+đè keyring có sẵn. Sao lưu keyring tách biệt với database. Gateway đọc environment
+variables; **không tự nạp file `.env`** cho service settings.
+
+### Chạy dịch vụ
+
+Ba terminal/process cần cùng biến môi trường ở trên:
+
+```bash
+# Terminal 1: API khách
+.venv/bin/python -m autobuild_json.gateway serve
+```
+
+```bash
+# Terminal 2: UI/API quản trị private
+.venv/bin/python -m autobuild_json.gateway admin
+```
+
+```bash
+# Terminal 3: phục hồi/đối soát
+.venv/bin/python -m autobuild_json.gateway maintenance
+```
+
+Mở `http://127.0.0.1:8787/service/`. Admin token nằm trong
+`data/local-config.json`; lấy trực tiếp trên máy, không gửi lên GitHub. Đây không
+phải client API key hay token OpenAI.
+
+Nếu server OAuth cũ đang chạy, không dùng cùng port/data directory:
+
+```bash
+export AUTOBUILD_DATA_DIR='data/gateway-admin'
+.venv/bin/python -m autobuild_json.gateway admin --port 8789
+```
+
+Khi đó UI ở `http://127.0.0.1:8789/service/`, token ở
+`data/gateway-admin/local-config.json`. Không chạy hai coordinator cùng data.
+
+### Thiết lập qua UI
+
+1. Thêm **Provider**: adapter, Base URL với prefix phù hợp (`/v1`, `/v1beta` hoặc
+   `/api`), auth mode, timeout, RPM/concurrency và proxy profile nếu cần.
+2. Thêm **Credential** cho provider. Secret upstream không hiển thị lại.
+3. Thêm **Model** public và **Model mapping** tới upstream model/credential;
+   khai báo input/output bound đúng thực tế, không tùy ý đặt thấp.
+4. Thêm **Khách hàng**, tạo **API key**, cấp model/giao thức/quota.
+   Key mới mặc định không có quota/model để gọi.
+5. Dùng **Chạy thử API** với client key; request chịu đúng quyền và quota.
+   OAuth import cần refresh/kiểm chứng trước khi đưa vào tuyến hoạt động.
+
+## Quota và chi phí
+
+```text
+Token quy đổi = input_tokens × hệ số input + output_tokens × hệ số output
+```
+
+1.000 input × 1 + 500 output × 3 = **2.500 token quy đổi**.
+UI dùng token; private admin API dùng micro-unit:
+`1 token quy đổi = 1.000.000 micro-unit`, truyền bằng chuỗi thập phân để tránh JS
+làm tròn. Usage thực và chi phí mua vào được lưu riêng.
+
+- Giữ quota trước dispatch, quyết toán actual usage một lần, trả phần giữ thừa.
+- Thiếu usage/timeout không rõ kết quả → `usage_pending`; không giả usage=0 hay
+  tự hoàn hết. Admin đối soát bằng evidence và audit adjustment.
+- Cửa sổ ngày/tháng theo UTC lúc nhận request; `null` = không giới hạn, `0` = hết.
+- Không tự replay generation không rõ kết quả hoặc khi đã bắt đầu stream.
+
+## Proxy và KiotProxy
+
+Proxy tĩnh nhận URL, `host:port`, `host:port:user:pass` hoặc
+`http|host|port|user|pass`. Danh sách mỗi dòng một mục. Kiot mode nhận **API key**
+mỗi dòng, không phải URL; hỗ trợ `random`, `bac`, `trung`, `nam`, HTTP/SOCKS5.
+
+Giữ proxy trong mỗi operation, tôn trọng cooldown/TTL và giới hạn dùng key đồng
+thời. Không đổi IP để vượt giới hạn upstream; proxy lỗi không tự fallback direct.
+Kiot `/out` chỉ gọi khi admin chủ động giải phóng key idle. Không chia sẻ Kiot key
+với tool khác nếu cần bảo đảm không bị đổi IP bên ngoài.
+
+## OAuth-only, không cần PostgreSQL
+
+```bash
+.venv/bin/python -m pip install -e '.[proxy]'
 .venv/bin/python scripts/setup_checklive.py
 .venv/bin/python -m autobuild_json
 ```
 
-Windows dùng `.venv\Scripts\python.exe` thay `.venv/bin/python`. Nếu Linux thiếu
-`ensurepip`, có thể cài gói `python3-venv` của hệ điều hành, hoặc dùng pip có sẵn để
-cài vào venv: `python3 -m pip --python .venv/bin/python install pip`.
+Input `Email|Password|2FA_SECRET`, mỗi dòng một tài khoản. Dòng thiếu/sai thành
+phần bị lọc; không sửa file account gốc. TOTP không thay thế yêu cầu xác minh
+email/phone của provider.
 
-Script setup chỉ tạo checkout mới tại `.deps/Check-Account-ChatGPT`, cố định commit
-`791beb350370c191bbe8ddbe0b4a3fa0072620d9`. Checkout có sẵn khác revision/bị sửa sẽ
-bị từ chối, không reset. Có thể cấu hình đường dẫn khác bằng `CHECKLIVE_PATH`.
-Source auth không có package manifest và không được pip-install như package.
-Xem [THIRD_PARTY.md](THIRD_PARTY.md) trước khi phân phối lại source upstream.
+CheckLive chỉ cần cho batch HTTP email/password/TOTP; gateway API-key và import/
+OAuth thủ công không cần nó. Dependency được pin, không đóng gói vào repo/build.
+Xem [hướng dẫn OAuth](docs/oauth-workbench.md) và [THIRD_PARTY.md](THIRD_PARTY.md).
 
-API chạy tại `http://127.0.0.1:8787`. Chỉ một process được dùng cùng thư mục data.
-Không chạy nhiều Uvicorn workers hoặc `--reload` khi có batch.
-Đổi port: `.venv/bin/python -m autobuild_json --port 8788`.
-
-## Dùng giao diện
-
-1. Mở `http://127.0.0.1:8787`, nhập `admin_token` từ file local bên dưới.
-2. Chọn file hoặc dán danh sách tài khoản; bấm **Kiểm tra dữ liệu** để xem số hợp lệ
-   và các dòng bị lọc. Sửa dữ liệu sẽ yêu cầu kiểm tra lại.
-3. Nhập proxy nếu cần; chọn **Tuần tự** hoặc **Song song**, số luồng và timeout.
-4. Bấm **Bắt đầu**, theo dõi bảng trạng thái; **Dừng** ngừng lấy account mới.
-5. Tải file theo nhóm ở phía trên bảng. Chọn **Batch đã lưu** để xem lại sau reload/restart.
-6. Mở **OAuth thủ công** nếu muốn tạo link và tự dán callback từ trình duyệt.
-
-Đăng xuất không dừng batch backend. Password/secret chỉ tồn tại trong ô nhập đến
-khi Start được chấp nhận; không ghi localStorage/sessionStorage. Giao diện chỉ tải
-assets nội bộ, không tải script/font/CDN bên thứ ba.
-
-## Đăng nhập API local
-
-Lần khởi động đầu tạo `data/local-config.json`, chứa `admin_token` và UUID cài đặt.
-Mở file này **trên máy của bạn** để lấy token, không gửi token cho người khác.
-Có thể dùng `AUTOBUILD_ADMIN_TOKEN` riêng trong `.env`; đừng commit `.env`.
-
-1. `POST /api/session`, header `Origin: http://127.0.0.1:8787`, JSON
-   `{"token":"YOUR_LOCAL_ADMIN_TOKEN"}`. Lưu cookie `autobuild_session` và
-   `csrf_token` trả về.
-2. Mọi POST/DELETE tiếp theo cần cookie, cùng Origin và `X-CSRF-Token`.
-3. GET chỉ cần cookie; `GET /api/session` lấy lại CSRF cho phiên hiện tại.
-4. `DELETE /api/session` đăng xuất. Phiên hết hạn sau 8 giờ.
-
-Không đặt token/callback/account trong query URL. Không CORS wildcard.
-OpenAPI/Swagger bị tắt để không lộ API ngoài phiên quản trị.
-
-## Đầu vào và chạy batch
-
-Mỗi dòng đúng ba thành phần không rỗng:
-
-```text
-user@example.com|your-password|YOUR_BASE32_TOTP_SECRET
-```
-
-Chỉ dùng secret TOTP thật của tài khoản được phép sử dụng, không dùng mã 6 chữ số.
-Dòng trắng bỏ qua; dòng sai bị lọc kèm số dòng/lý do. Password giữ nguyên khoảng trắng.
-Tối đa 5 MiB UTF-8 và 10.000 dòng. Không sửa/xóa file account gốc.
-
-Proxy có thể là URL (`http://user:pass@host:8080`, `socks5://host:1080`), `host:port`,
-`host:port:user:pass`, hoặc `http|host|port|user|pass`. Proxy sai không tự fallback
-sang direct. Proxy trống nghĩa là direct. Không ghi mật khẩu proxy vào log.
-
-`POST /api/accounts/validate`: `{"accounts_text":"..."}` trả preview đã che,
-số dòng hợp lệ/bị lọc và cảnh báo trùng email; không đăng nhập tài khoản.
-
-`POST /api/jobs`:
-
-```json
-{
-  "accounts_text": "YOUR_ACCOUNT_ROWS",
-  "proxies_text": "",
-  "mode": "sequential",
-  "workers": 1,
-  "timeout": 180
-}
-```
-
-`parallel` cho phép 1–16 worker. Một email và một proxy chỉ có một attempt đồng thời;
-proxy giữ nguyên xuyên suốt attempt. Nếu có ít proxy, mức song song giảm tương ứng.
-Chạy một lượt danh sách rồi kết thúc, không xoay lại vô hạn. Không tự retry sai
-password/TOTP, phone verify, 403 hoặc rate limit; `invalid_state` được khởi tạo phiên
-mới tối đa một lần. Token-exchange thất bại không rõ kết quả không bị gửi lặp lại.
-
-Các API quản lý:
-
-- `GET /api/health`: API và dependency auth có sẵn hay chưa.
-- `GET /api/jobs`: lịch sử batch, dùng để tìm lại sau restart.
-- `GET /api/jobs/{id}`: tiến độ, từng account và lỗi an toàn; không có token.
-- `POST /api/jobs/{id}/stop`: ngừng lấy account mới; request đang chờ có thể cần
-  đến timeout hiện tại (tối đa 30 giây). Kết quả đã lưu không bị mất.
-- `GET /api/jobs/{id}/exports/{kind}`: tải `success`, `errors`, `phone_verify`,
-  `filtered` hoặc `cancelled` dạng JSON array.
-
-## Link và callback thủ công
-
-`POST /api/oauth/links` với `{"email":"user@example.com","proxy":""}` trả link
-desktop-auth và `session_id`. Mỗi phiên có PKCE/state riêng, hết hạn sau 10 phút.
-API không trả `code_verifier` và không tự đăng nhập khi chỉ tạo link.
-
-Mở link trong trình duyệt và hoàn tất đăng nhập. Tool **không mở listener 1455**;
-trình duyệt có thể báo không kết nối được localhost. Sao chép nguyên URL callback
-trên thanh địa chỉ, rồi `POST /api/oauth/complete`:
-
-```json
-{"session_id":"RETURNED_SESSION_ID","callback_url":"YOUR_LOCALHOST_CALLBACK_URL"}
-```
-
-Callback chỉ được tiêu thụ một lần, phải đúng host/port/path/state và chưa hết hạn.
-Thành công tải về mảng JSON. Proxy của trình duyệt thủ công do bạn cấu hình;
-tool chỉ kiểm soát proxy của HTTP token exchange.
-
-## Kết quả và bảo mật
-
-`success.json` chỉ gồm `id`, `email`, `account.id`, `tokens.id_token`,
-`tokens.access_token`, `tokens.refresh_token`. ID bản ghi là UUID riêng;
-account ID và email lấy từ ID token đã xác thực chữ ký/issuer/audience/thời hạn.
-Token ChatGPT session không được dùng giả làm token Codex.
-
-Phone verification có nhãn chính xác `Phone number verify`. Trang/redirect CAPTCHA-
-Turnstile hoặc workspace không xác định được sẽ báo yêu cầu thao tác riêng. Metadata
-Sentinel `dx` được xử lý giống code CheckLive gốc; chỉ metadata không bị coi là CAPTCHA.
-Không tự giải xác minh điện thoại và không thêm solver ngoài repo.
-
-`data/runs/<id>/run.json` là snapshot bền vững và **chứa token của kết quả thành công**.
-File có quyền 0600 và thư mục 0700 trên POSIX. Trên Windows cần hạn chế ACL thư mục
-cho chính người dùng chạy tool. Không đưa `data/`, `.env`, account hoặc token vào Git.
-Nếu đĩa vẫn đầy khi khởi động lại, cấu hình đã có được đọc mà không ghi lại; API
-chạy chế độ degraded để tải kết quả đã xác nhận, từ chối batch mới cho đến khi
-giải phóng dung lượng và khởi động lại.
-Nếu lỗi ghi xảy ra giữa batch, account đang xử lý chuyển thành lỗi và account chưa
-chạy chuyển thành cancelled. Khi đĩa không ghi được cả trạng thái lỗi, các báo cáo
-đó là bản phục hồi trong RAM (`batch_error.recovery_view`); tải chúng trước khi thoát.
-Các success đã được xác nhận trên đĩa vẫn được giữ nguyên.
-Password/secret đầu vào chỉ giữ trong bộ nhớ; restart không tự tiếp tục tài khoản
-chưa xử lý, chúng chuyển thành cancelled với lý do interrupted. Kết quả đã lưu vẫn
-tải được. Lỗi đĩa dừng batch và không báo success giả.
-
-Không công khai dịch vụ ra LAN/Internet, không tắt TLS verification, không dùng tool
-để vượt khóa tài khoản/rate limit. Lưu token xuất ra như lưu mật khẩu.
-
-## Test offline
+## Kiểm thử
 
 ```bash
+.venv/bin/python -m pip install -e '.[dev,service,gateway-test]' -r requirements/gateway-sdk-tests.lock
+.venv/bin/python scripts/setup_checklive.py
+export AUTOBUILD_TEST_POSTGRES_BIN='/absolute/path/to/postgresql/bin'
 .venv/bin/python -m pytest -q
 .venv/bin/python -m ruff check .
 .venv/bin/python -m compileall -q autobuild_json
 .venv/bin/python -m build
-```
-
-Kiểm thử giao diện bằng Node (chỉ phục vụ phát triển, không cần để chạy tool):
-
-```bash
 npm ci
 npm run test:ui
 npm run test:browser
+npm run test:gateway-browser
 ```
 
-Browser test sử dụng Chrome sẵn trên máy; đặt `CHROME_PATH` nếu khác
-`/usr/bin/google-chrome`. Xem [tests/ui/acceptance.md](tests/ui/acceptance.md).
+Test binaries cần `initdb`/`pg_ctl`; tests tạo cluster tạm có password. Python
+integration tests cũng có thể dùng `AUTOBUILD_TEST_DATABASE_URL`: database test-only
+loopback, port tường minh, tên `abgw_test_<32 ký tự hex>`, role được tạo/drop DB con.
+Không dùng database thật. Chrome dùng `/usr/bin/google-chrome` hoặc `CHROME_PATH`.
+Test không gọi account/model thật; provider I/O dùng dữ liệu tổng hợp.
 
-Test auth dùng methods thực từ checkout cố định với HTTP giả; không dùng token
-trong `json.txt` hay gửi request đăng nhập account thật. Hai cảnh báo deprecation
-của bộ TestClient hiện xuất hiện với các dependency mới nhất, không phải test lỗi.
-HTTP 429 hiện báo RATE_LIMITED nhưng chưa hiển thị thời gian Retry-After của provider.
+Checkpoint: **446 Python tests, 12 Node tests, hai Chrome E2E**, lint/build qua.
+Xem [compatibility](docs/gateway-compatibility.md) và
+[review resolution](docs/gateway-review-resolution.md). CI kiểm tra Python 3.10/3.14;
+test local không thay thế trạng thái CI hiện tại.
 
-## Bản nháp giao diện
+## Bảo mật, triển khai và phạm vi
 
-[Xem bản nháp Superdesign](https://p.superdesign.dev/draft/9de80bba-e738-47a7-bb54-cbb124bfc7d9).
-Bản nháp dùng dữ liệu giả và tài nguyên trình bày trên canvas. Giao diện local đã
-được chuyển sang assets nội bộ và dữ liệu thật từ API, không dùng các con số minh họa.
+- Không commit `.env`, keyring, account/proxy-key list, `data/`, exports hoặc backup.
+  Repo private vẫn không phải nơi lưu token.
+- Chỉ public gateway sau TLS reverse proxy/hostname/trusted-proxy configuration;
+  admin giữ loopback hoặc truy cập qua SSH/VPN. Không CORS wildcard.
+- Egress chặn SSRF/direct DNS rebinding; proxy-side DNS cần chính sách proxy/
+  firewall tin cậy. TLS verification luôn bật.
+- Giữ master key cũ khi xoay encryption key; không đổi `client_keys` nếu muốn
+  client key hiện tại còn hiệu lực.
+- [Compose](deploy/gateway-compose.yml) là template local, không phải production
+  deployment đã xác minh. Cài tool không tự public port.
+
+Bản đầu hỗ trợ text/basic tools và streaming theo capability đã kiểm thử; không
+hứa đầy đủ mọi beta feature hay phiên bản Codex CLI/Claude Code. Chưa có payment,
+embeddings, tạo ảnh/audio/video, realtime/WebSocket hoặc chạy shell/tool thay khách.
+Codex OAuth không nhận mọi tham số Platform API; đọc matrix trước khi dùng.
+
+Resale phải phù hợp điều khoản của từng provider. Repo chưa cấp giấy phép phân
+phối chung; không suy quyền thương mại từ project tham khảo.
+
+Tài liệu: [vận hành/backup/restore](docs/gateway-operations.md) ·
+[CHANGELOG](CHANGELOG.md) · [trạng thái](docs/implementation-status.md) ·
+[quyết định kỹ thuật](docs/gateway-implementation-decisions.md).

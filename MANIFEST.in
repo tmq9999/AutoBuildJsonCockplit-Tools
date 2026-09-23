@@ -1,4 +1,4 @@
-include README.md THIRD_PARTY.md .env.example
+include README.md CHANGELOG.md THIRD_PARTY.md .env.example
 include scripts/setup_checklive.py
 include scripts/gateway_testdb.py
 recursive-include deploy *.yml *.gateway *.example

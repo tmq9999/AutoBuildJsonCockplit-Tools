@@ -7,6 +7,15 @@ __pycache__/
 build/
 dist/
 .env
+.env.*
+!.env.example
+deploy/gateway.env
+keyring*.json
+*.enc
+success.json
+errors.json
+phone_verify.json
+account_done.txt
 data/
 .deps/
 .superpowers/

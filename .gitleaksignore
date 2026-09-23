@@ -1,0 +1,4 @@
+# These exact historical lines pin a public Git commit, not an API credential.
+# Fingerprint-specific exclusions only; no broad path allowlist.
+e9bd8ef032248a33b9dc002ba6780bf5fb65b690:autobuild_json/checklive_adapter.py:generic-api-key:18
+64d18bf8f8759011eb7d9ad86b3261814d4c3139:docs/superpowers/plans/2026-09-23-autobuild-json-cockplit.md:generic-api-key:231
