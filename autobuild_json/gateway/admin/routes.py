@@ -13,8 +13,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from ..errors import GatewayError
 from ..identity.service import key_view
 from ..routing.records import ProviderConfig, ModelConfig, BindingConfig
-from .schemas import CustomerInput, KeyInput, KeyUpdate, VersionInput, EnabledInput, CredentialInput, ProxyInput, AdjustmentInput, OAuthImportInput
+from .schemas import CustomerInput, KeyInput, KeyUpdate, VersionInput, EnabledInput, CredentialInput, ProxyInput, AdjustmentInput, OAuthImportInput, PlaygroundInput
 from .usage import UsageReports
+from .serialization import ExactJSONResponse, exact_input
 
 
 class SafeAdminRoute(APIRoute):
@@ -22,6 +23,8 @@ class SafeAdminRoute(APIRoute):
         original = super().get_route_handler()
         async def handle(request):
             try:
+                if request.method in {'POST','PUT','PATCH','DELETE'} and await request.body():
+                    request._json=exact_input(await request.json())
                 return await original(request)
             except RequestValidationError:
                 return JSONResponse({"error": "INVALID_REQUEST", "reason": "Invalid request fields"}, status_code=422)
@@ -29,11 +32,14 @@ class SafeAdminRoute(APIRoute):
                 return JSONResponse(exc.to_dict(), status_code=exc.status)
             except SQLAlchemyError:
                 return JSONResponse({"error": "STORAGE_UNAVAILABLE"}, status_code=503)
+            except ValueError:
+                return JSONResponse({'error':'INVALID_REQUEST'},status_code=422)
         return handle
 
 
 def create_admin_router(services, authorized):
-    router = APIRouter(prefix="/api/service", dependencies=[Depends(authorized)], route_class=SafeAdminRoute)
+    router = APIRouter(prefix="/api/service", dependencies=[Depends(authorized)], route_class=SafeAdminRoute,
+                       default_response_class=ExactJSONResponse)
     reports = UsageReports(services.db)
 
     @router.get("/customers")
@@ -61,7 +67,7 @@ def create_admin_router(services, authorized):
 
     @router.patch("/keys/{identity}")
     async def update_key(identity: UUID, payload: KeyUpdate):
-        return await services.identity.update_policy(identity, payload.version, payload.policy)
+        return await services.identity.update_policy(identity, payload.version, payload.policy, name=payload.name)
 
     @router.post("/keys/{identity}/rotate")
     async def rotate_key(identity: UUID, payload: VersionInput):
@@ -130,10 +136,13 @@ def create_admin_router(services, authorized):
 
     @router.post("/models", status_code=201)
     async def put_model(payload: ModelConfig):
+        async with services.db.sessions() as session:
+            if await session.scalar(text('SELECT id FROM public_models WHERE id=:id'),{'id':payload.model_id}):
+                raise GatewayError('version_conflict',409)
         await services.catalog.put_model(payload)
         return {"id": payload.model_id}
 
-    @router.put("/models/{identity}/{version}")
+    @router.put("/models/{identity:path}/{version}")
     async def update_model(identity: str, version: int, payload: ModelConfig):
         if payload.model_id != identity:
             raise GatewayError("invalid_request")
@@ -197,4 +206,16 @@ def create_admin_router(services, authorized):
         await services.ledger.adjust(identity, payload.amount_micro, "admin", payload.reason)
         return {"id": identity}
 
+    @router.post('/providers/{identity}/discover')
+    async def provider_discovery(identity: UUID):
+        from .actions import discover
+        return await discover(services,identity)
+
+    @router.post('/playground')
+    async def run_playground(payload: PlaygroundInput):
+        from .actions import playground
+        return await playground(services,payload)
+
+    from .extra import mount_extra
+    mount_extra(router,services)
     return router

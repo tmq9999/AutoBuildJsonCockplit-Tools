@@ -20,6 +20,7 @@ include = ["autobuild_json*"]
 
 [tool.setuptools.package-data]
 autobuild_json = ["static/*"]
+"autobuild_json.gateway.admin" = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

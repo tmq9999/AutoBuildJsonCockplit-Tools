@@ -72,6 +72,11 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None, g
     if gateway_services is not None:
         from .gateway.admin.routes import create_admin_router
         app.include_router(create_admin_router(gateway_services, authorized))
+        service_static = Path(__file__).parent / 'gateway' / 'admin' / 'static'
+        app.mount('/service-assets', StaticFiles(directory=service_static), name='service-assets')
+        @app.get('/service/')
+        def service_ui():
+            return FileResponse(service_static / 'index.html', media_type='text/html')
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):

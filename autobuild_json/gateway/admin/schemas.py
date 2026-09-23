@@ -1,13 +1,19 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from .serialization import exact_input
 
 from ..identity.policy import KeyPolicy
 
 
 class StrictInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode='before')
+    @classmethod
+    def decimals(cls, value):
+        return exact_input(value)
 
 
 class CustomerInput(StrictInput):
@@ -31,6 +37,7 @@ class KeyInput(StrictInput):
 
 class KeyUpdate(VersionInput):
     policy: KeyPolicy
+    name: str | None = Field(default=None, max_length=200)
 
 
 class CredentialInput(StrictInput):
@@ -54,3 +61,9 @@ class AdjustmentInput(StrictInput):
 class OAuthImportInput(StrictInput):
     record: dict = Field(repr=False)
     proxy_profile_id: UUID | None = None
+
+
+class PlaygroundInput(StrictInput):
+    client_key: SecretStr
+    protocol: Literal['openai','anthropic','gemini','ollama']
+    body: dict = Field(repr=False)

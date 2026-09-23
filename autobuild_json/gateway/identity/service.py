@@ -118,13 +118,15 @@ class IdentityService:
                 enabled=False, revoked_at=func.now(), version=version + 1))
             await self._audit(session, "key.revoked", key_id)
 
-    async def update_policy(self, key_id, version, policy: KeyPolicy):
+    async def update_policy(self, key_id, version, policy: KeyPolicy, *, name=None):
+        if name is not None and (not isinstance(name, str) or len(name) > 200 or any(ord(c)<32 for c in name)):
+            raise GatewayError("invalid_request")
         async with self.db.sessions.begin() as session:
             row = await self._locked_key(session, key_id)
             self._version(row, version)
             updated = (await session.execute(update(api_keys).where(api_keys.c.id == key_id).values(
                 policy=policy.model_dump(mode="json"), enabled=policy.enabled, expires_at=policy.expires_at,
-                version=version + 1).returning(api_keys))).mappings().one()
+                version=version + 1, name=row['name'] if name is None else name).returning(api_keys))).mappings().one()
             await self._audit(session, "key.policy_updated", key_id, {"version": version + 1})
             return key_view(updated)
 
