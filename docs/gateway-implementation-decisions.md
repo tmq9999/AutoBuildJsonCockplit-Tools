@@ -53,4 +53,3 @@ This is the exhaustive per-plan ruling record at the UI handoff; later entries s
 - Ruling: production uses same approved split table/editor layout for entity tabs; detailed forms reflect actual API semantics (model permission shared across protocols, per-model coefficients) rather than illustrative per-protocol pricing blocks — spec is authority — cost if wrong: no separate per-protocol prices.
 
 - Final rulings on declined judgments: live provider/Kiot correctness remains unverified without authorized live keys; remote proxy DNS requires operator firewall/trusted proxy; resale rights remain provider-contract responsibility. These are documented deployment limitations, not claimed test coverage. Visual fidelity assessed by main agent local Chrome screenshots against v3, not by code reviewer.
-

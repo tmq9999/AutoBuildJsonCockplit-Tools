@@ -18,4 +18,3 @@ Independent read-only whole-branch review covered `d78dfed..bff7c14` and communi
 Verification after fixes: 446 Python tests passed, including real PostgreSQL, SDK HTTP tests and 40 cross-protocol JSON/stream text cases. 12 Node tests, old OAuth browser and new gateway browser E2E passed. Ruff/compile/build passed. One upstream google-genai deprecation warning remains.
 
 Remaining limits: no live OAuth-inference/Kiot/provider credentials tested; no full provider API/CLI parity, media generation or payment system; proxy-side DNS enforcement requires trusted egress; resale rights are not conferred by this code. UI was locally inspected by the implementer, not pixel-audited by the code reviewer. Documentation Minor (stale UI approval status) was corrected as part of the handoff.
-
