@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>AutoBuildJsonCockplit-Tools</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/bootstrap.js"></script>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand"><span class="eyebrow">OAUTH WORKBENCH</span><h1>AutoBuildJsonCockplit-Tools</h1></div>
+    <div class="connection"><span class="badge">HTTP-only / local</span><span id="connection-status">Chưa đăng nhập</span><button id="logout-btn" class="quiet" hidden>Đăng xuất</button></div>
+  </header>
+  <p class="intro">Nhập tài khoản, chạy OAuth và xuất JSON.</p>
+  <noscript><p class="notice error">Cần bật JavaScript để sử dụng giao diện local.</p></noscript>
+  <div id="message" class="notice" role="status" aria-live="polite" hidden></div>
+
+  <section id="login-panel" class="card login-panel">
+    <span class="eyebrow">PHIÊN LÀM VIỆC RIÊNG TƯ</span>
+    <h2>Kết nối công cụ local</h2>
+    <p class="muted">Nhập token quản trị từ file <code>data/local-config.json</code> trên máy của bạn. Đây không phải token ChatGPT.</p>
+    <form id="login-form">
+      <label for="admin-token">Token quản trị local</label>
+      <input id="admin-token" type="password" autocomplete="off" spellcheck="false" required>
+      <button id="login-btn" class="primary" type="submit">Mở phiên làm việc</button>
+    </form>
+    <p class="hint">Không chia sẻ token. Dữ liệu nhập không được lưu vào bộ nhớ trình duyệt.</p>
+  </section>
+
+  <main id="dashboard" hidden>
+    <div id="readiness" class="notice warning" role="status" hidden></div>
+    <form id="batch-form" autocomplete="off">
+      <div class="setup-grid">
+        <section class="card input-card">
+          <div class="section-title"><h2><span class="step">01</span> Nhập tài khoản</h2><code>Email|Password|2FA Secret</code></div>
+          <label for="accounts-text">Danh sách tài khoản</label>
+          <textarea id="accounts-text" class="mono account-area" spellcheck="false" placeholder="email@example.com|password|TOTP_SECRET" aria-describedby="input-help"></textarea>
+          <p id="input-help" class="hint">Một tài khoản mỗi dòng · UTF-8 · tối đa 5 MiB / 10.000 dòng. Chỉ xử lý tài khoản bạn được phép sử dụng.</p>
+          <div class="input-actions"><div><label for="accounts-file" class="file-label">Chọn file tài khoản</label><input id="accounts-file" type="file" accept=".txt,text/plain"></div><button id="validate-btn" type="button">Kiểm tra dữ liệu</button></div>
+          <p id="validation-summary" class="summary" aria-live="polite">Chưa kiểm tra dữ liệu.</p>
+          <details id="validation-details" hidden><summary>Xem dòng bị lọc và cảnh báo</summary><ul id="filtered-list"></ul><p id="duplicate-warning" class="hint"></p></details>
+        </section>
+        <section class="card settings-card">
+          <div class="section-title"><h2><span class="step">02</span> Cấu hình &amp; chạy</h2><span class="muted">HTTP sessions</span></div>
+          <label for="proxies-text">Danh sách proxy <span class="muted">(tùy chọn)</span></label>
+          <textarea id="proxies-text" class="mono proxy-area" spellcheck="false" placeholder="http://user:password@host:port"></textarea>
+          <p class="hint">Trống = direct. Proxy xoay theo tài khoản, giữ nguyên trong mỗi phiên.</p>
+          <div class="options-grid">
+            <div><label for="mode">Chế độ</label><select id="mode"><option value="sequential">Tuần tự — 1 account</option><option value="parallel">Song song</option></select></div>
+            <div><label for="workers">Số luồng <span class="muted">/ 16</span></label><input id="workers" type="number" min="1" max="16" step="1" value="1" disabled required></div>
+            <div><label for="timeout">Timeout / account (giây)</label><input id="timeout" type="number" min="1" max="600" step="1" value="180" required></div>
+          </div>
+          <p class="hint">Tối đa một account / proxy cùng lúc. Một batch chạy một lượt, không lặp vô hạn.</p>
+          <div class="run-actions"><button id="start-btn" class="primary" type="submit" disabled>▶ Bắt đầu</button><button id="stop-btn" type="button" disabled>■ Dừng</button></div>
+          <p class="hint">Dừng không xóa kết quả đã lưu. Request đang chờ có thể cần tối đa 30 giây.</p>
+        </section>
+      </div>
+    </form>
+
+    <section class="metrics" aria-label="Tiến độ xử lý">
+      <div class="metric"><span>Chờ</span><strong data-count="queued">0</strong></div>
+      <div class="metric running"><span>Đang chạy</span><strong data-count="running">0</strong></div>
+      <div class="metric success"><span>Thành công</span><strong data-count="success">0</strong></div>
+      <div class="metric error"><span>Lỗi</span><strong data-count="error">0</strong></div>
+      <div class="metric warning" title="Cần xác minh số điện thoại"><span>Phone number verify</span><strong data-count="phone_verify">0</strong></div>
+      <div class="metric"><span>Đã hủy</span><strong data-count="cancelled">0</strong></div>
+    </section>
+    <div class="progress-heading"><span id="job-status" data-status="idle">Chưa có batch</span><span id="progress-text">0 / 0</span></div>
+    <progress id="progress" value="0" max="1" aria-label="Tỷ lệ hoàn tất"></progress>
+
+    <section class="card results-card">
+      <div class="section-title results-title"><h2>Kết quả thực thi</h2><div class="export-actions" aria-label="Tải kết quả">
+        <button type="button" data-export="success" disabled>↓ success.json</button><button type="button" data-export="errors" disabled>↓ errors.json</button><button type="button" data-export="phone_verify" disabled>↓ phone_verify.json</button><button type="button" data-export="filtered" disabled>↓ filtered.json</button><button type="button" data-export="cancelled" disabled>↓ cancelled.json</button>
+      </div></div>
+      <div class="table-controls"><div><label for="job-history">Batch đã lưu</label><select id="job-history"><option value="">Chưa có batch</option></select></div><div><label for="status-filter">Lọc trạng thái</label><select id="status-filter"><option value="all">Tất cả</option><option value="queued">Chờ</option><option value="running">Đang chạy</option><option value="success">Thành công</option><option value="error">Lỗi</option><option value="phone_verify">Phone number verify</option><option value="cancelled">Đã hủy</option></select></div><button id="refresh-btn" type="button">Làm mới</button></div>
+      <div class="table-scroll"><table><thead><tr><th scope="col">Email</th><th scope="col">Giai đoạn</th><th scope="col">Trạng thái</th><th scope="col">Lý do</th></tr></thead><tbody id="results-body"><tr><td colspan="4" class="empty">Chưa có dữ liệu thực thi. Nhập tài khoản để bắt đầu.</td></tr></tbody></table></div>
+      <div class="table-footer"><span id="row-summary">0 tài khoản</span><div><button id="prev-page" class="quiet" disabled>← Trước</button><button id="next-page" class="quiet" disabled>Sau →</button></div></div>
+    </section>
+
+    <details id="manual-panel" class="card manual-panel">
+      <summary><span>OAuth thủ công</span><span class="muted">Tạo link · Dán callback · Tải JSON</span></summary>
+      <div class="manual-grid">
+        <form id="link-form" autocomplete="off">
+          <label for="manual-email">Email cần xử lý</label><input id="manual-email" type="email" placeholder="email@example.com" required>
+          <label for="manual-proxy">Proxy cho token exchange (tùy chọn)</label><input id="manual-proxy" type="password" spellcheck="false" autocomplete="off" placeholder="http://user:password@host:port">
+          <button id="generate-link-btn" type="submit">Tạo link đăng nhập</button>
+          <label for="oauth-link">Link desktop-auth</label><div class="link-row"><input id="oauth-link" class="mono" readonly placeholder="Chưa tạo link"><button id="copy-link-btn" type="button" disabled>Sao chép</button></div>
+          <a id="open-link" target="_blank" rel="noopener noreferrer" hidden>Mở link đăng nhập ↗</a>
+          <p id="manual-status" class="hint">Link có thời hạn 10 phút, chỉ dùng một lần. Proxy trình duyệt do bạn quản lý.</p>
+        </form>
+        <form id="callback-form" autocomplete="off">
+          <label for="callback-url">Dán callback URL</label><textarea id="callback-url" class="mono" spellcheck="false" required placeholder="http://localhost:1455/auth/callback?code=...&amp;state=..."></textarea>
+          <p class="notice warning compact">Nếu trình duyệt báo không kết nối được localhost ở bước cuối, vẫn sao chép URL trên thanh địa chỉ và dán vào đây.</p>
+          <button id="complete-btn" class="primary" type="submit" disabled>Xử lý callback &amp; tải JSON</button>
+        </form>
+      </div>
+    </details>
+    <footer class="footer"><span>Chỉ lưu token trong file kết quả được bảo vệ. Không chia sẻ file JSON.</span><span>Local-first · Không lưu mật khẩu trong trình duyệt</span></footer>
+  </main>
+</div>
+</body>
+</html>

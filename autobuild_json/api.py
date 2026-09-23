@@ -4,10 +4,12 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from .api_models import AccountText, CallbackInput, ExportKind, JobInput, LinkInput, LoginInput
@@ -59,6 +61,8 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None):
 
     app = FastAPI(title="AutoBuildJsonCockplit-Tools", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(BoundaryMiddleware, port=settings.port)
+    static_dir = Path(__file__).parent / "static"
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     def authorized(request: Request):
         return admins.require(request)
@@ -77,7 +81,7 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None):
 
     @app.get("/")
     def root():
-        return {"application":"AutoBuildJsonCockplit-Tools", "ui":"pending_design_review"}
+        return FileResponse(static_dir / "index.html", media_type="text/html")
 
     @app.post("/api/session")
     def login(payload: LoginInput, request: Request, response: Response):

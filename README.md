@@ -3,8 +3,7 @@
 Tool local dùng HTTP để đăng nhập tài khoản được phép sử dụng, thực hiện OAuth Codex
 và xuất JSON tương thích mẫu của Auto-Oauth-Codex-9Router. Không cần chạy 9router.
 
-**Trạng thái:** backend FastAPI đã có; giao diện Superdesign đang chờ duyệt, chưa
-được ghép vào ứng dụng. `/` hiện chỉ trả trạng thái API, không phải dashboard.
+Giao diện tiếng Việt đã ghép vào FastAPI tại `/`, theo bản Superdesign đã duyệt.
 Chưa chạy thử OAuth bằng tài khoản thật. Endpoint đăng nhập nội bộ có thể thay đổi;
 test giả lập không bảo đảm tất cả tài khoản sẽ đăng nhập thành công.
 
@@ -32,6 +31,20 @@ Xem [THIRD_PARTY.md](THIRD_PARTY.md) trước khi phân phối lại source upst
 API chạy tại `http://127.0.0.1:8787`. Chỉ một process được dùng cùng thư mục data.
 Không chạy nhiều Uvicorn workers hoặc `--reload` khi có batch.
 Đổi port: `.venv/bin/python -m autobuild_json --port 8788`.
+
+## Dùng giao diện
+
+1. Mở `http://127.0.0.1:8787`, nhập `admin_token` từ file local bên dưới.
+2. Chọn file hoặc dán danh sách tài khoản; bấm **Kiểm tra dữ liệu** để xem số hợp lệ
+   và các dòng bị lọc. Sửa dữ liệu sẽ yêu cầu kiểm tra lại.
+3. Nhập proxy nếu cần; chọn **Tuần tự** hoặc **Song song**, số luồng và timeout.
+4. Bấm **Bắt đầu**, theo dõi bảng trạng thái; **Dừng** ngừng lấy account mới.
+5. Tải file theo nhóm ở phía trên bảng. Chọn **Batch đã lưu** để xem lại sau reload/restart.
+6. Mở **OAuth thủ công** nếu muốn tạo link và tự dán callback từ trình duyệt.
+
+Đăng xuất không dừng batch backend. Password/secret chỉ tồn tại trong ô nhập đến
+khi Start được chấp nhận; không ghi localStorage/sessionStorage. Giao diện chỉ tải
+assets nội bộ, không tải script/font/CDN bên thứ ba.
 
 ## Đăng nhập API local
 
@@ -147,6 +160,17 @@ Không công khai dịch vụ ra LAN/Internet, không tắt TLS verification, kh
 .venv/bin/python -m build
 ```
 
+Kiểm thử giao diện bằng Node (chỉ phục vụ phát triển, không cần để chạy tool):
+
+```bash
+npm ci
+npm run test:ui
+npm run test:browser
+```
+
+Browser test sử dụng Chrome sẵn trên máy; đặt `CHROME_PATH` nếu khác
+`/usr/bin/google-chrome`. Xem [tests/ui/acceptance.md](tests/ui/acceptance.md).
+
 Test auth dùng methods thực từ checkout cố định với HTTP giả; không dùng token
 trong `json.txt` hay gửi request đăng nhập account thật. Hai cảnh báo deprecation
 của bộ TestClient hiện xuất hiện với các dependency mới nhất, không phải test lỗi.
@@ -154,5 +178,5 @@ của bộ TestClient hiện xuất hiện với các dependency mới nhất, k
 ## Bản nháp giao diện
 
 [Xem bản nháp Superdesign](https://p.superdesign.dev/draft/9de80bba-e738-47a7-bb54-cbb124bfc7d9).
-Bản nháp dùng dữ liệu giả và tài nguyên trình bày trên canvas. Giao diện local khi
-triển khai sẽ dùng assets nội bộ, không tải JavaScript bên thứ ba trên trang chứa account.
+Bản nháp dùng dữ liệu giả và tài nguyên trình bày trên canvas. Giao diện local đã
+được chuyển sang assets nội bộ và dữ liệu thật từ API, không dùng các con số minh họa.

@@ -1,6 +1,8 @@
 include README.md THIRD_PARTY.md .env.example
 include scripts/setup_checklive.py
+include package.json package-lock.json
 recursive-include tests *.py
+recursive-include tests/ui *.mjs *.md
 recursive-include autobuild_json/static *.html *.css *.js
 prune .deps
 prune data
