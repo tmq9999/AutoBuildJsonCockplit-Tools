@@ -17,7 +17,7 @@ class Runner:
         self._closed = False
         self._errors = {}
 
-    def start(self, report, proxies, mode, workers, timeout):
+    def start(self, report, proxies, mode, workers, timeout, *, proxy_source=None):
         if (mode not in {"sequential", "parallel"} or not isinstance(workers, int)
                 or not 1 <= workers <= 16 or not math.isfinite(timeout) or not 1 <= timeout <= 600
                 or not report.accounts):
@@ -30,17 +30,19 @@ class Runner:
             job = self.store.create(report)
             cancelled = threading.Event()
             thread = threading.Thread(target=self._run,
-                args=(job, list(report.accounts), list(proxies), 1 if mode == "sequential" else workers, timeout, cancelled),
+                args=(job, list(report.accounts), list(proxy_source.slots) if proxy_source else list(proxies),
+                      1 if mode == "sequential" else workers, timeout, cancelled, proxy_source),
                 name="oauth-coordinator", daemon=True)
             self._jobs[job] = (thread, cancelled)
             self._active = job
             thread.start()
             return job
 
-    def _execute(self, account, proxy, context):
+    def _execute(self, account, proxy, context, proxy_source=None, timeout=None):
         try:
             context.check()
-            result = self.processor(account, proxy, context)
+            result = (proxy_source.execute(account, proxy, context, self.processor, timeout) if proxy_source
+                      else self.processor(account, proxy, context))
             if not isinstance(result, RunResult):
                 raise TypeError()
             return result
@@ -50,7 +52,7 @@ class Runner:
         except Exception:
             return RunResult("error", error=FlowError("UNEXPECTED_ERROR"))
 
-    def _run(self, job, pending, proxies, workers, timeout, cancelled):
+    def _run(self, job, pending, proxies, workers, timeout, cancelled, proxy_source=None):
         futures, emails, busy_proxies = {}, set(), set()
         proxy_cursor = 0
         pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="oauth-account")
@@ -81,7 +83,7 @@ class Runner:
                     def progress(stage, attempt, account_id=account.account_job_id):
                         self.store.update(job, account_id, status="running", stage=stage, attempt=attempt)
                     context = AttemptContext(time.monotonic() + timeout, cancelled, progress)
-                    future = pool.submit(self._execute, account, proxy, context)
+                    future = pool.submit(self._execute, account, proxy, context, proxy_source, timeout)
                     futures[future] = (account.account_job_id, account.email.casefold(), proxy.key if proxy else None)
                     del account
                 if not futures:
@@ -110,6 +112,8 @@ class Runner:
         finally:
             pending.clear()
             pool.shutdown(wait=True, cancel_futures=True)
+            if proxy_source:
+                proxy_source.close()
             futures.clear()
             with self._lock:
                 if self._active == job:

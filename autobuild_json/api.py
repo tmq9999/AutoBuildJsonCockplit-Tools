@@ -27,7 +27,7 @@ from .tokens import TokenService
 from .transport import SafeTransport
 
 
-def create_app(settings, runner=None, oauth_sessions=None, token_service=None):
+def create_app(settings, runner=None, oauth_sessions=None, token_service=None, gateway_services=None):
     admins, manual_oauth = None, None
     tokens = token_service or TokenService()
     store = runner.store if runner else RunStore(settings.data_dir / "runs")
@@ -128,7 +128,35 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None):
         proxies = parse_proxies(payload.proxies_text.get_secret_value())
         if not app.state.auth_ready:
             raise FlowError("CONFIGURATION_ERROR", "dependency_check")
-        return {"id":app.state.runner.start(report, proxies, payload.mode, payload.workers, payload.timeout)}
+        source = None
+        if gateway_services is not None or payload.proxy_mode not in {"legacy", "direct"}:
+            try:
+                from .gateway.proxy.config import ProxySelection, parse_kiot_keys
+                from .gateway.proxy.legacy import LegacyProxySource
+                from .gateway.proxy.manager import ProxyManager
+                from .gateway.proxy.leases import MemoryLeaseStore
+                if payload.proxy_mode == "profile":
+                    if gateway_services is None:
+                        raise ValueError()
+                    selection = gateway_services.load_proxy_sync(payload.proxy_profile_id)
+                elif payload.proxy_mode == "kiotproxy":
+                    import secrets
+                    pepper = gateway_services.pepper if gateway_services else secrets.token_bytes(32)
+                    keys = parse_kiot_keys(payload.kiot_keys_text.get_secret_value(), pepper=pepper)
+                    selection = ProxySelection("kiotproxy", runtime_entries=tuple(keys),
+                                               region=payload.proxy_region, protocol=payload.proxy_protocol)
+                else:
+                    mode = ("pool" if proxies else "direct") if payload.proxy_mode == "legacy" else payload.proxy_mode
+                    selection = ProxySelection(mode, runtime_entries=tuple(proxies))
+                source = LegacyProxySource(selection, gateway_services.proxies if gateway_services else ProxyManager(MemoryLeaseStore()))
+            except (ValueError, ImportError):
+                raise FlowError("CONFIGURATION_ERROR", "proxy_parse") from None
+        try:
+            return {"id":app.state.runner.start(report, proxies, payload.mode, payload.workers, payload.timeout, proxy_source=source)}
+        except BaseException:
+            if source:
+                source.close()
+            raise
 
     @app.get("/api/jobs", dependencies=[Depends(authorized)])
     def history():
