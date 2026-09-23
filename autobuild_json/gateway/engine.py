@@ -18,6 +18,8 @@ from .providers.openai import OpenAIAdapter
 from .providers.anthropic import AnthropicAdapter
 from .providers.gemini import GeminiAdapter
 from .providers.ollama import OllamaAdapter
+from .providers.codex import CodexAdapter
+from .accounts.imports import CredentialService
 from .proxy.config import ProxySelection
 from .secrets import Ciphertext
 from .routing.continuations import ContinuationStore, ContinuationScope, ContinuationBinding
@@ -41,9 +43,16 @@ class Engine:
         self.proxy_resolver = proxy_resolver
         self.budgets = BudgetService(db)
         self.continuations = ContinuationStore(db, vault)
+        self.credentials = CredentialService(db, vault, proxies, transport, profile_resolver=proxy_resolver)
         self.adapters = {"openai_compatible": OpenAIAdapter(transport, self.credential),
                          "anthropic": AnthropicAdapter(transport, self.credential), "gemini": GeminiAdapter(transport, self.credential),
-                         "ollama": OllamaAdapter(transport, self.credential)}
+                         "ollama": OllamaAdapter(transport, self.credential), "codex_oauth": CodexAdapter(transport, self.codex_tokens)}
+
+    async def codex_tokens(self, route):
+        row = await self.credentials._record(route.credential_id)
+        if row["health"] != "active" or not row["token_expires_at"] or row["token_expires_at"] <= datetime.now(timezone.utc):
+            raise GatewayError("reauth_required", 503)
+        return row["account_id"], self.credentials._tokens(row)
 
     async def credential(self, route):
         async with self.db.sessions() as session:
@@ -106,10 +115,14 @@ class Engine:
         route = routes[0]
         if route.adapter not in self.adapters:
             raise GatewayError("upstream_unavailable", 503)
-        max_output = request.options.max_output_tokens or min(4096, route.bounds.output_tokens)
+        codex = route.adapter == "codex_oauth"
+        if codex and request.options.max_output_tokens is not None:
+            raise GatewayError("unsupported_feature")
+        max_output = route.bounds.output_tokens if codex else request.options.max_output_tokens or min(4096, route.bounds.output_tokens)
         if max_output > route.bounds.output_tokens:
             raise GatewayError("invalid_request")
-        request = request.model_copy(update={"options": request.options.model_copy(update={"max_output_tokens": max_output})})
+        if not codex:
+            request = request.model_copy(update={"options": request.options.model_copy(update={"max_output_tokens": max_output})})
         bounds = Bounds(route.bounds.input_tokens, max_output)
         deadline = min(meta.deadline, datetime.now(timezone.utc)+timedelta(seconds=route.timeout))
         hold = await self.ledger.reserve(Admission(meta.request_id, principal, route.public_model_id, bounds,
@@ -121,6 +134,8 @@ class Engine:
             for number, selected in enumerate(routes[:2]):
                 if selected.adapter not in self.adapters or max_output > selected.bounds.output_tokens:
                     raise GatewayError("upstream_unavailable", 503)
+                if (selected.adapter == "codex_oauth") != codex:
+                    raise GatewayError("unsupported_feature")
                 if number:
                     hold = await self.ledger.resize(hold, Bounds(selected.bounds.input_tokens, max_output))
                 selection = ProxySelection("direct")
@@ -128,6 +143,8 @@ class Engine:
                     if self.proxy_resolver is None:
                         raise GatewayError("proxy_not_ready", 503, "proxy")
                     selection = await self.proxy_resolver(selected.proxy_profile_id)
+                if codex:
+                    await self.credentials.fresh_tokens(selected.credential_id, deadline)
                 lease = await stack.enter_async_context(self.proxies.acquire(selection, meta.request_id, deadline))
                 attempt = uuid4()
                 # Resolve credential before dispatch flag so bad local config has no
