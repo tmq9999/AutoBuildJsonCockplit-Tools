@@ -77,7 +77,7 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None):
     async def flow_error(request, exc):
         status = {"NOT_FOUND":404, "BATCH_CONFLICT":409, "CONFIGURATION_ERROR":503,
                   "STORAGE_ERROR":507, "RATE_LIMITED":429}.get(exc.code, 400)
-        return JSONResponse({"error":exc.code, "reason":exc.reason}, status_code=status)
+        return JSONResponse({"error":exc.code, "reason":exc.reason, "details":exc.details}, status_code=status)
 
     @app.get("/")
     def root():

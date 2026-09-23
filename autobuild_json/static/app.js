@@ -11,7 +11,10 @@ const REASONS = {
   OAUTH_DENIED:'OAuth bị từ chối.', WORKSPACE_SELECTION_REQUIRED:'Cần chọn workspace thủ công.',
   TOKEN_EXCHANGE_ERROR:'Không đổi được mã OAuth.', TOKEN_EXCHANGE_UNCERTAIN:'Chưa rõ kết quả đổi token. Hãy tạo phiên OAuth mới.',
   INVALID_TOKEN_RESPONSE:'Token hoặc danh tính trả về không hợp lệ.', ACCOUNT_MISMATCH:'Email đăng nhập không khớp email đã yêu cầu.',
-  CONFIGURATION_ERROR:'Cấu hình hoặc dependency CheckLive chưa sẵn sàng.', INVALID_INPUT:'Dữ liệu không hợp lệ hoặc vượt giới hạn.',
+  CONFIGURATION_ERROR:'Cấu hình hoặc dependency CheckLive chưa sẵn sàng.', AUTH_BOOTSTRAP_ERROR:'Phản hồi providers, CSRF hoặc signin không đúng định dạng.',
+  REQUEST_TIMEOUT:'HTTP request timeout', HTTP_ERROR:'Provider trả về HTTP error.', AUTH_RESPONSE_ERROR:'Phản hồi xác thực không xử lý được.',
+  OAUTH_PARSE_ERROR:'Không đọc được lựa chọn OAuth.', ACCOUNT_SELECTION_REQUIRED:'Có nhiều phiên đăng nhập, cần chọn một.',
+  INVALID_INPUT:'Dữ liệu không hợp lệ hoặc vượt giới hạn.',
   INVALID_REQUEST:'Các trường nhập không hợp lệ.', CANCELLED:'Đã hủy theo yêu cầu.', INTERRUPTED:'Gián đoạn do ứng dụng khởi động lại.',
   STORAGE_ERROR:'Không ghi được kết quả. Hãy kiểm tra dung lượng và quyền thư mục data.', NOT_FOUND:'Không tìm thấy kết quả.',
   BATCH_CONFLICT:'Đã có một batch đang chạy. Bấm Làm mới để xem.', UNAUTHORIZED:'Phiên chưa đăng nhập hoặc đã hết hạn.',
@@ -29,6 +32,12 @@ export function canStart(state) { return state.authenticated && state.validCount
 export function displayReason(row) {
   if (row.status==='phone_verify') return 'Phone number verify';
   if (!row.code && !['error','cancelled'].includes(row.status)) return '—';
+  const details=row.details || {};
+  const method=details.method, host=details.host, endpoint=details.endpoint;
+  const requestLabel=method && host && endpoint ? `${method} ${host}${endpoint}` : '';
+  if (row.code==='REQUEST_TIMEOUT') return `Timeout${requestLabel?' · '+requestLabel:''}${details.curl_code!=null?' · curl '+details.curl_code:''}`;
+  if (row.code==='HTTP_ERROR' || row.code==='AUTH_BLOCKED' || row.code==='RATE_LIMITED') return `${details.http_status?`HTTP ${details.http_status} · `:''}${requestLabel || REASONS[row.code]}`;
+  if (row.code==='OAUTH_PARSE_ERROR') return `Không đọc được lựa chọn ${details.selection_kind || 'OAuth'} (${details.candidate_count ?? 0} lựa chọn)`;
   return REASONS[row.code] || REASONS.UNEXPECTED_ERROR;
 }
 export async function readInputFile(file) {

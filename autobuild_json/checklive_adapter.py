@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 
 from .challenges import continuation, inspect_response
 from .errors import FlowError
+from .diagnostics import request_details
 from .login_bootstrap import initialize_login
 from .models import RunResult
 from .navigation import OAuthNavigator
@@ -76,8 +77,9 @@ class AuthTransport(SafeTransport):
         except FlowError as exc:
             # Upstream Sentinel catches exceptions and creates a fallback. Preserve
             # the error so the adapter cannot submit that fallback after a block.
-            self.fatal_error = FlowError(exc.code, exc.stage)
-            raise
+            self.fatal_error = FlowError(exc.code, exc.stage,
+                details={**request_details(method,url), **exc.details})
+            raise self.fatal_error from None
 
 
 def guarded_auth(module, transport):
@@ -102,13 +104,13 @@ def guarded_auth(module, transport):
             try:
                 value = super()._get_sentinel_token(flow)
             except FlowError as exc:
-                raise FlowError(exc.code, "sentinel") from None
+                raise exc.with_stage("sentinel") from None
             try:
                 if transport.fatal_error:
                     raise transport.fatal_error
                 transport.context.check()
             except FlowError as exc:
-                raise FlowError(exc.code, "sentinel") from None
+                raise exc.with_stage("sentinel") from None
             return value
 
     return GuardedAuth()
@@ -178,15 +180,18 @@ class CheckliveProcessor:
                 return RunResult("success", record=record, attempt=attempt)
             except Exception as exc:
                 if isinstance(exc, FlowError):
-                    error = FlowError(exc.code, "sentinel" if exc.stage == "sentinel" else stage)
+                    specific_stage = exc.stage if exc.stage in {"sentinel", "account_selection", "workspace_selection"} else stage
+                    error = exc.with_stage(specific_stage)
                 elif isinstance(exc, self.module.InvalidCredentialsError):
                     error = FlowError("MFA_ERROR" if stage == "totp" else "INVALID_CREDENTIALS", stage)
                 elif isinstance(exc, self.module.AccountDeactivatedError):
                     error = FlowError("ACCOUNT_DEACTIVATED", stage)
                 elif isinstance(exc, self.module.InvalidStateError):
                     error = FlowError("INVALID_STATE", stage)
+                elif isinstance(exc, self.module.AuthError):
+                    error = FlowError("AUTH_RESPONSE_ERROR", stage, details={"exception_type":type(exc).__name__})
                 else:
-                    error = FlowError("MFA_ERROR" if stage == "totp" else "AUTH_BLOCKED", stage)
+                    error = FlowError("UNEXPECTED_ERROR", stage, details={"exception_type":type(exc).__name__})
                 if error.code == "INVALID_STATE" and attempt == 1:
                     continue
                 status = "phone_verify" if error.code == "PHONE_VERIFY" else "cancelled" if error.code == "CANCELLED" else "error"

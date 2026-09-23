@@ -32,6 +32,18 @@ test('phone label remains exact; unknown provider error is not echoed', () => {
   assert.equal(displayReason({status:'success'}), '—');
 });
 
+test('diagnostic error details explain network and HTTP failures without secrets', () => {
+  assert.equal(displayReason({code:'REQUEST_TIMEOUT', details:{method:'GET',host:'chatgpt.com',endpoint:'/',curl_code:28}}),
+    'Timeout · GET chatgpt.com/ · curl 28');
+  assert.equal(displayReason({code:'HTTP_ERROR', details:{method:'POST',host:'auth.openai.com',endpoint:'/api/accounts/password/verify',http_status:500}}),
+    'HTTP 500 · POST auth.openai.com/api/accounts/password/verify');
+  assert.equal(displayReason({code:'AUTH_BLOCKED', details:{method:'GET',host:'auth.openai.com',endpoint:'/log-in',http_status:403}}),
+    'HTTP 403 · GET auth.openai.com/log-in');
+  assert.equal(displayReason({code:'OAUTH_PARSE_ERROR', details:{selection_kind:'workspace',candidate_count:0}}),
+    'Không đọc được lựa chọn workspace (0 lựa chọn)');
+  assert.equal(displayReason({code:'HTTP_ERROR', details:{endpoint:'/x',message:'password-secret'}}).includes('password-secret'), false);
+});
+
 test('UTF-8 file read preserves passwords, rejects invalid bytes and oversized files', async () => {
   const content = '\ufeffu@example.com| p:word |JBSWY3DPEHPK3PXP\r\n';
   assert.equal(await readInputFile(new Blob([content])), content.replace('\ufeff',''));

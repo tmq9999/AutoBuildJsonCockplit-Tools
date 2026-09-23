@@ -5,6 +5,7 @@ import uuid
 import jwt
 
 from .errors import FlowError
+from .diagnostics import request_details
 from .models import AccountIdentity, SuccessRecord, TokenSet
 from .oauth import CLIENT_ID, ISSUER
 from .transport import object_json
@@ -45,13 +46,15 @@ class TokenService:
                 "code_verifier":grant.verifier, "redirect_uri":grant.redirect_uri,
             })
         except FlowError as exc:
-            if exc.code in {"NETWORK_ERROR", "PROXY_ERROR", "TIMEOUT"}:
-                raise FlowError("TOKEN_EXCHANGE_UNCERTAIN", "token_exchange") from None
+            if exc.code in {"NETWORK_ERROR", "PROXY_ERROR", "TIMEOUT", "REQUEST_TIMEOUT"}:
+                raise FlowError("TOKEN_EXCHANGE_UNCERTAIN", "token_exchange", details=exc.details) from None
             raise
         if response.status_code == 429:
-            raise FlowError("RATE_LIMITED", "token_exchange")
+            raise FlowError("RATE_LIMITED", "token_exchange", details={"http_status":429,
+                **request_details("POST", ISSUER + "/oauth/token")})
         if response.status_code != 200:
-            raise FlowError("TOKEN_EXCHANGE_ERROR", "token_exchange")
+            raise FlowError("TOKEN_EXCHANGE_ERROR", "token_exchange", details={"http_status":response.status_code,
+                **request_details("POST", ISSUER + "/oauth/token")})
         payload = object_json(response, "INVALID_TOKEN_RESPONSE")
         try:
             tokens = TokenSet(**{name:payload[name] for name in TokenSet.model_fields})

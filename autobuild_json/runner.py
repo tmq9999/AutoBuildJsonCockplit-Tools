@@ -46,7 +46,7 @@ class Runner:
             return result
         except FlowError as exc:
             status = "phone_verify" if exc.code == "PHONE_VERIFY" else "cancelled" if exc.code == "CANCELLED" else "error"
-            return RunResult(status, error=FlowError(exc.code, exc.stage))
+            return RunResult(status, error=exc.with_stage(exc.stage))
         except Exception:
             return RunResult("error", error=FlowError("UNEXPECTED_ERROR"))
 

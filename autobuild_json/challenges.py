@@ -1,6 +1,7 @@
 from urllib.parse import urlsplit
 
 from .errors import FlowError
+from .diagnostics import request_details, safe_path
 
 
 def continuation(payload):
@@ -43,21 +44,37 @@ def inspect_response(response, url):
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    challenge = detect_challenge(payload, url) or detect_challenge({}, response.headers.get("Location", ""))
+    location = response.headers.get("Location", "")
+    page = payload.get("page")
+    page_type = page.get("type") if isinstance(page, dict) else None
+    details = {**request_details(None, url), "http_status": response.status_code,
+        "page_type":page_type, "redirect_path":safe_path(location), "continuation_path":safe_path(continuation(payload))}
+    challenge = detect_challenge(payload, url) or detect_challenge({}, location)
     if challenge:
-        raise FlowError(challenge, stage)
+        if detect_challenge({"page":{"type":page_type}}, "") == challenge:
+            details["evidence"] = "page_type"
+        elif detect_challenge({}, url) == challenge:
+            details["evidence"] = "current_url"
+        elif detect_challenge({}, continuation(payload)) == challenge:
+            details["evidence"] = "continuation"
+        elif detect_challenge({}, location) == challenge:
+            details["evidence"] = "redirect"
+        else:
+            details["evidence"] = "provider_code"
+        raise FlowError(challenge, stage, details=details)
     error = payload.get("error")
     code = error.get("code") if isinstance(error, dict) else error
+    details["provider_code"] = code
     if code == "account_deactivated":
-        raise FlowError("ACCOUNT_DEACTIVATED", stage)
+        raise FlowError("ACCOUNT_DEACTIVATED", stage, details=details)
     if code == "invalid_state" or response.status_code == 409:
-        raise FlowError("INVALID_STATE", stage)
+        raise FlowError("INVALID_STATE", stage, details=details)
     if response.status_code == 401:
-        raise FlowError("MFA_ERROR" if "/mfa/" in url else "INVALID_CREDENTIALS", stage)
+        raise FlowError("MFA_ERROR" if "/mfa/" in url else "INVALID_CREDENTIALS", stage, details=details)
     if response.status_code == 429:
-        raise FlowError("RATE_LIMITED", stage)
+        raise FlowError("RATE_LIMITED", stage, details=details)
     if response.status_code >= 400:
-        raise FlowError("AUTH_BLOCKED", stage)
+        raise FlowError("AUTH_BLOCKED" if response.status_code == 403 else "HTTP_ERROR", stage, details=details)
     # A successful Sentinel metadata response is input to the pinned client,
     # not proof of a user-facing verification wall. In particular, `dx` alone
     # must not preempt upstream's token construction/fallback. Actual challenge

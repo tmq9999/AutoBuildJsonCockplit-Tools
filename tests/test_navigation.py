@@ -1,4 +1,7 @@
 import pytest
+import base64
+import json
+from urllib.parse import quote
 from autobuild_json.challenges import detect_challenge, inspect_response
 from autobuild_json.navigation import OAuthNavigator
 from autobuild_json.errors import FlowError
@@ -60,3 +63,41 @@ def test_error_only_phone_challenges(error):
 
 def test_phone_profile_error_remains_negative():
     assert detect_challenge({"error":{"code":"profile_update", "phone_number":None}}, "") is None
+
+
+def test_selected_workspace_in_cookie_precedes_others(context):
+    first, second = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+    transport = FakeTransport(Response(text=json.dumps({"workspace_id":second})),
+        Response({"continue_url":"http://localhost:1455/auth/callback?code=c&state=s"}))
+    payload = {"workspace_id":first, "workspaces":[{"id":first},{"id":second}]}
+    transport.cookies = {"oai-client-auth-session":base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")}
+    OAuthNavigator(transport,context).complete("https://auth.openai.com/consent")
+    assert transport.requests[1][2]["json"] == {"workspace_id":first}
+
+
+def test_urlencoded_json_cookie_workspace(context):
+    workspace = "11111111-1111-4111-8111-111111111111"
+    transport = FakeTransport(Response(text="<html></html>"),Response({"continue_url":"http://localhost:1455/auth/callback?code=c&state=s"}))
+    transport.cookies = {"oai-client-auth-session":quote(json.dumps({"workspaces":[{"id":workspace}]}))}
+    OAuthNavigator(transport,context).complete("https://auth.openai.com/consent")
+    assert transport.requests[1][2]["json"] == {"workspace_id":workspace}
+
+
+@pytest.mark.parametrize("path,source", [("/consent","workspace"),("/choose-an-account","account")])
+def test_missing_selector_is_parse_error_not_multiple_workspaces(context,path,source):
+    transport = FakeTransport(Response(text="<html>Unrecognized UI</html>"))
+    with pytest.raises(FlowError) as result:
+        OAuthNavigator(transport,context).complete("https://auth.openai.com"+path)
+    assert result.value.code == "OAUTH_PARSE_ERROR"
+    assert result.value.details["selection_kind"] == source
+    assert result.value.details["candidate_count"] == 0
+    assert len(transport.requests) == 1
+
+
+def test_conflicting_selected_workspace_still_requires_explicit_choice(context):
+    a,b = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+    transport = FakeTransport(Response(text="<html></html>"))
+    transport.cookies={"oai-client-auth-session":quote(json.dumps({"workspace_id":a,"workspaces":[{"id":b}]}))}
+    with pytest.raises(FlowError):
+        OAuthNavigator(transport,context).complete("https://auth.openai.com/consent")
+    assert len(transport.requests) == 1

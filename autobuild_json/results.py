@@ -122,6 +122,7 @@ class RunStore:
             row.update(status=status, stage=stage, attempt=attempt, timestamp=timestamp())
             if result and result.error:
                 row.update(code=result.error.code, reason=result.error.reason)
+                row["details"] = copy.deepcopy(result.error.details)
             if result and result.record:
                 data["records"][account_job_id] = result.record.model_dump()
             self._save(data)

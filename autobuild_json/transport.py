@@ -2,7 +2,9 @@ import json
 from urllib.parse import unquote, urljoin, urlsplit
 
 from curl_cffi import CurlOpt, requests
+from curl_cffi.requests.exceptions import RequestException
 
+from .diagnostics import request_details
 from .errors import FlowError
 
 MAX_RESPONSE = 2 * 1024 * 1024
@@ -57,16 +59,27 @@ class SafeTransport:
                 return 0
 
         forwarded = {key:value for key,value in kwargs.items() if key in {"headers", "data", "json"}}
+        timeout = min(float(kwargs.get("timeout", 30)), self.context.remaining_timeout())
         try:
             response = self.raw.request(method=method, url=url, **forwarded, verify=True,
-                allow_redirects=False, timeout=min(float(kwargs.get("timeout", 30)), self.context.remaining_timeout()),
+                allow_redirects=False, timeout=timeout,
                 proxies={"http":self.proxy.url, "https":self.proxy.url} if self.proxy else {},
                 content_callback=receive)
-        except Exception:
+        except Exception as exc:
             if problem:
                 raise problem[0] from None
             self.context.check()
-            raise FlowError("PROXY_ERROR" if self.proxy else "NETWORK_ERROR", "http") from None
+            details = {**request_details(method, url), "exception_type": type(exc).__name__,
+                       "timeout_ms": round(timeout * 1000)}
+            if isinstance(exc, RequestException):
+                curl_code = int(exc.code)
+                details["curl_code"] = curl_code
+                code = "REQUEST_TIMEOUT" if curl_code == 28 else "PROXY_ERROR" if self.proxy else "NETWORK_ERROR"
+            elif isinstance(exc, OSError):
+                code = "PROXY_ERROR" if self.proxy else "NETWORK_ERROR"
+            else:
+                code = "UNEXPECTED_ERROR"
+            raise FlowError(code, "http", details=details) from None
         if problem:
             raise problem[0]
         response.content = bytes(content)
