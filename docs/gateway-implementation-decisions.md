@@ -101,3 +101,89 @@ This is the exhaustive per-plan ruling record at the UI handoff; later entries s
 - Visual approval is still required before Task 14 product UI implementation.
   The canvas/preview is the source of truth for that decision; backend Tasks
   1–12 remain usable for verification while the draft is reviewed.
+
+## Codex API Service checkpoint — 2026-09-25
+
+The user subsequently approved catalog draft v4 and the Codex API Service spec,
+plan and subagent-driven execution. Catalog UI implementation remains separate;
+its approval does not cover the newly added account/reset screens below.
+
+Backend Tasks 1–9 are implemented through `e26e53f`, with independent task reviews:
+exclusive input/cache-read/cache-write/output quota accounting, frozen rates,
+durable account quota/reset state, four proxy modes, explicit reset-credit
+consumption, pool routing/affinity, account-attributed attempts, model prefixes
+and exclusions, private account/grant/report APIs. This is not a production
+deployment or proof of live upstream availability.
+
+Final observed backend verification: 1,307 tests passed on Python 3.14 with one
+existing Google GenAI deprecation warning; Task 9 covering set passed 53 tests
+on Python 3.10 and 3.14. Earlier full run interrupted after 87 passes; verbose
+rerun passed, but the transient stall's root cause was not established. Final
+whole-branch verification/review remains Task 12.
+
+Task 9 review deferred one minor boundary bug to final triage: extreme year-0001
+report timestamps can overflow default-window arithmetic/UTC conversion and
+return 500 rather than 422. It is not treated as fixed by a passing suite.
+
+### Draft prepared, approval pending
+
+Superdesign draft `9da57406-2110-462f-a8ee-0f293bc9c332` is now version **6**, titled
+**Codex Accounts | Dịch vụ API**. Version 5 was the single incremental generation;
+version 6 applies deterministic corrections: no wildcard prefix, reset/grant
+buttons disabled pending confirmation, fixed affinity TTL, truthful unsupported
+capabilities and evidence-resolution copy. No user approval of v6 is recorded yet.
+
+- Preview: https://p.superdesign.dev/draft/9da57406-2110-462f-a8ee-0f293bc9c332
+- Canvas: https://superdesign.dev/teams/52a8e2c5-cbc2-465a-a07c-e51229258be3/projects/7d62e963-3633-45cd-ae16-6445cd1b4738
+- Verified the saved same-draft version and corrected HTML after import. Local
+  Chrome screenshots of the draft at 1440×1000 and 390×844 were inspected;
+  document horizontal overflow was false and no page errors were emitted.
+  These are static mockups, not evidence of production UI functionality.
+- Existing catalog v4 remains in draft version history and its backend/UI work
+  is separate. The account draft references that workspace rather than claiming
+  it is newly implemented. OAuth Workbench and production admin files unchanged.
+- Only seven deliberately selected, path-validated UI source files were sent:
+  `.superdesign/design-system.md` and gateway admin `index.html`, `style.css`,
+  `app.js`, `forms.js`, `keys.js`, `dom.js`. No account/config/test/secret files.
+
+### Task 10 account UI gate and endpoint mapping
+
+No production UI code is changed at this checkpoint. The existing Superdesign
+project/draft is extended incrementally; explicit approval of the resulting
+account/reset screens is required before Task 11 implementation. All example
+identities, metrics and profile names in the draft are synthetic.
+
+| UI surface | Private API under `/api/service` | Required state semantics |
+|---|---|---|
+| Masked account list/details | GET `oauth-accounts`; PATCH `oauth-accounts/{id}` | Versioned edit, no token/account-id/proxy-secret exposure; null override inherits provider |
+| Quota/credit snapshot | GET `oauth-accounts/{id}/quota`, GET `oauth-accounts/{id}/reset-credits` | Storage-only GET; unknown/stale distinct from zero; actual window duration and timestamps |
+| Explicit refresh | POST `oauth-accounts/{id}/quota/refresh` | Separate usage/credit outcome; preserve stale previous observations on partial failure |
+| Reset confirmation | POST `oauth-accounts/{id}/reset-credits/consume` | Stable request UUID, current credits version and literal acknowledgement; one POST per confirmed operation |
+| Reset resolution | POST `reset-requests/{id}/resolve` | Admin evidence/outcome/reason + version; unknown never auto-retried or inferred from percentage |
+| Pool editor | GET/PUT `account-pools/{model_id:path}` | Canonical model; version 0 create-only; empty configured pool pauses routing |
+| Customer quota grant | POST `keys/{id}/quota-adjust` | Increase total limit, preserve spent/held/history; idempotent receipt, no upstream reset |
+| Usage and attempts | GET `usage/accounts`, GET `usage/requests` | Freeze returned time-window bounds during paging; serving-attempt charge once, unknown legacy attribution retained |
+| Supported transports | GET `capabilities` | Tested HTTP text/tools subset; compact/images/WebSocket remain unsupported |
+
+The UI must distinguish OpenAI percentage windows and provider-granted reset
+credits from customer weighted-token quotas. All monetary/micro-token values
+and aggregate counters use exact decimal strings, not JavaScript floats.
+
+For the design example, inclusive input 1,000 with cached-read 600, cached-write
+100 and output 200 leaves uncached input 300. Rates 1 / 0.1 / 1.25 / 3 charge
+1,085 weighted tokens; a 100,000,000-token limit with zero held leaves
+99,998,915. Granting 1,085 then raises the total limit to 100,001,085, preserving
+the 1,085 spent and restoring 100,000,000 available. Blank cache rates inherit
+the effective input rate; explicit zero is intentionally free.
+
+Reset states are `prepared`, `dispatched`, `unknown`, `rejected`,
+`succeeded_refresh_failed`, `succeeded`. Accepted-but-unverified reset must warn
+and remain locked, not show a generic success or permit another consume.
+Snapshot refresh and manual evidence resolution are distinct actions.
+
+Operational limits: backend endpoints are reference-observed, not a stable
+public OpenAI contract. Tests used synthetic HTTP and disposable PostgreSQL;
+no real account/reset, production migration, restart, merge, push or deployment
+was performed. Thread-backed OAuth cancellation remains cooperative; a
+noncooperative native call can exceed the nominal cleanup budget. No raw
+credentials or live account data were uploaded as design context.
