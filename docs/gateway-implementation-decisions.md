@@ -75,3 +75,29 @@ This is the exhaustive per-plan ruling record at the UI handoff; later entries s
 - Ruling: production uses same approved split table/editor layout for entity tabs; detailed forms reflect actual API semantics (model permission shared across protocols, per-model coefficients) rather than illustrative per-protocol pricing blocks — spec is authority — cost if wrong: no separate per-protocol prices.
 
 - Final rulings on declined judgments: live provider/Kiot correctness remains unverified without authorized live keys; remote proxy DNS requires operator firewall/trusted proxy; resale rights remain provider-contract responsibility. These are documented deployment limitations, not claimed test coverage. Visual fidelity assessed by main agent local Chrome screenshots against v3, not by code reviewer.
+
+## Provider Catalog UI design gate — 2026-09-25
+
+- Task 13 extends the saved Superdesign project `7d62e963-3633-45cd-ae16-6445cd1b4738`
+  and draft `9da57406-2110-462f-a8ee-0f293bc9c332` in place. The draft is now
+  version 4, titled **Provider Catalog | Dịch vụ API**, and keeps the existing
+  matte dark-bronze Vietnamese admin shell, navigation, API-key screens and
+  OAuth workbench unchanged.
+- The incremental draft adds only catalog-specific surfaces: provider preset and
+  source editor (credential, Direct/Fixed/Pool/KiotProxy effective proxy,
+  schedule and worker status); paged catalog rows with added/changed/missing/
+  ignored/unknown states, provenance and observed metadata; stale snapshot and
+  429 retry notices; explicit publish preview with version conflicts,
+  `all_models` warning and disabled-by-default new model/binding; separate
+  read-only connection check and acknowledged costed probe with quote,
+  16-token cap, pending/reconcile/error states; and queued/offline/running/
+  cancelled/reconcile operation states. Synthetic labels only (`provider.invalid`,
+  `model-demo`, `credential-demo`, `proxy-demo`) are present in the draft.
+- The saved context bundle remains `.superdesign/design-system.md`,
+  `autobuild_json/static/index.html`, and `autobuild_json/static/style.css`.
+  The index fingerprint changed since the previous checkpoint and was refreshed
+  after validating the target path, fingerprints and all six init artifacts.
+  No secrets, account data, provider payloads, or production samples were sent.
+- Visual approval is still required before Task 14 product UI implementation.
+  The canvas/preview is the source of truth for that decision; backend Tasks
+  1–12 remain usable for verification while the draft is reviewed.
