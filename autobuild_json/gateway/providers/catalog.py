@@ -1,4 +1,3 @@
-from dataclasses import asdict
 from datetime import timedelta
 from math import ceil
 import json
@@ -108,18 +107,21 @@ class Catalog:
                                                     "ORDER BY model_id"), {"id": provider_id})).scalars())
 
     async def put_model(self, model: ModelConfig):
+        from .registry_writes import lock_model_names, write_model
         async with self.db.sessions.begin() as session:
-            exists = await session.scalar(text("SELECT alias FROM model_aliases WHERE alias=:id"), {"id": model.model_id})
-            if exists:
-                raise GatewayError("invalid_request")
-            await session.execute(text("INSERT INTO public_models(id,config) VALUES (:id,CAST(:config AS jsonb)) "
-                "ON CONFLICT(id) DO UPDATE SET config=excluded.config"),
-                {"id": model.model_id, "config": model.model_dump_json()})
+            # Legacy callers use this method as a replace operation; it remains
+            # serialized and compare-and-set under the shared model-name lock.
+            await lock_model_names(session, (model.model_id,))
+            current = await session.scalar(text("SELECT version FROM public_models WHERE id=:id FOR UPDATE"),
+                                           {"id": model.model_id})
+            await write_model(session, model, expected_version=current, create_only=current is None)
 
     async def put_alias(self, alias, model_id):
         if not isinstance(alias, str) or not 1 <= len(alias) <= 200 or alias == model_id:
             raise GatewayError("invalid_request")
         async with self.db.sessions.begin() as session:
+            from .registry_writes import lock_model_names
+            await lock_model_names(session, (alias, model_id))
             conflict = await session.scalar(text("SELECT id FROM public_models WHERE id=:id"), {"id": alias})
             target = await session.scalar(text("SELECT id FROM public_models WHERE id=:id"), {"id": model_id})
             if conflict or not target:
@@ -128,23 +130,13 @@ class Catalog:
                 "ON CONFLICT(alias) DO UPDATE SET model_id=excluded.model_id"), {"alias": alias, "model": model_id})
 
     async def put_binding(self, binding, *, expected_version=None, create_only=False):
+        from .registry_writes import lock_model_names, write_binding
         async with self.db.sessions.begin() as session:
-            existing=await session.scalar(text('SELECT version FROM model_bindings WHERE id=:id FOR UPDATE'),{'id':binding.id})
-            if create_only and existing is not None or expected_version is not None and existing!=expected_version:
-                raise GatewayError('version_conflict',409)
-            provider = await session.scalar(text("SELECT provider_id FROM credentials WHERE id=:id"), {"id": binding.credential_id})
-            config = await session.scalar(text("SELECT config FROM public_models WHERE id=:id"), {"id": binding.public_model_id})
-            if provider != binding.provider_id or config is None:
-                raise GatewayError("invalid_request")
-            model = ModelConfig.model_validate(config)
-            if not model.router_model and model.identity != binding.identity:
-                raise GatewayError("invalid_request")
-            await session.execute(text("""INSERT INTO model_bindings(id,provider_id,credential_id,model_id,config)
-                VALUES (:id,:provider,:credential,:model,CAST(:config AS jsonb)) ON CONFLICT(id) DO UPDATE
-                SET provider_id=excluded.provider_id,credential_id=excluded.credential_id,
-                    model_id=excluded.model_id,config=excluded.config,version=model_bindings.version+1"""),
-                {"id": binding.id, "provider": binding.provider_id, "credential": binding.credential_id,
-                 "model": binding.public_model_id, "config": json_value(asdict(binding))})
+            await lock_model_names(session, (binding.public_model_id,))
+            existing = await session.scalar(text('SELECT version FROM model_bindings WHERE id=:id FOR UPDATE'), {'id': binding.id})
+            if existing is not None and expected_version is None and not create_only:
+                expected_version = existing
+            await write_binding(session, binding, expected_version=expected_version, create_only=create_only)
             await self._audit(session,'binding.updated' if existing else 'binding.created',binding.id)
 
     async def _policy(self, session, principal):

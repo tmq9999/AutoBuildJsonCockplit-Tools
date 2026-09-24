@@ -140,7 +140,9 @@ def create_admin_router(services, authorized):
         async with services.db.sessions() as session:
             if await session.scalar(text('SELECT id FROM public_models WHERE id=:id'),{'id':payload.model_id}):
                 raise GatewayError('version_conflict',409)
-        await services.catalog.put_model(payload)
+        async with services.db.sessions.begin() as session:
+            from ..providers.registry_writes import write_model
+            await write_model(session, payload, create_only=True)
         return {"id": payload.model_id}
 
     @router.put("/models/{identity:path}/{version}")
@@ -148,15 +150,12 @@ def create_admin_router(services, authorized):
         if payload.model_id != identity:
             raise GatewayError("invalid_request")
         async with services.db.sessions.begin() as session:
-            result = await session.scalar(text("UPDATE public_models SET config=CAST(:config AS jsonb),version=version+1 "
-                "WHERE id=:id AND version=:version RETURNING id"),
-                {"id": identity, "version": version, "config": payload.model_dump_json()})
-            if not result:
-                raise GatewayError("version_conflict", 409)
+            from ..providers.registry_writes import write_model
+            new_version = await write_model(session, payload, expected_version=version)
             await session.execute(text("INSERT INTO audit_events(id,actor,action,record_id,details) "
                 "VALUES (:id,'admin','model.updated',:record,CAST(:details AS jsonb))"),
-                {"id": uuid4(), "record": uuid4(), "details": json.dumps({"model_id": identity, "version": version+1})})
-        return {"id": identity, "version": version+1}
+                {"id": uuid4(), "record": uuid4(), "details": json.dumps({"model_id": identity, "version": new_version})})
+        return {"id": identity, "version": new_version}
 
     @router.get("/bindings")
     async def bindings():
@@ -179,6 +178,8 @@ def create_admin_router(services, authorized):
     @router.delete('/models/{identity:path}')
     async def delete_model(identity:str,payload:VersionInput):
         async with services.db.sessions.begin() as session:
+            from ..providers.registry_writes import lock_model_names
+            await lock_model_names(session, (identity,))
             row=(await session.execute(text('SELECT config,version FROM public_models WHERE id=:id FOR UPDATE'),{'id':identity})).mappings().first()
             if row is None or row['version']!=payload.version:
                 raise GatewayError('version_conflict',409)
