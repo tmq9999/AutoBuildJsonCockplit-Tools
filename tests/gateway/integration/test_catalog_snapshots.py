@@ -21,3 +21,61 @@ async def test_snapshot_diff_marks_missing_and_unchanged(pg_db):
     await complete_snapshot(store, sources, source.id, (observe("b"), observe("c")))
     page = await store.page(source.id, limit=200)
     assert [(item.upstream_id, item.diff) for item in page.items] == [("a", "missing"), ("b", "unchanged"), ("c", "added")]
+
+
+async def test_snapshot_preserves_observed_datetime_metadata(pg_db):
+    from datetime import datetime, timezone
+    from tests.gateway.catalog_support import snapshot_case
+    from autobuild_json.gateway.catalog.records import CatalogEntry, ObservedValue
+
+    entry = CatalogEntry(upstream_id="meta", metadata={
+        "owner": ObservedValue(value="Vendor", path="owned_by", observed_at=datetime(2026, 9, 24, tzinfo=timezone.utc))
+    })
+    _, source, store, _ = await snapshot_case(pg_db, (entry,))
+    page = await store.page(source.id)
+    assert page.items[0].entry.metadata["owner"].observed_at.year == 2026
+
+
+async def test_snapshot_rejects_sensitive_metadata(pg_db):
+    from tests.gateway.catalog_support import snapshot_case
+    from autobuild_json.gateway.catalog.records import CatalogEntry, ObservedValue
+    from autobuild_json.gateway.errors import GatewayError
+    from datetime import datetime, timezone
+
+    entry = CatalogEntry(upstream_id="secret", metadata={
+        "api_key": ObservedValue(value="secret-value", observed_at=datetime(2026, 9, 24, tzinfo=timezone.utc))
+    })
+    with pytest.raises(GatewayError) as caught:
+        await snapshot_case(pg_db, (entry,))
+    assert caught.value.code == "invalid_request"
+
+
+async def test_cursor_for_purged_snapshot_is_stale(pg_db):
+    from sqlalchemy import text
+    from tests.gateway.catalog_support import snapshot_case
+    from autobuild_json.gateway.errors import GatewayError
+    from tests.gateway.catalog_support import observe
+
+    _, source, store, run_id = await snapshot_case(pg_db, (observe("a"), observe("b")))
+    page = await store.page(source.id, limit=1)
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("DELETE FROM catalog_entries WHERE run_id=:run"), {"run": run_id})
+    with pytest.raises(GatewayError) as caught:
+        await store.page(source.id, cursor=page.next_cursor, limit=1)
+    assert caught.value.code == "catalog_snapshot_stale"
+
+
+async def test_cross_source_pointer_is_rejected(pg_db):
+    from sqlalchemy import text
+    from tests.gateway.catalog_support import snapshot_case, observe
+    from autobuild_json.gateway.errors import GatewayError
+    from tests.gateway.catalog_support import source_case
+
+    _, source_a, store_a, run_id = await snapshot_case(pg_db, (observe("a"),))
+    sources_b, source_b = await source_case(pg_db)
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("UPDATE catalog_sources SET latest_successful_run_id=:run WHERE id=:source"),
+                              {"run": run_id, "source": source_b.id})
+    with pytest.raises(GatewayError) as caught:
+        await store_a.page(source_b.id)
+    assert caught.value.code == "catalog_snapshot_stale"

@@ -42,3 +42,15 @@ def test_cursor_rejects_oversized_after_id():
     payload["after"] = "x" * 201
     with pytest.raises(GatewayError):
         encode_cursor(payload, b"k" * 32)
+
+
+def test_snapshot_stamp_accepts_json_uuid_proxy_values():
+    from uuid import uuid4
+    from autobuild_json.gateway.catalog.snapshots import _stamp
+
+    proxy = uuid4()
+    stamp = _stamp({"source_version": 1, "provider_version": 1, "credential_version": 1,
+                    "proxy_id": str(proxy), "proxy_version": 1,
+                    "content_digest": "a" * 64, "binding_id": None, "binding_version": None,
+                    "budget_id": None, "budget_version": None})
+    assert stamp.proxy_id == proxy

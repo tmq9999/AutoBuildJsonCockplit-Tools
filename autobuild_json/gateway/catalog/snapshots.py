@@ -2,8 +2,10 @@
 
 from datetime import datetime, timezone
 import json
+import re
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import text
 
 from ..errors import GatewayError
@@ -15,11 +17,41 @@ _DIFFS = frozenset({"added", "changed", "missing", "unchanged"})
 
 
 def _metadata(entry: CatalogEntry) -> str:
-    return json.dumps(entry.model_dump(mode="json")["metadata"], ensure_ascii=False, separators=(",", ":"))
+    encoded = json.dumps(entry.model_dump(mode="json")["metadata"], ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    if len(encoded.encode("utf-8")) > 65536:
+        raise GatewayError("invalid_request")
+    return encoded
 
 
 def _entry(row) -> CatalogEntry:
-    return CatalogEntry(upstream_id=row["upstream_id"], metadata=row["metadata"] or {})
+    return CatalogEntry.model_validate_json(json.dumps({"upstream_id": row["upstream_id"], "metadata": row["metadata"] or {}}))
+
+
+_SENSITIVE = re.compile(r"(?:secret|token|password|api[_-]?key|authorization|cookie|credential)", re.I)
+
+
+def _safe_entry(entry: CatalogEntry) -> CatalogEntry:
+    try:
+        for name, observed in entry.metadata.items():
+            if _SENSITIVE.search(name):
+                raise ValueError("sensitive_metadata")
+            for value in (observed.value if isinstance(observed.value, (list, dict)) else (observed.value,)):
+                values = value.values() if isinstance(value, dict) else value if isinstance(value, list) else (value,)
+                for item in values:
+                    if isinstance(item, str) and (any(ord(char) < 32 or ord(char) == 127 for char in item)
+                                                  or _SENSITIVE.search(item)):
+                        raise ValueError("sensitive_metadata")
+        return entry.model_copy(deep=True)
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise GatewayError("invalid_request") from exc
+
+
+def _stamp(value):
+    from .records import ConfigStamp
+    try:
+        return ConfigStamp.model_validate_json(json.dumps(value))
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise GatewayError("invalid_state", 409) from exc
 
 
 def _same_stamp(actual, expected) -> bool:
@@ -34,7 +66,7 @@ class SnapshotStore:
     async def commit(self, claim, context, entries: tuple[CatalogEntry, ...]) -> UUID:
         if not isinstance(entries, tuple):
             raise GatewayError("invalid_request")
-        normalized = tuple(CatalogEntry.model_validate(entry.model_dump(mode="json")) for entry in entries)
+        normalized = tuple(_safe_entry(entry) for entry in entries)
         ids = [entry.upstream_id for entry in normalized]
         if len(set(ids)) != len(ids):
             raise GatewayError("invalid_request")
@@ -49,8 +81,7 @@ class SnapshotStore:
                 raise GatewayError("version_conflict", 409)
             expected_row = (await session.execute(text("SELECT expected FROM provider_operations WHERE id=:id FOR UPDATE"),
                                                    {"id": claim.operation_id})).mappings().one()
-            from .records import ConfigStamp
-            expected = ConfigStamp.model_validate(expected_row["expected"])
+            expected = _stamp(expected_row["expected"])
             if not _same_stamp(locked_context.stamp, expected):
                 raise GatewayError("version_conflict", 409)
 
@@ -67,8 +98,8 @@ class SnapshotStore:
                 previous_rows = {row["upstream_id"]: row for row in
                     (await session.execute(text("SELECT upstream_id,metadata,digest FROM catalog_entries WHERE run_id=:run"),
                                             {"run": previous_id})).mappings().all()}
-                previous_expected = await session.scalar(text("SELECT expected FROM provider_operations WHERE id=:id"), {"id": previous_id})
-                previous_content_digest = previous_expected.get("content_digest") if isinstance(previous_expected, dict) else None
+                previous_expected = _stamp(await session.scalar(text("SELECT expected FROM provider_operations WHERE id=:id"), {"id": previous_id}))
+                previous_content_digest = previous_expected.content_digest
             source_changed = previous_id is not None and previous_content_digest != locked_context.stamp.content_digest
             incoming_digest = {entry.upstream_id: bytes.fromhex(content_digest((entry,))) for entry in normalized}
             previous_digest = {key: bytes(row["digest"]) for key, row in previous_rows.items()}
@@ -120,47 +151,49 @@ class SnapshotStore:
                 run_id, previous_id, after = source["latest_successful_run_id"], source["previous_successful_run_id"], None
             if run_id is None:
                 return SnapshotPage(run_id=UUID(int=0), previous_run_id=None, source_changed=False, items=(), next_cursor=None)
-            run = (await session.execute(text("SELECT source_id,state FROM provider_operations WHERE id=:id"), {"id": run_id})).mappings().first()
+            run = (await session.execute(text("SELECT source_id,state,result FROM provider_operations WHERE id=:id"), {"id": run_id})).mappings().first()
             if run is None or run["source_id"] != source_id or run["state"] != "succeeded":
                 raise GatewayError("catalog_snapshot_stale", 409)
-            current_rows = {row["upstream_id"]: row for row in
-                            (await session.execute(text("SELECT upstream_id,metadata,digest FROM catalog_entries WHERE run_id=:run"), {"run": run_id})).mappings().all()}
-            previous_rows = {}
+            if isinstance(run["result"], dict) and run["result"].get("count", 0) > 0:
+                present = await session.scalar(text("SELECT EXISTS(SELECT 1 FROM catalog_entries WHERE run_id=:run)"), {"run": run_id})
+                if not present:
+                    raise GatewayError("catalog_snapshot_stale", 409)
             previous_content_digest = None
             if previous_id is not None:
-                previous_run = (await session.execute(text("SELECT source_id,state FROM provider_operations WHERE id=:id"), {"id": previous_id})).mappings().first()
+                previous_run = (await session.execute(text("SELECT source_id,state,result FROM provider_operations WHERE id=:id"), {"id": previous_id})).mappings().first()
                 if previous_run is None or previous_run["source_id"] != source_id or previous_run["state"] != "succeeded":
                     raise GatewayError("catalog_snapshot_stale", 409)
-                previous_rows = {row["upstream_id"]: row for row in
-                                 (await session.execute(text("SELECT upstream_id,metadata,digest FROM catalog_entries WHERE run_id=:run"), {"run": previous_id})).mappings().all()}
-                previous_expected = await session.scalar(text("SELECT expected FROM provider_operations WHERE id=:id"), {"id": previous_id})
-                previous_content_digest = previous_expected.get("content_digest") if isinstance(previous_expected, dict) else None
-            current_expected = await session.scalar(text("SELECT expected FROM provider_operations WHERE id=:id"), {"id": run_id})
-            source_changed = previous_id is not None and isinstance(current_expected, dict) and previous_content_digest != current_expected.get("content_digest")
-            ids = sorted(set(current_rows) | set(previous_rows))
-            if after is not None:
-                ids = [item for item in ids if item > after]
-            rows = []
-            for upstream_id in ids:
-                current, previous = current_rows.get(upstream_id), previous_rows.get(upstream_id)
-                if previous is None:
-                    kind = "added"
-                    row = current
-                elif current is None:
-                    if source_changed:
-                        continue
-                    kind = "missing"
-                    row = previous
-                elif bytes(current["digest"]) == bytes(previous["digest"]):
-                    kind = "unchanged"
-                    row = current
-                else:
-                    kind = "changed"
-                    row = current
-                if diff is not None and kind != diff:
-                    continue
-                rows.append((upstream_id, row, kind))
-            selected, more = rows[:limit], len(rows) > limit
+                if isinstance(previous_run["result"], dict) and previous_run["result"].get("count", 0) > 0:
+                    present = await session.scalar(text("SELECT EXISTS(SELECT 1 FROM catalog_entries WHERE run_id=:run)"), {"run": previous_id})
+                    if not present:
+                        raise GatewayError("catalog_snapshot_stale", 409)
+                previous_expected = _stamp(await session.scalar(text("SELECT expected FROM provider_operations WHERE id=:id"), {"id": previous_id}))
+                previous_content_digest = previous_expected.content_digest
+            current_expected = _stamp(await session.scalar(text("SELECT expected FROM provider_operations WHERE id=:id"), {"id": run_id}))
+            source_changed = previous_id is not None and previous_content_digest != current_expected.content_digest
+            query = text("""WITH current_entries AS (
+                SELECT upstream_id, metadata, digest FROM catalog_entries WHERE run_id=:run
+            ), previous_entries AS (
+                SELECT upstream_id, metadata, digest FROM catalog_entries WHERE run_id=:previous
+            )
+            SELECT * FROM (
+                SELECT COALESCE(c.upstream_id,p.upstream_id) AS upstream_id,
+                       CASE WHEN c.upstream_id IS NULL THEN p.metadata ELSE c.metadata END AS metadata,
+                       CASE WHEN c.upstream_id IS NULL THEN 'missing'
+                            WHEN p.upstream_id IS NULL THEN 'added'
+                            WHEN c.digest=p.digest THEN 'unchanged' ELSE 'changed' END AS diff
+                FROM current_entries c FULL OUTER JOIN previous_entries p
+                  ON p.upstream_id=c.upstream_id
+                WHERE c.upstream_id IS NOT NULL OR (c.upstream_id IS NULL AND :allow_missing)
+            ) AS catalog_diff
+            WHERE (CAST(:filter AS text) IS NULL OR diff=CAST(:filter AS text))
+              AND (CAST(:after AS text) IS NULL OR upstream_id>CAST(:after AS text))
+            ORDER BY upstream_id LIMIT :limit""")
+            selected_rows = (await session.execute(query, {"run": run_id, "previous": previous_id,
+                "allow_missing": not source_changed, "filter": diff, "after": after, "limit": limit + 1})).mappings().all()
+            more = len(selected_rows) > limit
+            selected_rows = selected_rows[:limit]
+            selected = [(row["upstream_id"], row, row["diff"]) for row in selected_rows]
             decisions = {}
             if selected:
                 decision_rows = (await session.execute(text("SELECT * FROM catalog_decisions WHERE source_id=:source AND upstream_id = ANY(:ids)"),
