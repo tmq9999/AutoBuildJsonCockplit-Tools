@@ -69,13 +69,13 @@ def encode_cursor(payload: dict, key: bytes) -> str:
     body = _b64(raw)
     signature = _b64(hmac.new(key, body.encode("ascii"), hashlib.sha256).digest())
     token = body + "." + signature
-    if len(token) > 4096:
+    if len(token) > 2048:
         raise _fail()
     return token
 
 
 def decode_cursor(token: str, key: bytes, now) -> dict:
-    if not isinstance(token, str) or len(token) > 4096 or not isinstance(key, bytes) or not key:
+    if not isinstance(token, str) or len(token) > 2048 or not isinstance(key, bytes) or not key:
         raise _fail()
     try:
         body, supplied = token.split(".", 1)

@@ -61,6 +61,43 @@ def test_cursor_rejects_oversized_after_id():
         encode_cursor(payload, b"k" * 32)
 
 
+def test_cursor_wire_limit_is_2048_characters():
+    import base64
+    import hashlib
+    import hmac
+    import json
+    from autobuild_json.gateway.catalog.cursors import decode_cursor
+    from autobuild_json.gateway.errors import GatewayError
+
+    payload = _payload()
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    def token_for(length):
+        target_body = length - 1 - 43
+        body = base64.urlsafe_b64encode(raw + b" " * ((target_body * 3 // 4) - len(raw))).rstrip(b"=").decode()
+        return body + "." + base64.urlsafe_b64encode(hmac.new(b"k" * 32, body.encode(), hashlib.sha256).digest()).rstrip(b"=").decode()
+    token = token_for(2048)
+    assert len(token) == 2048
+    assert decode_cursor(token, b"k" * 32, int(time.time()))["after"] == "model-a"
+    # A canonical base64 body cannot have length 1 modulo 4, so the first
+    # valid signed wire size above 2048 is 2050. Test the literal 2049 boundary
+    # as well, without relying solely on invalid signature rejection.
+    oversized = token_for(2050)
+    assert len(oversized) == 2050
+    with pytest.raises(GatewayError, match="invalid_request"):
+        decode_cursor(oversized, b"k" * 32, int(time.time()))
+    with pytest.raises(GatewayError, match="invalid_request"):
+        decode_cursor(token + "A", b"k" * 32, int(time.time()))
+
+
+def test_snapshot_page_cursor_limit_accepts_2048_rejects_2049():
+    from pydantic import ValidationError
+    from autobuild_json.gateway.catalog.records import SnapshotPage
+
+    assert SnapshotPage(run_id=uuid4(), next_cursor="a" * 2048).next_cursor == "a" * 2048
+    with pytest.raises(ValidationError):
+        SnapshotPage(run_id=uuid4(), next_cursor="a" * 2049)
+
+
 def test_snapshot_stamp_accepts_json_uuid_proxy_values():
     from uuid import uuid4
     from autobuild_json.gateway.catalog.snapshots import _stamp

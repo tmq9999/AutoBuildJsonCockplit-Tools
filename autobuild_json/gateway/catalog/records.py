@@ -243,7 +243,7 @@ class SnapshotPage(CatalogRecord):
     previous_run_id: UUID | None = None
     source_changed: bool = False
     items: tuple[SnapshotItem, ...] = Field(default=(), max_length=10000)
-    next_cursor: str | None = Field(default=None, max_length=4096)
+    next_cursor: str | None = Field(default=None, max_length=2048)
 
     @field_validator("next_cursor")
     @classmethod

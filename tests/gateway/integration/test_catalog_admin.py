@@ -367,3 +367,13 @@ async def test_invalid_usage_never_becomes_zero_usage(pg_db):
                                   {"value": json.dumps({"input_tokens": "bad", "output_tokens": 0}), "id": identity})
         response = await client.get(f"/api/service/provider-operations/{identity}")
         assert response.status_code == 409 and response.json()["error"]["code"] == "invalid_usage"
+
+
+async def test_entries_query_cursor_limit_accepts_2048_rejects_2049(pg_db):
+    async with admin_env(pg_db) as (client, services):
+        client.headers.update(AUTH)
+        # Nonexistent source gives 404 after valid query validation; an oversized
+        # cursor must be rejected at the HTTP boundary before any source lookup.
+        path = f"/api/service/catalog/sources/{uuid4()}/entries"
+        assert (await client.get(path, params={"cursor": "a" * 2048})).status_code == 404
+        assert (await client.get(path, params={"cursor": "a" * 2049})).status_code == 422

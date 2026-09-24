@@ -110,7 +110,7 @@ def mount_catalog_routes(router, services):
                                                               payload.currency, payload.reason, "admin"))
 
     @router.get("/catalog/sources/{identity}/entries")
-    async def entries(identity: UUID, cursor: str | None = Query(default=None, max_length=4096),
+    async def entries(identity: UUID, cursor: str | None = Query(default=None, max_length=2048),
                       limit: int = Query(default=50, ge=1, le=200), diff: str | None = None):
         return wire(await services.snapshots.page(identity, cursor=cursor, limit=limit, diff=diff))
 
