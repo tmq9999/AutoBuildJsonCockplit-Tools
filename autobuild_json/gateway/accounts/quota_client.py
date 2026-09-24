@@ -110,8 +110,11 @@ def parse_credits(payload, credential_id, received_at):
             state = state if state in {'available', 'redeemed', 'expired'} else 'unknown'
             expiry = _alias(row, 'expires_at', 'expiresAt')
             result.append(ResetCredit(id=identity, state=state, expires_at=_timestamp(expiry) if expiry is not None else None))
-        derived = sum(r.state == 'available' and r.expires_at is not None and r.expires_at > received_at for r in result)
-        if 'credits' in payload:
+        # An aggregate is authoritative unless complete detail proves a
+        # contradiction. Empty/unknown/expiry-less detail cannot prove zero.
+        classified = bool(result) and all(r.state != 'unknown' and r.expires_at is not None for r in result)
+        if classified:
+            derived = sum(r.state == 'available' and r.expires_at > received_at for r in result)
             if count is not None and count != derived:
                 raise ValueError()
             if count is None:

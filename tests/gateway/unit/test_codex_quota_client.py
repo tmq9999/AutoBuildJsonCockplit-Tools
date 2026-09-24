@@ -54,18 +54,41 @@ def test_credit_unknown_status_never_derives_spendable_count():
     result = credits({'credits': [{'id': 'a'}, {'id': 'b', 'status': 'future'}, {'id': 'c', 'status': 'available'},
                                   {'id': 'd', 'state': 'available', 'expires_at': int((NOW + timedelta(seconds=20)).timestamp())},
                                   {'id': 'e', 'state': 'available', 'expires_at': int((NOW - timedelta(seconds=20)).timestamp())}]})
-    assert result.available_count == 1
+    assert result.available_count is None
     assert [r.state for r in result.credits] == ['unknown', 'unknown', 'available', 'available', 'available']
     assert credits({}).available_count is None
     assert credits({'data': {'availableCount': 2}}).available_count == 2
 
 
+def test_explicit_aggregate_count_is_authoritative_with_incomplete_details():
+    assert credits({'available_count': 0, 'credits': []}).available_count == 0
+    assert credits({'available_count': 2, 'credits': [{'status': 'future'}]}).available_count == 2
+
+
+def test_fully_classified_details_derive_exact_count_without_aggregate():
+    result = credits({'credits': [{'status': 'available', 'expires_at': int((NOW + timedelta(seconds=20)).timestamp())},
+                                  {'state': 'redeemed', 'expires_at': int((NOW + timedelta(seconds=20)).timestamp())}]})
+    assert result.available_count == 1
+
+
 @pytest.mark.parametrize('payload', [{'available_count': -1}, {'available_count': True}, {'available_count': 1, 'availableCount': 2},
-                                    {'available_count': 1, 'credits': []}, {'credits': [{'status': 'available', 'state': 'redeemed'}]},
+                                    {'available_count': 1, 'credits': [{'status': 'expired', 'expires_at': int(NOW.timestamp())}]}, {'credits': [{'status': 'available', 'state': 'redeemed'}]},
                                     {'credits': [{'expires_at': '2026-09-25T00:00:00'}]}])
 def test_conflicting_or_malformed_credits_rejected(payload):
     with pytest.raises(GatewayError, match='codex_credits_unavailable'):
         credits(payload)
+
+
+@pytest.mark.parametrize('records', [[], [{'state': 'unknown'}], [{'state': 'available'}],
+                                     [{'state': 'expired'}], [{'state': 'redeemed'}]])
+def test_incomplete_credit_details_do_not_invent_zero(records):
+    assert credits({'credits': records}).available_count is None
+    assert credits({'available_count': 0, 'credits': records}).available_count == 0
+    assert credits({'available_count': 2, 'credits': records}).available_count == 2
+
+
+def test_classified_nonavailable_details_can_prove_zero():
+    assert credits({'credits': [{'state': 'expired', 'expires_at': int(NOW.timestamp())}]}).available_count == 0
 
 
 def account_call(**changes):
