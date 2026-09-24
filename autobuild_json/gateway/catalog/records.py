@@ -101,6 +101,11 @@ class OperationRoute(CatalogRecord):
     proxy_profile_id: UUID | None = None
     timeout: int = Field(strict=True, ge=1, le=600)
 
+    @field_validator("root")
+    @classmethod
+    def valid_root(cls, value: str) -> str:
+        return ProviderConfig.api_root(value)
+
 
 class SourceContext(CatalogRecord):
     source: SourceView

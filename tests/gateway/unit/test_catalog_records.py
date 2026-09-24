@@ -98,6 +98,33 @@ def test_source_has_safe_schedule_defaults_and_no_body_auth_fields():
         SourceInput(provider_id=uuid4(), credential_id=uuid4(), mode="openai_single", root="https://example.com")
 
 
+@pytest.mark.parametrize("root", [
+    "https://user:example-secret@example.test/v1",
+    "https://example.test/v1?key=example-secret",
+    "https://example.test/v1#fragment",
+])
+def test_operation_route_rejects_embedded_credentials_or_dynamic_url_parts(root):
+    from autobuild_json.gateway.catalog.records import OperationRoute
+
+    with pytest.raises(ValidationError, match="invalid_provider_root"):
+        OperationRoute(
+            provider_id=uuid4(), credential_id=uuid4(), root=root,
+            adapter="openai_compatible", wire_api="chat", auth_mode="bearer",
+            config_version=1, timeout=30,
+        )
+
+
+def test_operation_route_normalizes_safe_root_like_provider_config():
+    from autobuild_json.gateway.catalog.records import OperationRoute
+
+    route = OperationRoute(
+        provider_id=uuid4(), credential_id=uuid4(), root="https://example.test/v1/",
+        adapter="openai_compatible", wire_api="chat", auth_mode="bearer",
+        config_version=1, timeout=30,
+    )
+    assert route.root == "https://example.test/v1"
+
+
 def test_publication_requires_unique_bounded_explicit_selections():
     from autobuild_json.gateway.catalog.records import PublicationRequest, PublishItem
 
