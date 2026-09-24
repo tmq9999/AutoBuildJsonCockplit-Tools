@@ -23,6 +23,8 @@ class OutboundRequest:
     deadline: float = 0
     headers: tuple[tuple[str, str], ...] = ()
     query: tuple[tuple[str, str], ...] = ()
+    kind: str = "inference"
+    discovery_mode: str | None = None
 
     def __post_init__(self):
         if (self.method not in {"GET", "POST"} or not self.suffix or self.suffix.startswith("/")
@@ -31,8 +33,17 @@ class OutboundRequest:
                 or any(ord(c) <= 32 for c in self.suffix)):
             raise ValueError("invalid_upstream_path")
         allowed = {"accept", "content-type", "anthropic-version", "chatgpt-account-id", "originator"}
-        if self.query not in {(), (("alt", "sse"),)}:
-            raise ValueError("invalid_upstream_query")
+        if self.kind == "discovery":
+            from ..providers.discovery.pagination import SUFFIXES, valid_mode, validate_query
+            mode = valid_mode(self.discovery_mode)
+            if self.method != "GET" or self.body is not None or self.suffix != SUFFIXES[mode]:
+                raise ValueError("invalid_discovery_request")
+            validate_query(mode, self.query)
+        elif self.kind == "inference" and self.discovery_mode is None:
+            if self.query not in {(), (("alt", "sse"),)}:
+                raise ValueError("invalid_upstream_query")
+        else:
+            raise ValueError("invalid_request_kind")
         if any(name.lower() not in allowed or "\r" in value or "\n" in value for name, value in self.headers):
             raise ValueError("invalid_upstream_headers")
         if self.auth_header is not None:
