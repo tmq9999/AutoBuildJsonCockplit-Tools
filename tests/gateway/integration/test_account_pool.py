@@ -248,3 +248,128 @@ async def test_disabled_canonical_model_rejects_empty_and_nonempty_new_policy(pg
     assert await pools.get("public") is None
     async with pg_db.sessions() as session:
         assert await session.scalar(text("SELECT count(*) FROM audit_events WHERE action='codex.pool.updated'")) == 0
+
+
+async def wait_for_blocker(db, waiter, blocker):
+    async def observed():
+        async with db.sessions() as session:
+            while True:
+                pids = await session.scalar(text("SELECT pg_blocking_pids(:pid)"), {"pid": waiter})
+                if blocker in pids:
+                    return
+                await asyncio.sleep(0.01)
+    await asyncio.wait_for(observed(), 5)
+
+
+@pytest.mark.parametrize("expired", [False, True])
+@pytest.mark.parametrize("writer_kind", ["pool", "binding"])
+async def test_affinity_fk_locks_do_not_deadlock_configuration_writer(pg_db, monkeypatch, expired, writer_kind):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    catalog, _, _, _, routes, scope = await pool_case(pg_db)
+    pools = store(pg_db)
+    await pools.put("public", None, policy(routes), "fixture-admin")
+    if expired:
+        await pools.bind(scope, routes[1], expiry())
+        async with pg_db.sessions.begin() as session:
+            await session.execute(text("UPDATE account_session_bindings SET expires_at=clock_timestamp()-interval '1 second'"))
+    bind_ready, release_bind, writer_ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    pids = {}
+    original_scope, original_execute = pools._scope, AsyncSession.execute
+    original_scalar = AsyncSession.scalar
+
+    async def gated_scope(session, scope):
+        principal = await original_scope(session, scope)
+        pids["bind"] = await session.scalar(text("SELECT pg_backend_pid()"))
+        bind_ready.set()
+        await release_bind.wait()
+        return principal
+
+    async def observed_execute(session, statement, *args, **kwargs):
+        if asyncio.current_task().get_name() == "pool-test-writer" and "writer" not in pids:
+            pids["writer"] = (await original_execute(session, text("SELECT pg_backend_pid()"))).scalar_one()
+            writer_ready.set()
+        return await original_execute(session, statement, *args, **kwargs)
+
+    async def observed_scalar(session, statement, *args, **kwargs):
+        if asyncio.current_task().get_name() == "pool-test-writer" and "writer" not in pids:
+            pids["writer"] = (await original_execute(session, text("SELECT pg_backend_pid()"))).scalar_one()
+            writer_ready.set()
+        return await original_scalar(session, statement, *args, **kwargs)
+
+    monkeypatch.setattr(pools, "_scope", gated_scope)
+    monkeypatch.setattr(AsyncSession, "execute", observed_execute)
+    monkeypatch.setattr(AsyncSession, "scalar", observed_scalar)
+    bind_task = asyncio.create_task(pools.bind(scope, routes[0], expiry()))
+    writer_task = None
+    try:
+        await asyncio.wait_for(bind_ready.wait(), 5)
+        if writer_kind == "pool":
+            write = pools.put("public", 1, policy(routes), "fixture-admin")
+        else:
+            route = routes[0]
+            write = catalog.put_binding(BindingConfig(route.binding_id, route.provider_id, route.credential_id,
+                "public", "upstream", "identity", 100, 100))
+        writer_task = asyncio.create_task(write, name="pool-test-writer")
+        await asyncio.wait_for(writer_ready.wait(), 5)
+        # This waits for a real PostgreSQL lock edge, not a timing assumption.
+        await wait_for_blocker(pg_db, pids["writer"], pids["bind"])
+        release_bind.set()
+        bound, _ = await asyncio.wait_for(asyncio.gather(bind_task, writer_task), 8)
+        assert bound.credential_id == routes[0].credential_id
+        async with pg_db.sessions() as session:
+            row = (await session.execute(text("SELECT credential_id,version FROM account_session_bindings"))).one()
+        assert row == (routes[0].credential_id, 2 if expired else 1)
+        assert (await pools.get("public"))[0] == (2 if writer_kind == "pool" else 1)
+    finally:
+        release_bind.set()
+        for task in (bind_task, writer_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(t for t in (bind_task, writer_task) if t is not None), return_exceptions=True)
+
+
+async def test_affinity_customer_key_fk_waits_follow_identity_lock_order(pg_db, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    _, identities, _, _, routes, scope = await pool_case(pg_db)
+    pools = store(pg_db)
+    identity_ready, release_identity, bind_ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    pids = {}
+    original_key, original_execute = identities._locked_key, AsyncSession.execute
+
+    async def gated_key(session, key_id):
+        row = await original_key(session, key_id)
+        pids["identity"] = await session.scalar(text("SELECT pg_backend_pid()"))
+        identity_ready.set()
+        await release_identity.wait()
+        return row
+
+    async def observed_execute(session, statement, *args, **kwargs):
+        if asyncio.current_task().get_name() == "pool-test-bind" and "bind" not in pids:
+            pids["bind"] = (await original_execute(session, text("SELECT pg_backend_pid()"))).scalar_one()
+            bind_ready.set()
+        return await original_execute(session, statement, *args, **kwargs)
+
+    monkeypatch.setattr(identities, "_locked_key", gated_key)
+    monkeypatch.setattr(AsyncSession, "execute", observed_execute)
+    identity_task = asyncio.create_task(identities.update_policy(scope.key_id, 1,
+                                        KeyPolicy(model_ids={"public"}, protocols={"openai"})))
+    bind_task = None
+    try:
+        await asyncio.wait_for(identity_ready.wait(), 5)
+        bind_task = asyncio.create_task(pools.bind(scope, routes[0], expiry()), name="pool-test-bind")
+        await asyncio.wait_for(bind_ready.wait(), 5)
+        await wait_for_blocker(pg_db, pids["bind"], pids["identity"])
+        release_identity.set()
+        _, bound = await asyncio.wait_for(asyncio.gather(identity_task, bind_task, return_exceptions=True), 8)
+        assert isinstance(bound, GatewayError) and bound.code == "invalid_state"
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT count(*) FROM account_session_bindings")) == 0
+        # A new attempt takes the new key-policy version; the old attempt must
+        # not commit an affinity row with stale authorization after the wait.
+        assert (await pools.bind(scope, routes[0], expiry())).credential_id == routes[0].credential_id
+    finally:
+        release_identity.set()
+        for task in (identity_task, bind_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(t for t in (identity_task, bind_task) if t is not None), return_exceptions=True)

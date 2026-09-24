@@ -116,6 +116,23 @@ class PoolStore:
         await self._catalog._model_row(session, principal, scope.model_id)
         return principal
 
+    async def _affinity_parent_locks(self, session, scope, route):
+        """Acquire affinity FK parents in the publisher's provider->credential order.
+
+        The binding/model/customer/key parents are acquired only after the model
+        lock in ``bind``. These are KEY SHARE locks: they protect FK validation
+        without taking the update locks used by configuration writers.
+        """
+        dependency = (await session.execute(text("SELECT provider_id,credential_id,model_id FROM model_bindings "
+            "WHERE id=:binding"), {"binding": route.binding_id})).mappings().first()
+        if (dependency is None or dependency["model_id"] != scope.model_id
+                or dependency["credential_id"] != route.credential_id):
+            raise GatewayError("invalid_state")
+        await session.execute(text("SELECT id FROM providers WHERE id=:id FOR KEY SHARE"),
+                              {"id": dependency["provider_id"]})
+        await session.execute(text("SELECT id FROM credentials WHERE id=:id FOR KEY SHARE"),
+                              {"id": dependency["credential_id"]})
+
     async def _live_route(self, session, scope, principal, binding_id, credential_id):
         request = SimpleNamespace(model=scope.model_id, required_capabilities=frozenset())
         _, routes, _ = await self._catalog._candidate_state(session, principal, request, binding_id=binding_id)
@@ -169,7 +186,20 @@ class PoolStore:
             raise GatewayError("invalid_state")
         try:
             async with self.db.sessions.begin() as session:
+                # Resolve and hold the provider/credential parents before the
+                # model lock. Otherwise the affinity INSERT's hidden FK KEY
+                # SHARE lock can cycle with put()/put_binding()'s update locks.
+                await self._affinity_parent_locks(session, scope, route)
                 principal = await self._scope(session, scope)
+                # Binding writers acquire model before binding. Customer/key
+                # writers acquire customer before key and never acquire pool
+                # locks, so affinity takes those parents only after the model.
+                await session.execute(text("SELECT id FROM model_bindings WHERE id=:id AND model_id=:model FOR KEY SHARE"),
+                                      {"id": route.binding_id, "model": scope.model_id})
+                await session.execute(text("SELECT id FROM customers WHERE id=:id FOR KEY SHARE"),
+                                      {"id": scope.customer_id})
+                await session.execute(text("SELECT id FROM api_keys WHERE id=:id AND customer_id=:customer FOR KEY SHARE"),
+                                      {"id": scope.key_id, "customer": scope.customer_id})
                 now = await session.scalar(text("SELECT clock_timestamp()"))
                 if expires_at <= now:
                     raise GatewayError("invalid_state")
