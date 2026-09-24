@@ -24,3 +24,20 @@ Claims increment a generation and terminal writes use owner/generation/deadline
 compare-and-set. Cancellation preserves running evidence and blocks terminal writes.
 No raw provider errors or secret data are persisted. Recovery of expired running
 claims remains Task 9 scope; no network or customer ledger behavior was added.
+
+## Fix round 1
+
+Added claim-time comparison of stored expected stamp with live context and
+transitioned stale or expired queued rows to terminal `stale`. Client-claim
+insert conflicts now reselect and validate digest, allowing concurrent same-ID
+replay. Result data is bounded and screened for secret, raw, and body fields;
+repeat running cancel requests leave version unchanged. Added concurrent
+enqueue/claim, active payload conflict, stale/expiry, result, and lost-generation
+coverage.
+
+- RED: `.venv/bin/python -m pytest tests/gateway/integration/test_provider_operations.py -q` → `5 failed, 3 passed`.
+- GREEN: same command → `10 passed`.
+- Full suite: `.venv/bin/python -m pytest -q` → `662 passed, 1 warning`.
+- Ruff focused check → `All checks passed!`.
+- Warning is the pre-existing third-party `google.genai.types` Python 3.14
+  deprecation warning; no dependency edits were made.
