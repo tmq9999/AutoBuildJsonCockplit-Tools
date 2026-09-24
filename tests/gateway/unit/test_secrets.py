@@ -58,6 +58,14 @@ def test_client_key_has_256_random_bits_and_scoped_digest():
     assert issue_key()[1] != key
 
 
+def test_catalog_cursor_derivation_is_domain_separated_and_stable():
+    from autobuild_json.gateway.secrets import Vault
+    vault = Vault({"client_keys": b"p" * 32}, active="client_keys")
+    first = vault.derive_key("client_keys", "catalog-cursor-v1")
+    assert first == vault.derive_key("client_keys", "catalog-cursor-v1")
+    assert first != vault.derive_key("client_keys", "client-key-hmac")
+
+
 @pytest.mark.parametrize("invalid", ["", "sk-user-secret", "abgw_x.☃", "abgw_x.\n", "x" * 5000])
 def test_malformed_client_keys_are_not_accepted(invalid):
     from autobuild_json.gateway.secrets import key_digest

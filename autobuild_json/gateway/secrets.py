@@ -64,7 +64,7 @@ class Vault:
         self.active = active
 
     def derive_key(self, key_id, purpose):
-        if key_id not in self._keys or purpose not in {"client-key-hmac", "backup-v1"}:
+        if key_id not in self._keys or purpose not in {"client-key-hmac", "backup-v1", "catalog-cursor-v1"}:
             raise ValueError("invalid_keyring")
         return hmac.new(self._keys[key_id], ("abgw:derive:"+purpose).encode(), hashlib.sha256).digest()
 
