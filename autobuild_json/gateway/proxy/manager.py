@@ -150,7 +150,9 @@ class ProxyManager:
                 await asyncio.gather(pulse, return_exceptions=True)
         finally:
             if tokens:
-                await asyncio.wait_for(asyncio.shield(self._cleanup(tokens)), timeout=5)
+                # wait_for owns, cancels and joins its cleanup coroutine. Shielding
+                # an anonymous coroutine here leaks it on timeout/cancellation.
+                await asyncio.wait_for(self._cleanup(tokens), timeout=5)
 
     async def release_kiot(self, key, actor):
         if not actor:

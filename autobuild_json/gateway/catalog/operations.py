@@ -310,12 +310,27 @@ class OperationStore:
                                       {"id": operation_id})
             return _view(await self._row(session, operation_id))
 
-    async def finish(self, claim: Claim, state: str, result=None, error=None) -> OperationView:
+    async def finish(self, claim: Claim, state: str, result=None, error=None, *, context=None) -> OperationView:
         if state not in {"succeeded", "failed", "cancelled", "stale", "usage_pending"}:
             raise GatewayError("invalid_request")
         code = error.code if isinstance(error, GatewayError) else error
         code = code if isinstance(code, str) and code in SAFE_CODES else ("internal_error" if code else None)
         async with self.db.sessions.begin() as session:
+            if state == "succeeded" and context is not None:
+                try:
+                    current = await self.sources.lock_context(session, claim.source_id)
+                except GatewayError as exc:
+                    if exc.code in {"not_found", "invalid_state", "invalid_request"}:
+                        raise GatewayError("catalog_snapshot_stale", 409) from None
+                    raise
+                if (current is None or context.source.id != claim.source_id
+                        or not self._same_source_stamp(current.stamp, context.stamp)):
+                    raise GatewayError("catalog_snapshot_stale", 409)
+                await self.assert_claim(session, claim)
+                expected = await session.scalar(text("SELECT expected FROM provider_operations WHERE id=:id"),
+                                                {"id": claim.operation_id})
+                if not self._same_source_stamp(current.stamp, ConfigStamp.model_validate_json(json.dumps(expected))):
+                    raise GatewayError("catalog_snapshot_stale", 409)
             updated = (await session.execute(text("""UPDATE provider_operations SET state=:state,
                 result=CAST(:result AS jsonb),error_code=:code,finished_at=clock_timestamp(),version=version+1
                 WHERE id=:id AND owner=:owner AND generation=:generation AND state='running'
@@ -328,28 +343,14 @@ class OperationStore:
             return _view(updated)
 
     async def finish_fenced(self, claim: Claim, state: str, result=None, error=None) -> OperationView:
-        """Finalize cleanup outcomes without requiring a live deadline.
+        """Finalize ordinary cleanup only while its ownership/deadline is live.
 
-        This path is intentionally unable to write ``succeeded``.  It is used
-        after cancellation, source invalidation, expiry, or a lost heartbeat,
-        when the normal terminal write's deadline/cancel fence must reject.
+        Expired operations are exclusively the recovery worker's responsibility.
+        No source context is required: disable must not prevent cleanup.
         """
         if state not in {"failed", "cancelled", "stale", "usage_pending"}:
             raise GatewayError("invalid_request")
-        code = error.code if isinstance(error, GatewayError) else error
-        code = code if isinstance(code, str) and code in SAFE_CODES else ("internal_error" if code else None)
-        async with self.db.sessions.begin() as session:
-            updated = (await session.execute(text("""UPDATE provider_operations SET state=:state,
-                result=CAST(:result AS jsonb),error_code=:code,finished_at=clock_timestamp(),version=version+1
-                WHERE id=:id AND owner=:owner AND generation=:generation AND state='running' RETURNING *"""),
-                {"state": state, "result": _safe_result(result) if result is not None else None, "code": code,
-                 "id": claim.operation_id, "owner": claim.owner, "generation": claim.generation})).mappings().first()
-            if updated is None:
-                row = await self._row(session, claim.operation_id)
-                if row is None:
-                    raise GatewayError("not_found", 404)
-                return _view(row)
-            return _view(updated)
+        return await self.finish(claim, state, result=result, error=error)
 
     async def mark_dispatched(self, claim: Claim, attempt_id: UUID) -> None:
         async with self.db.sessions.begin() as session:

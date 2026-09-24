@@ -41,7 +41,11 @@ class DiscoveryClient:
         async with self.limits.acquire(context.route, admission_deadline):
             async with self.transport.open(context.route, lease.proxy, request) as response:
                 if response.status == 429:
-                    raise UpstreamRejected(429, parse_retry_after(response.headers.get("retry-after")))
+                    rejection = UpstreamRejected(429, parse_retry_after(response.headers.get("retry-after")))
+                    # Capture before response/admission/proxy cleanup; those may
+                    # block and must not restart Retry-After when they finish.
+                    rejection.received_at = time.monotonic()
+                    raise rejection
                 if response.status != 200:
                     raise UpstreamRejected(response.status)
                 payload, used = await read_discovery_json(response, remaining_bytes)
@@ -52,11 +56,30 @@ class DiscoveryClient:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise GatewayError("deadline_exceeded", 504, "upstream")
+        page = asyncio.create_task(self._page(context, lease, check_current, deadline, cursor,
+                                             remaining_bytes, auth, secret))
         try:
-            return await asyncio.wait_for(self._page(context, lease, check_current, deadline, cursor,
-                                                      remaining_bytes, auth, secret), remaining)
+            return await asyncio.wait_for(asyncio.shield(page), remaining)
         except asyncio.TimeoutError:
             raise GatewayError("deadline_exceeded", 504, "upstream") from None
+        finally:
+            if not page.done():
+                page.cancel()
+                async def join():
+                    try:
+                        await asyncio.wait_for(page, 5)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
+                cleanup = asyncio.create_task(join())
+                cancelled = False
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                await cleanup
+                if cancelled:
+                    raise asyncio.CancelledError
 
     async def collect(self, context, lease, check_current, deadline, *, on_warnings=None):
         auth, secret = await self._auth(context, deadline)

@@ -143,3 +143,38 @@ async def test_lease_loss_aborts_holder():
         async with manager.acquire(ProxySelection("fixed", runtime_entries=(ProxyConfig("http://proxy.invalid:80"),)),
                                    uuid4(), deadline()):
             await asyncio.sleep(1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_cleanup_timeout_or_cancel_joins_release_task(monkeypatch, cancel):
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from autobuild_json.gateway.proxy.config import ProxySelection
+    from autobuild_json.models import ProxyConfig
+    entered, closed, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    class BlockedRelease(MemoryLeaseStore):
+        async def release(self, token):
+            entered.set()
+            try:
+                await release.wait()
+            finally:
+                closed.set()
+    original_wait_for = asyncio.wait_for
+    async def short_cleanup(awaitable, timeout):
+        return await original_wait_for(awaitable, .02 if timeout == 5 else timeout)
+    monkeypatch.setattr(asyncio, "wait_for", short_cleanup)
+    manager = ProxyManager(BlockedRelease())
+    async def holder():
+        async with manager.acquire(ProxySelection("fixed", runtime_entries=(ProxyConfig("http://proxy.invalid:80"),)),
+                                   uuid4(), deadline()):
+            pass
+    task = asyncio.create_task(holder())
+    await entered.wait()
+    if cancel:
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    was_closed = closed.is_set()
+    release.set()
+    await asyncio.sleep(0)
+    assert was_closed, "release task survived its owner's cleanup boundary"

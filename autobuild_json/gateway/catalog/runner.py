@@ -1,4 +1,4 @@
-"""Fenced execution of provider catalog operations."""
+"""Fenced, deadline-bounded execution of provider catalog operations."""
 
 import asyncio
 import time
@@ -9,149 +9,173 @@ from ..errors import GatewayError, UpstreamRejected
 from ..proxy.config import ProxySelection
 
 
-_WARNING_CODES = frozenset({"authentication_unverified", "metadata_incomplete", "catalog_partial",
-                            "malformed_optional_metadata"})
-
-
 class OperationRunner:
-    """Run one claimed operation while ownership and resources remain fenced."""
-
     def __init__(self, sources, ops, snapshots, discovery, proxies, profiles, catalog, probe=None):
-        self.sources = sources
-        self.ops = ops
-        self.snapshots = snapshots
-        self.discovery = discovery
-        self.proxies = proxies
-        self.profiles = profiles
-        self.catalog = catalog
-        self.probe = probe
+        self.sources, self.ops, self.snapshots = sources, ops, snapshots
+        self.discovery, self.proxies, self.profiles = discovery, proxies, profiles
+        self.catalog, self.probe = catalog, probe
 
     async def run(self, operation_id: UUID):
         current = await self.ops.get(operation_id)
         if current.state != "queued":
             return current
-        claim = await self.ops.claim(operation_id, uuid4())
-        if claim is None:
-            return await self.ops.get(operation_id)
-        return await self.execute(claim)
+        claim = await self.ops.claim(current.id, uuid4())
+        return await self.execute(claim) if claim is not None else await self.ops.get(current.id)
 
-    async def _terminal(self, claim, state, *, error=None, result=None, fenced=False):
+    async def _durable(self, awaitable):
+        """Never rewrite a failed durable transaction with another terminal result."""
         try:
-            method = self.ops.finish_fenced if fenced else self.ops.finish
-            return await method(claim, state, result=result, error=error)
+            return await awaitable
         except GatewayError as exc:
-            if exc.code == "claim_lost":
-                return await self.ops.get(claim.operation_id)
+            if exc.code in {"claim_lost", "operation_expired", "operation_cancelled",
+                            "catalog_snapshot_stale", "version_conflict", "invalid_state"}:
+                raise
+            raise GatewayError("storage_unavailable", 503, "storage") from None
+        except Exception:
+            raise GatewayError("storage_unavailable", 503, "storage") from None
+
+    async def _current(self, claim):
+        return await self._durable(self.ops.get(claim.operation_id))
+
+    async def _finish(self, claim, state, *, result=None, error=None, context=None):
+        try:
+            return await self._durable(self.ops.finish(claim, state, result=result, error=error, context=context))
+        except GatewayError as exc:
+            if exc.code in {"claim_lost", "operation_expired"}:
+                return await self._current(claim)
             raise
 
     async def execute(self, claim):
-        parent = asyncio.current_task()
-        lost = False
+        remaining = (claim.deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            return await asyncio.wait_for(self._current(claim), 5)
+        # The one owner acquires, uses and exits the proxy context itself.
+        owner = asyncio.create_task(self._owned(claim))
+        try:
+            return await asyncio.wait_for(asyncio.shield(owner), remaining)
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            owner.cancel()
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            async def finalize():
+                await asyncio.gather(owner, return_exceptions=True)
+                if cancelled:
+                    return await self._finish(claim, "cancelled", error="operation_cancelled")
+                return await self._current(claim)
+            # One shared budget covers resource cleanup AND durable finalization.
+            cleanup = asyncio.create_task(asyncio.wait_for(finalize(), 5))
+            # Repeated caller cancellation must not detach the cleanup task.
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+                    continue
+                except asyncio.TimeoutError:
+                    break
+            try:
+                result = await cleanup
+            except asyncio.TimeoutError:
+                raise GatewayError("storage_unavailable", 503, "storage") from None
+            finally:
+                if cancelled:
+                    raise asyncio.CancelledError
+            return result
+
+    async def _owned(self, claim):
+        owner = asyncio.current_task()
         pulse = None
+        interruption = None
+        context = None
+
+        async def check_current():
+            await self.ops.read_claim(claim)
+            try:
+                current = await self.sources.context(claim.source_id)
+            except GatewayError as exc:
+                if exc.code in {"not_found", "invalid_state", "invalid_request"}:
+                    raise GatewayError("catalog_snapshot_stale", 409) from None
+                raise
+            if not self.ops._same_source_stamp(current.stamp, context.stamp):
+                raise GatewayError("catalog_snapshot_stale", 409)
 
         async def heartbeat():
-            nonlocal lost
+            nonlocal interruption
             try:
                 while True:
                     await asyncio.sleep(1)
+                    await check_current()
                     if not await self.ops.heartbeat(claim):
-                        state = await self.ops.get(claim.operation_id)
-                        lost = not state.cancel_requested
-                        parent.cancel()
-                        return
+                        raise GatewayError("claim_lost", 409)
             except asyncio.CancelledError:
                 raise
+            except GatewayError as exc:
+                interruption = exc
+                owner.cancel()
             except Exception:
-                lost = True
-                parent.cancel()
+                interruption = GatewayError("storage_unavailable", 503, "storage")
+                owner.cancel()
 
         try:
-            # Read the source once under the claim, then re-read it at each
-            # dispatch boundary.  No database transaction survives into HTTP.
-            await self.ops.read_claim(claim)
-            try:
-                expected = await self.ops.expected_stamp(claim)
-                context = await self.sources.context(claim.source_id)
-            except GatewayError:
-                return await self._terminal(claim, "stale", error="version_conflict", fenced=True)
-            if context.stamp != expected:
-                return await self._terminal(claim, "stale", error="version_conflict", fenced=True)
-
-            async def check_current():
-                await self.ops.read_claim(claim)
-                try:
-                    current_context = await self.sources.context(claim.source_id)
-                except GatewayError as exc:
-                    raise GatewayError("catalog_snapshot_stale", 409) from exc
-                if current_context.stamp != context.stamp:
-                    raise GatewayError("catalog_snapshot_stale", 409)
-
-            await check_current()
-            if claim.deadline <= datetime.now(timezone.utc):
-                return await self.ops.get(claim.operation_id)
             operation = await self.ops.read_claim(claim)
-            if operation.kind == "probe" and self.probe is None:
-                return await self._terminal(claim, "failed", error="unsupported_feature", fenced=True)
-            if context.effective_proxy_id is None:
-                selection = ProxySelection("direct")
-            else:
-                await check_current()
-                selection = await self.profiles.load(context.effective_proxy_id)
-
-            warnings = set()
-            started_at = time.monotonic()
+            expected = await self.ops.expected_stamp(claim)
+            try:
+                context = await self.sources.context(claim.source_id)
+            except GatewayError as exc:
+                if exc.code in {"not_found", "invalid_state", "invalid_request"}:
+                    raise GatewayError("catalog_snapshot_stale", 409) from None
+                raise
+            if not self.ops._same_source_stamp(context.stamp, expected):
+                raise GatewayError("catalog_snapshot_stale", 409)
             pulse = asyncio.create_task(heartbeat())
-            discovered_entries = None
-            discovered_warnings = ()
-            operation_result = None
+            if operation.kind == "probe" and self.probe is None:
+                raise GatewayError("unsupported_feature")
+            selection = (ProxySelection("direct") if context.effective_proxy_id is None
+                         else await self.profiles.load(context.effective_proxy_id))
+            warnings = set()
+            entries, result = None, None
+            deadline = time.monotonic() + max(0, (claim.deadline - datetime.now(timezone.utc)).total_seconds())
             async with self.proxies.acquire(selection, claim.owner, claim.deadline) as lease:
-                await self.ops.mark_dispatched(claim, uuid4())
-                if operation.kind == "probe":
-                    operation_result = await self.probe(context, lease, check_current, claim.deadline)
-                elif operation.kind == "check":
-                    operation_result = await self.discovery.check(context, lease, check_current,
-                                                        time.monotonic() + max(0, (claim.deadline - datetime.now(timezone.utc)).total_seconds()))
-                    warnings.update(w for w in operation_result.get("warnings", ()) if w in _WARNING_CODES)
-                else:
-                    def on_warnings(values):
-                        warnings.update(w for w in values if w in _WARNING_CODES)
-
-                    discovered_entries = await self.discovery.collect(
-                        context, lease, check_current,
-                        time.monotonic() + max(0, (claim.deadline - datetime.now(timezone.utc)).total_seconds()),
-                        on_warnings=on_warnings,
-                    )
-                    discovered_warnings = tuple(sorted(warnings))
-            # Lease/admission cleanup has completed before any durable success.
-            if discovered_entries is not None:
                 await check_current()
-                await self.snapshots.commit(claim, context, discovered_entries, warnings=discovered_warnings)
-                return await self.ops.get(claim.operation_id)
-            if operation_result is not None:
-                if warnings:
-                    operation_result["warnings"] = sorted(warnings)
-                return await self._terminal(claim, "succeeded", result=operation_result)
+                await self.ops.mark_dispatched(claim, uuid4())
+                if operation.kind == "discover":
+                    entries = await self.discovery.collect(context, lease, check_current, deadline,
+                                                           on_warnings=warnings.update)
+                elif operation.kind == "check":
+                    result = await self.discovery.check(context, lease, check_current, deadline)
+                else:
+                    result = await self.probe(context, lease, check_current, claim.deadline)
+            # Do not let our heartbeat cancel a just-committed terminal result.
+            # Atomic persistence fences below replace it after HTTP cleanup.
+            pulse.cancel()
+            await asyncio.gather(pulse, return_exceptions=True)
+            pulse = None
+            await check_current()
+            if entries is not None:
+                await self._durable(self.snapshots.commit(claim, context, entries, warnings=tuple(sorted(warnings))))
+                return await self._current(claim)
+            return await self._finish(claim, "succeeded", result=result, context=context)
         except asyncio.CancelledError:
-            if lost:
-                return await self.ops.get(claim.operation_id)
-            return await self._terminal(claim, "cancelled", error="operation_cancelled", fenced=True)
+            if interruption is None:
+                raise
+            return await self._failure(claim, interruption, context)
         except GatewayError as exc:
-            if exc.code in {"catalog_snapshot_stale", "version_conflict", "invalid_state"}:
-                return await self._terminal(claim, "stale", error="version_conflict", fenced=True)
-            if exc.code == "operation_cancelled":
-                return await self._terminal(claim, "cancelled", error=exc, fenced=True)
-            if exc.code == "deadline_exceeded" or datetime.now(timezone.utc) >= claim.deadline:
-                return await self.ops.get(claim.operation_id)
-            if isinstance(exc, UpstreamRejected) and exc.retry_after is not None:
-                try:
-                    await self.catalog.cooldown(context.route.provider_id, None,
-                                                exc.retry_after, started_at=started_at)
-                except Exception:
-                    pass
-            return await self._terminal(claim, "failed", error=exc)
+            return await self._failure(claim, exc, context)
         except Exception:
-            return await self._terminal(claim, "failed", error="internal_error")
+            return await self._failure(claim, GatewayError("internal_error", 500), context)
         finally:
             if pulse is not None:
                 pulse.cancel()
                 await asyncio.gather(pulse, return_exceptions=True)
+
+    async def _failure(self, claim, exc, context):
+        if exc.code == "storage_unavailable":
+            raise exc
+        if exc.code in {"claim_lost", "operation_expired", "deadline_exceeded"}:
+            return await self._current(claim)
+        if isinstance(exc, UpstreamRejected) and exc.upstream_status == 429:
+            await self._durable(self.catalog.cooldown(context.route.provider_id, None,
+                exc.retry_after if exc.retry_after is not None else 60,
+                started_at=getattr(exc, "received_at", time.monotonic())))
+        state = ("cancelled" if exc.code == "operation_cancelled" else
+                 "stale" if exc.code in {"catalog_snapshot_stale", "version_conflict", "invalid_state"} else "failed")
+        return await self._finish(claim, state, error=exc)
