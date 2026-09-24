@@ -53,13 +53,7 @@ class AdminServices:
         from ..catalog.retention import Retention
         sources = SourceRepository(self.db, self.vault, self.pepper)
         operations = OperationStore(self.db, sources)
-        try:
-            cursor_key = self.vault.derive_key("client_keys", "catalog-cursor-v1")
-        except ValueError:
-            # Older service keyrings predate the catalog cursor key slot. Keep
-            # startup/read paths compatible while new keyrings use the namespaced
-            # vault derivation above; no upstream network is performed here.
-            cursor_key = self.pepper
+        cursor_key = self.vault.derive_key("client_keys", "catalog-cursor-v1")
         snapshots = SnapshotStore(self.db, sources, operations, cursor_key)
         limits = ProviderLimits(self.db)
         discovery = DiscoveryClient(self.transport, limits, self.engine.credential)

@@ -66,7 +66,7 @@ def main():
 
         services = AdminServices(
             db,
-            Vault({"v1": b"a" * 32}, active="v1"),
+            Vault({"v1": b"a" * 32, "client_keys": b"p" * 32}, active="v1"),
             b"p" * 32,
             transport=Transport(EgressPolicy(resolver=resolver), adapter=httpx.MockTransport(respond)),
         )

@@ -47,3 +47,11 @@ print('legacy-ok')
 """], text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "legacy-ok"
+
+
+def test_admin_constructor_rejects_missing_client_keys_slot():
+    from autobuild_json.gateway.admin.services import AdminServices
+    from autobuild_json.gateway.secrets import Vault
+
+    with pytest.raises(ValueError, match="invalid_keyring"):
+        AdminServices(object(), Vault({"v1": b"a" * 32}, active="v1"), b"p" * 32)
