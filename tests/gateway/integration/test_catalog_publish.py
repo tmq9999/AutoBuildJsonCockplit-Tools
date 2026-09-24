@@ -1,13 +1,17 @@
 """Publication is one compare-and-set transaction over reviewed mappings."""
 
 from uuid import uuid4
+import asyncio
+import os
+import subprocess
+import sys
 
 import pytest
 from sqlalchemy import text
 
 from autobuild_json.gateway.catalog.records import PublicationRequest, PublishItem
 from autobuild_json.gateway.errors import GatewayError
-from autobuild_json.gateway.routing.records import ModelConfig
+from autobuild_json.gateway.routing.records import BindingConfig, ModelConfig, ProviderConfig
 from tests.gateway.catalog_support import observe, snapshot_case
 
 pytestmark = [pytest.mark.postgres, pytest.mark.asyncio]
@@ -79,9 +83,220 @@ async def test_publish_existing_model_preserves_coefficients_and_enabled(pg_db):
     model = ModelConfig(model_id="existing", identity="existing", enabled=False,
                         input_micro=1234567, output_micro=7654321)
     await Catalog(pg_db, synthetic_vault()).put_model(model)
+    async with pg_db.sessions() as session:
+        exact_before = await session.scalar(text("SELECT config::text FROM public_models WHERE id='existing'"))
     item = selected("a", "existing").model_copy(update={"new_model": None, "expected_model_version": 1})
     await publisher.publish(request(item), "admin")
     async with pg_db.sessions() as session:
         row = (await session.execute(text("SELECT config,version FROM public_models WHERE id='existing'"))).mappings().one()
         assert row["config"] == model.model_dump(mode="json")
         assert row["version"] == 1
+        assert await session.scalar(text("SELECT config::text FROM public_models WHERE id='existing'")) == exact_before
+
+
+async def test_publish_respects_new_decision_after_review(pg_db):
+    from autobuild_json.gateway.catalog.decisions import DecisionStore
+    from autobuild_json.gateway.catalog.records import DecisionEdit
+
+    publisher, source, _, selected, request = await publication_case(pg_db)
+    await DecisionStore(pg_db, publisher.sources).apply(source.id, source.version,
+        (DecisionEdit(upstream_id="a", ignored=True),), "admin")
+    with pytest.raises(GatewayError, match="catalog_conflict"):
+        await publisher.publish(request(selected("a")), "admin")
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM public_models")) == 0
+        assert await session.scalar(text("SELECT count(*) FROM model_bindings")) == 0
+        assert await session.scalar(text("SELECT count(*) FROM catalog_publications")) == 0
+        assert await session.scalar(text("SELECT count(*) FROM audit_events WHERE action='catalog.published'")) == 0
+        assert await session.scalar(text("SELECT ignored FROM catalog_decisions WHERE upstream_id='a'")) is True
+
+
+async def test_publish_after_cosmetic_source_edit_with_current_stamp(pg_db):
+    publisher, source, run_id, selected, request = await publication_case(pg_db)
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("UPDATE catalog_sources SET schedule_enabled=true,version=version+1 WHERE id=:id"), {"id": source.id})
+    current = await publisher.sources.context(source.id)
+    refreshed = request(selected("a")).model_copy(update={"expected": current.stamp})
+    result = await publisher.publish(refreshed, "admin")
+    assert result.run_id == run_id
+
+
+async def test_publish_proxied_snapshot_parses_json_stamp(pg_db):
+    from autobuild_json.gateway.admin.schemas import ProxyInput
+    from autobuild_json.gateway.catalog.operations import OperationStore
+    from autobuild_json.gateway.catalog.snapshots import SnapshotStore
+    from autobuild_json.gateway.catalog.records import OperationRequest
+    from autobuild_json.gateway.proxy.profiles import ProfileStore
+    from tests.gateway.catalog_support import source_case, synthetic_vault
+
+    sources, source = await source_case(pg_db)
+    vault = synthetic_vault()
+    profile = await ProfileStore(pg_db, vault, b"p" * 32).create(ProxyInput(
+        name="Synthetic", mode="fixed", entries_text="http://93.184.216.34:39008"))
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("UPDATE credentials SET profile_id=:profile WHERE id=:id"),
+                              {"profile": profile, "id": source.credential_id})
+    context = await sources.context(source.id)
+    ops = OperationStore(pg_db, sources)
+    store = SnapshotStore(pg_db, sources, ops, vault.derive_key("client_keys", "catalog-cursor-v1"))
+    job = await ops.enqueue(OperationRequest(id=uuid4(), source_id=source.id, kind="discover", expected=context.stamp), "admin")
+    claim = await ops.claim(job.id, uuid4())
+    await store.commit(claim, context, (observe("a"),))
+    publisher = __import__("autobuild_json.gateway.catalog.publish", fromlist=["Publisher"]).Publisher(pg_db, sources)
+    item = PublishItem(upstream_id="a", public_model_id="a", identity="a", input_bound=10, output_bound=10,
+                       capabilities=frozenset({"text"}), new_model=ModelConfig(model_id="a", identity="a"))
+    result = await publisher.publish(PublicationRequest(id=uuid4(), source_id=source.id, run_id=job.id,
+                                                        expected=context.stamp, selections=(item,)), "admin")
+    assert result.run_id == job.id
+
+
+async def test_publish_rejects_chat_continuation(pg_db):
+    publisher, _, _, selected, request = await publication_case(pg_db)
+    with pytest.raises(GatewayError, match="unsupported_feature"):
+        await publisher.publish(request(selected("a", capabilities=frozenset({"text", "continuation"}))), "admin")
+
+
+async def test_publication_digest_is_stable_across_hash_seeds():
+    code = """from autobuild_json.gateway.catalog.publish import Publisher
+from autobuild_json.gateway.catalog.records import PublicationRequest, PublishItem, ConfigStamp
+from uuid import UUID
+from autobuild_json.gateway.routing.records import ModelConfig
+s=ConfigStamp(source_version=1,provider_version=1,credential_version=1,content_digest='a'*64)
+i=PublishItem(upstream_id='a',public_model_id='a',identity='a',input_bound=1,output_bound=1,capabilities=frozenset({'text','tools','continuation'}),new_model=ModelConfig(model_id='a',identity='a'))
+r=PublicationRequest(id=UUID(int=1),source_id=UUID(int=2),run_id=UUID(int=3),expected=s,selections=(i,))
+print(Publisher._digest(r).hex())"""
+    values = []
+    for seed in ("1", "2", "3"):
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                env={**os.environ, "PYTHONHASHSEED": seed}, check=True)
+        values.append(result.stdout.strip())
+    assert len(set(values)) == 1
+
+
+async def test_manual_binding_waits_for_provider_before_model_name(pg_db):
+    from autobuild_json.gateway.providers.catalog import Catalog
+    from autobuild_json.gateway.providers.registry_writes import _lock_key
+    from tests.gateway.catalog_support import synthetic_vault
+
+    publisher, source, _, _, _ = await publication_case(pg_db)
+    catalog = Catalog(pg_db, synthetic_vault())
+    await catalog.put_model(ModelConfig(model_id="race", identity="race"))
+    binding = BindingConfig(id=uuid4(), provider_id=source.provider_id, credential_id=source.credential_id,
+                            public_model_id="race", upstream_model="a", identity="race",
+                            input_bound=10, output_bound=10)
+    async with pg_db.sessions.begin() as blocked:
+        await blocked.execute(text("SELECT id FROM providers WHERE id=:id FOR UPDATE"), {"id": source.provider_id})
+        task = asyncio.create_task(catalog.put_binding(binding, create_only=True))
+        try:
+            for _ in range(100):
+                async with pg_db.sessions() as observer:
+                    waiting = await observer.scalar(text("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' "
+                        "AND query LIKE '%providers%' AND pid<>pg_backend_pid()"))
+                if waiting:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("manual binding did not wait for provider row")
+            async with pg_db.sessions.begin() as observer:
+                available = await observer.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _lock_key("race")})
+                assert available is True
+        finally:
+            await blocked.rollback()
+            await asyncio.wait_for(task, 3)
+
+
+async def test_publish_enables_all_models_without_expanding_specific_key(pg_db):
+    from decimal import Decimal
+    from autobuild_json.gateway.metering.costs import CostSchedule
+    from autobuild_json.gateway.identity.policy import KeyPolicy
+    from autobuild_json.gateway.identity.service import IdentityService
+    from autobuild_json.gateway.providers.catalog import Catalog
+    from tests.gateway.catalog_support import synthetic_vault
+
+    publisher, source, _, selected, request = await publication_case(pg_db)
+    identity = IdentityService(pg_db, b"p" * 32)
+    owner = await identity.create_customer("Synthetic")
+    all_key = await identity.create_key(owner, KeyPolicy(all_models=True, protocols=frozenset({"openai"})))
+    specific_key = await identity.create_key(owner, KeyPolicy(model_ids=frozenset({"old"}), protocols=frozenset({"openai"})))
+    all_principal = await identity.authenticate(all_key.secret, "openai")
+    specific_principal = await identity.authenticate(specific_key.secret, "openai")
+    catalog = Catalog(pg_db, synthetic_vault())
+    async with pg_db.sessions() as session:
+        stored = await session.scalar(text("SELECT config FROM providers WHERE id=:id"), {"id": source.provider_id})
+    priced = ProviderConfig.model_validate(stored).model_copy(update={"cost_schedule": CostSchedule(
+        "USD", Decimal("1.234567"), Decimal("9.876543"))})
+    await catalog.update_provider(source.provider_id, 1, priced)
+    current = await publisher.sources.context(source.id)
+    async with pg_db.sessions() as session:
+        before = (await session.execute(text("SELECT id,policy::text FROM api_keys ORDER BY id"))).all()
+        provider_before = await session.scalar(text("SELECT config::text FROM providers WHERE id=:id"), {"id": source.provider_id})
+    await publisher.publish(request(selected("a", "new")).model_copy(update={"expected": current.stamp}), "admin")
+    assert [model.model_id for model in await catalog.list_models(all_principal)] == ["new"]
+    assert [model.model_id for model in await catalog.list_models(specific_principal)] == []
+    async with pg_db.sessions() as session:
+        assert (await session.execute(text("SELECT id,policy::text FROM api_keys ORDER BY id"))).all() == before
+        assert await session.scalar(text("SELECT config::text FROM providers WHERE id=:id"), {"id": source.provider_id}) == provider_before
+
+
+async def test_two_same_id_publishes_have_one_receipt(pg_db):
+    publisher, _, _, selected, request = await publication_case(pg_db)
+    command = request(selected("a"))
+    first, second = await asyncio.gather(publisher.publish(command, "admin"), publisher.publish(command, "admin"))
+    assert first == second
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM catalog_publications")) == 1
+        assert await session.scalar(text("SELECT count(*) FROM model_bindings")) == 1
+
+
+async def test_publish_and_manual_alias_contend_for_same_name(pg_db):
+    from autobuild_json.gateway.providers.catalog import Catalog
+    from autobuild_json.gateway.providers.registry_writes import lock_model_names
+    from tests.gateway.catalog_support import synthetic_vault
+
+    publisher, _, _, selected, request = await publication_case(pg_db)
+    catalog = Catalog(pg_db, synthetic_vault())
+    await catalog.put_model(ModelConfig(model_id="target", identity="target"))
+    async with pg_db.sessions.begin() as gate:
+        await lock_model_names(gate, ("race",))
+        alias_task = asyncio.create_task(catalog.put_alias("race", "target"))
+        publish_task = asyncio.create_task(publisher.publish(request(selected("a", "race")), "admin"))
+        await asyncio.sleep(0)
+    outcomes = await asyncio.gather(alias_task, publish_task, return_exceptions=True)
+    assert sum(not isinstance(outcome, Exception) for outcome in outcomes) == 1
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM public_models WHERE id='race'")) + await session.scalar(
+            text("SELECT count(*) FROM model_aliases WHERE alias='race'")) == 1
+
+
+async def test_publish_rejects_nonlatest_snapshot(pg_db):
+    from autobuild_json.gateway.catalog.operations import OperationStore
+    from autobuild_json.gateway.catalog.snapshots import SnapshotStore
+    from tests.gateway.catalog_support import complete_snapshot
+
+    publisher, source, _, selected, request = await publication_case(pg_db)
+    store = SnapshotStore(pg_db, publisher.sources, OperationStore(pg_db, publisher.sources), b"z" * 32)
+    await complete_snapshot(store, publisher.sources, source.id, (observe("a"),))
+    with pytest.raises(GatewayError, match="catalog_snapshot_stale"):
+        await publisher.publish(request(selected("a")), "admin")
+
+
+async def test_manual_binding_edit_invalidates_publish_version(pg_db):
+    from autobuild_json.gateway.providers.catalog import Catalog
+    from tests.gateway.catalog_support import synthetic_vault
+
+    publisher, source, _, selected, request = await publication_case(pg_db)
+    first = await publisher.publish(request(selected("a", "public")), "admin")
+    binding_id = first.bindings[0].binding_id
+    catalog = Catalog(pg_db, synthetic_vault())
+    changed = BindingConfig(id=binding_id, provider_id=source.provider_id, credential_id=source.credential_id,
+                            public_model_id="public", upstream_model="manual", identity="public",
+                            input_bound=10, output_bound=10, enabled=False)
+    await catalog.put_binding(changed, expected_version=1)
+    second = selected("b", "public").model_copy(update={"new_model": None, "expected_model_version": 1,
+        "binding_id": binding_id, "binding_version": 1})
+    with pytest.raises(GatewayError, match="version_conflict"):
+        await publisher.publish(request(second), "admin")
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM catalog_publications")) == 1
+        assert await session.scalar(text("SELECT config->>'upstream_model' FROM model_bindings WHERE id=:id"),
+                                    {"id": binding_id}) == "manual"

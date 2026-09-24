@@ -17,7 +17,7 @@ _CAPABILITIES = frozenset({"text", "tools", "continuation"})
 
 def _stamp(value):
     try:
-        return ConfigStamp.model_validate(value)
+        return ConfigStamp.model_validate_json(json.dumps(value))
     except (TypeError, ValueError) as exc:
         raise GatewayError("invalid_state", 409) from exc
 
@@ -34,7 +34,10 @@ class Publisher:
 
     @staticmethod
     def _digest(request: PublicationRequest) -> bytes:
-        return hashlib.sha256(canonical_bytes(request.model_dump(mode="json", exclude={"id"}))).digest()
+        payload = request.model_dump(mode="json", exclude={"id"})
+        for item in payload["selections"]:
+            item["capabilities"] = sorted(item["capabilities"])
+        return hashlib.sha256(canonical_bytes(payload)).digest()
 
     async def publish(self, request: PublicationRequest, actor) -> PublicationResult:
         if not isinstance(request, PublicationRequest):
@@ -68,14 +71,16 @@ class Publisher:
             if not fresh:
                 raise GatewayError("catalog_snapshot_stale", 409)
             run_expected = _stamp(operation["expected"])
-            if not _same_stamp(run_expected, request.expected):
+            if run_expected.content_digest != request.expected.content_digest:
                 raise GatewayError("version_conflict", 409)
             entries = {row["upstream_id"]: row for row in
                        (await session.execute(text("SELECT upstream_id,digest FROM catalog_entries WHERE run_id=:run"),
                                                {"run": request.run_id})).mappings().all()}
             if any(item.upstream_id not in entries for item in request.selections):
                 raise GatewayError("catalog_conflict", 409)
-            if any(not item.capabilities or not item.capabilities <= _CAPABILITIES for item in request.selections):
+            capabilities = (_CAPABILITIES if context.route.adapter == "openai_compatible"
+                            and context.route.wire_api == "responses" else _CAPABILITIES - {"continuation"})
+            if any(not item.capabilities or not item.capabilities <= capabilities for item in request.selections):
                 raise GatewayError("unsupported_feature")
             await lock_model_names(session, names)
 
@@ -115,7 +120,7 @@ class Publisher:
                 decision = (await session.execute(text("SELECT * FROM catalog_decisions WHERE source_id=:source AND upstream_id=:upstream FOR UPDATE"),
                                                   {"source": request.source_id, "upstream": item.upstream_id})).mappings().first()
                 if decision is not None:
-                    if item.decision_version is not None and decision["version"] != item.decision_version:
+                    if item.decision_version is None or decision["version"] != item.decision_version:
                         raise GatewayError("catalog_conflict", 409)
                     await session.scalar(text("""UPDATE catalog_decisions SET ignored=false,
                         binding_id=:binding,published_run_id=:run,published_digest=:digest,version=version+1,

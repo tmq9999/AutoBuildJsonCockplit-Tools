@@ -132,7 +132,18 @@ class Catalog:
     async def put_binding(self, binding, *, expected_version=None, create_only=False):
         from .registry_writes import lock_model_names, write_binding
         async with self.db.sessions.begin() as session:
-            await lock_model_names(session, (binding.public_model_id,))
+            # The publisher holds provider -> credential before taking a model
+            # advisory lock. Match that order before the binding FK can wait.
+            provider = await session.scalar(text("SELECT id FROM providers WHERE id=:id FOR UPDATE"),
+                                            {"id": binding.provider_id})
+            credential = await session.scalar(text("SELECT provider_id FROM credentials WHERE id=:id FOR UPDATE"),
+                                              {"id": binding.credential_id})
+            if provider is None or credential != binding.provider_id:
+                raise GatewayError("invalid_request")
+            previous_model = await session.scalar(text("SELECT model_id FROM model_bindings WHERE id=:id"),
+                                                  {"id": binding.id})
+            await lock_model_names(session, (binding.public_model_id, previous_model) if previous_model else
+                                   (binding.public_model_id,))
             existing = await session.scalar(text('SELECT version FROM model_bindings WHERE id=:id FOR UPDATE'), {'id': binding.id})
             if existing is not None and expected_version is None and not create_only:
                 expected_version = existing
