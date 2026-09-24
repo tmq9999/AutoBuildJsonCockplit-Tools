@@ -34,15 +34,16 @@ class Selection:
 
 async def select(engine, principal, request, meta):
     model_id = await engine.catalog.resolve_model(principal, request.model)
+    request = request.model_copy(update={"model": model_id})
     scope = ContinuationScope(principal.customer_id, principal.key_id, model_id)
     native = None
     if request.continuation:
         native = await engine.continuations.resolve(request.continuation, scope)
-        candidates = await engine.catalog.account_candidates(principal, request, binding_id=native.route_id)
+        candidates = await engine.catalog.account_candidates(principal, request, binding_id=native.route_id, canonical_model=True)
         candidates = tuple(c for c in candidates if c.route.credential_id == native.credential_id)
         request = request.model_copy(update={"continuation": native.upstream_id})
     else:
-        candidates = await engine.catalog.account_candidates(principal, request)
+        candidates = await engine.catalog.account_candidates(principal, request, canonical_model=True)
     policy = await engine.catalog.pool_policy(model_id)
     routes = order_candidates(policy, candidates, datetime.now(timezone.utc))
     if not routes:

@@ -12,8 +12,8 @@ def ollama_router(identity, catalog, engine):
     @router.get("/api/tags")
     async def tags(request: Request):
         principal = await identity.authenticate(client_secret(request), "ollama")
-        values = await catalog.list_models(principal)
-        return {"models": [{"name": m.model_id, "model": m.model_id} for m in values]}
+        values = await catalog.list_model_names(principal)
+        return {"models": [{"name": m, "model": m} for m in values]}
 
     @router.get("/api/version")
     async def version(request: Request):
@@ -25,7 +25,7 @@ def ollama_router(identity, catalog, engine):
         principal = await identity.authenticate(client_secret(request), "ollama")
         body = await request.json()
         model = body.get("model", body.get("name"))
-        if model not in {m.model_id for m in await catalog.list_models(principal)}:
+        if model not in await catalog.list_model_names(principal):
             raise GatewayError("not_found", 404)
         return {"model_info": {"general.name": model}, "capabilities": ["completion"]}
 
@@ -40,6 +40,7 @@ def ollama_router(identity, catalog, engine):
         prepared = await engine.prepare(principal, decoded, engine.meta(body, request.headers.get("idempotency-key"), protocol="ollama",
             session_digest=await engine.session_digest(principal, decoded.model, gateway_session(request))))
         codec.response_id = prepared.collector.id
+        codec.model = prepared.collector.model
         if decoded.stream:
             return GatewayStreamResponse(prepared, codec)
         return JSONResponse(codec.encode_result(await prepared.collect()), headers={"Cache-Control": "no-store"})

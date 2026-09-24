@@ -21,6 +21,9 @@ class GatewayBoundary:
         origin = headers.get(b"origin", b"").decode("latin1")
         async def reject(status, code):
             await JSONResponse({"error": {"code": code, "message": code}}, status_code=status)(scope, receive, send)
+        if scope['path'].startswith('/backend-api/codex/') and scope['path'] not in {
+                '/backend-api/codex/responses', '/backend-api/codex/responses/compact'}:
+            return await reject(404, 'not_found')
         if host not in self.allowed_hosts or sum(k == b"host" for k, _ in pairs) != 1:
             return await reject(400, "invalid_host")
         peer = (scope.get("client") or ("unknown", 0))[0]

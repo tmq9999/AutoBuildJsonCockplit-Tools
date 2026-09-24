@@ -64,7 +64,8 @@ class GenerationOptions(StrictRecord):
 
 
 class InferenceRequest(StrictRecord):
-    model: str = Field(min_length=1, max_length=200)
+    # Client namespace prefix (64) plus a canonical model/alias (200).
+    model: str = Field(min_length=1, max_length=264)
     messages: tuple[Message, ...] = Field(default=(), repr=False)
     instructions: str | None = Field(default=None, repr=False)
     tools: tuple[Tool, ...] = Field(default=(), max_length=128, repr=False)

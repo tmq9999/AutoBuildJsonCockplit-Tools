@@ -88,7 +88,8 @@ class Engine:
         return RequestMeta(uuid4(), now, now+timedelta(seconds=180), claim, payload, protocol, session_digest)
 
     async def count_tokens(self, principal, request, meta):
-        routes = await self.catalog.candidates(principal, request)
+        request = request.model_copy(update={"model": await self.catalog.resolve_model(principal, request.model)})
+        routes = await self.catalog.candidates(principal, request, canonical_model=True)
         route = next((r for r in routes if hasattr(self.adapters.get(r.adapter), "count")), None)
         if route is None:
             raise GatewayError("unsupported_feature")
@@ -134,6 +135,7 @@ class Engine:
     async def prepare(self, principal, request, meta):
         selection_state = await routing_session.select(self, principal, request, meta)
         request, routes, scope = selection_state.request, selection_state.routes, selection_state.scope
+        visible_model = await self.catalog.visible_model(principal, scope.public_model_id)
         route = routes[0]
         if route.adapter not in self.adapters:
             raise GatewayError("upstream_unavailable", 503)
@@ -245,7 +247,9 @@ class Engine:
                         raise
                     known_rejection = None
                     continue
-                return PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt, scope)
+                prepared = PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt, scope)
+                prepared.collector.model = visible_model
+                return prepared
             raise GatewayError("upstream_unavailable", 503)
         except BaseException as error:
             failure_code = error.code if isinstance(error, GatewayError) else "upstream_error"

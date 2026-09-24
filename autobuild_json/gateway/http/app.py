@@ -12,6 +12,7 @@ from .boundary import GatewayBoundary
 from .streaming import GatewayStreamResponse
 from .gemini_routes import gemini_router
 from .ollama_routes import ollama_router
+from .codex_routes import codex_router
 
 
 def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
@@ -44,11 +45,11 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
         if anthropic and request.headers["anthropic-version"] != "2023-06-01":
             raise GatewayError("unsupported_feature")
         principal = await identity.authenticate(client_secret(request), "anthropic" if anthropic else "openai")
-        values = await catalog.list_models(principal)
+        values = await catalog.list_model_names(principal)
         if anthropic:
-            rows = [{"id": model.model_id, "type": "model", "display_name": model.model_id, "created_at": "2026-01-01T00:00:00Z"} for model in values]
+            rows = [{"id": model, "type": "model", "display_name": model, "created_at": "2026-01-01T00:00:00Z"} for model in values]
             return {"data": rows, "has_more": False, "first_id": rows[0]["id"] if rows else None, "last_id": rows[-1]["id"] if rows else None}
-        return {"object": "list", "data": [{"id": model.model_id, "object": "model", "created": 0, "owned_by": "gateway"}
+        return {"object": "list", "data": [{"id": model, "object": "model", "created": 0, "owned_by": "gateway"}
                                            for model in values]}
 
     @app.get("/health")
@@ -75,6 +76,7 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
                            session_digest=await engine.session_digest(principal, decoded.model, gateway_session(request)))
         prepared = await engine.prepare(principal, decoded, meta)
         codec.response_id = prepared.collector.id
+        codec.model = prepared.collector.model
         if decoded.stream:
             return GatewayStreamResponse(prepared, codec)
         return JSONResponse(codec.encode_result(await prepared.collect()), headers={"Cache-Control": "no-store"})
@@ -91,9 +93,12 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
         prepared = await engine.prepare(principal, decoded, engine.meta(body, request.headers.get("idempotency-key"),
             session_digest=await engine.session_digest(principal, decoded.model, gateway_session(request))))
         codec.response_id = prepared.collector.id
+        codec.model = prepared.collector.model
         if decoded.stream:
             return GatewayStreamResponse(prepared, codec)
         return JSONResponse(codec.encode_result(await prepared.collect()), headers={"Cache-Control": "no-store"})
+
+    app.include_router(codex_router(identity, responses))
 
     @app.post("/v1/messages")
     async def messages(request: Request):
@@ -109,6 +114,7 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
         prepared = await engine.prepare(principal, decoded, engine.meta(body, request.headers.get("idempotency-key"), protocol="anthropic",
             session_digest=await engine.session_digest(principal, decoded.model, gateway_session(request))))
         codec.response_id = prepared.collector.id
+        codec.model = prepared.collector.model
         if decoded.stream:
             return GatewayStreamResponse(prepared, codec)
         return JSONResponse(codec.encode_result(await prepared.collect()), headers={"Cache-Control": "no-store"})

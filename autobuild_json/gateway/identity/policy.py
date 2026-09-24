@@ -21,6 +21,8 @@ class ModelRate(BaseModel):
 class KeyPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     model_ids: frozenset[ModelId] = frozenset()
+    excluded_model_ids: frozenset[ModelId] = frozenset()
+    model_prefix: str = ""
     all_models: bool = False
     protocols: frozenset[Protocol] = frozenset()
     total_micro: Quota | None = 0
@@ -31,6 +33,26 @@ class KeyPolicy(BaseModel):
     concurrency: int = Field(default=1, strict=True, ge=1, le=1_000)
     expires_at: AwareDatetime | None = None
     enabled: bool = True
+
+    @field_validator("model_prefix")
+    @classmethod
+    def valid_model_prefix(cls, value):
+        if len(value) > 64 or (value and (value[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" or
+            any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:-" for c in value))):
+            raise ValueError("Invalid model prefix")
+        if value and (any(part in {".", ".."} for part in value.split('/')) or '//' in value):
+            raise ValueError("Ambiguous model prefix")
+        return value
+
+    @field_validator("excluded_model_ids")
+    @classmethod
+    def bounded_excluded_models(cls, value):
+        if len(value) > 1000:
+            raise ValueError("Too many excluded models")
+        return value
+
+    def allows_model(self, model_id: str) -> bool:
+        return model_id not in self.excluded_model_ids and (self.all_models or model_id in self.model_ids)
 
     @field_validator("model_ids")
     @classmethod

@@ -117,7 +117,11 @@ class Catalog:
             await write_model(session, model, expected_version=current, create_only=current is None)
 
     async def put_alias(self, alias, model_id):
-        if not isinstance(alias, str) or not 1 <= len(alias) <= 200 or alias == model_id:
+        if (not isinstance(alias, str) or not 1 <= len(alias) <= 200 or alias == model_id
+                or any(ord(c) < 33 or ord(c) > 126 for c in alias)
+                or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:-" for c in alias)
+                or "*" in alias or "?" in alias or "//" in alias
+                or any(part in {".", "..", ""} for part in alias.split("/"))):
             raise GatewayError("invalid_request")
         async with self.db.sessions.begin() as session:
             from .registry_writes import lock_model_names
@@ -164,13 +168,48 @@ class Catalog:
             policy = await self._policy(session, principal)
             configs = (await session.execute(text("SELECT config FROM public_models ORDER BY id"))).scalars().all()
             models = [ModelConfig.model_validate(config) for config in configs]
-            return [m for m in models if m.enabled and (policy.all_models or m.model_id in policy.model_ids)]
+            return [m for m in models if m.enabled and self._allowed_model(policy, m.model_id)]
 
-    async def _model_row(self, session, principal, requested_model):
+    @staticmethod
+    def _allowed_model(policy, model_id):
+        return policy.allows_model(model_id)
+
+    async def list_model_names(self, principal):
+        """Wire-only projection; stored and routing ModelConfig identities stay canonical."""
+        async with self.db.sessions() as session:
+            policy = await self._policy(session, principal)
+            configs = (await session.execute(text("SELECT config FROM public_models ORDER BY id"))).scalars()
+            models = (ModelConfig.model_validate(config) for config in configs)
+            return [policy.model_prefix + m.model_id for m in models
+                    if m.enabled and self._allowed_model(policy, m.model_id)]
+
+    async def visible_model(self, principal, canonical_model):
+        async with self.db.sessions() as session:
+            policy = await self._policy(session, principal)
+            if not self._allowed_model(policy, canonical_model):
+                raise GatewayError("permission_denied", 403, "policy")
+            return policy.model_prefix + canonical_model
+
+    async def _normalize_model(self, session, policy, requested_model):
+        token = requested_model
+        if policy.model_prefix:
+            if not isinstance(token, str) or not token.startswith(policy.model_prefix):
+                raise GatewayError("permission_denied", 403, "policy")
+            token = token[len(policy.model_prefix):]
+            if not token:
+                raise GatewayError("permission_denied", 403, "policy")
+        alias = await session.scalar(text("SELECT model_id FROM model_aliases WHERE alias=:alias"), {"alias": token})
+        model_id = alias or token
+        if not self._allowed_model(policy, model_id):
+            raise GatewayError("permission_denied", 403, "policy")
+        if not await session.scalar(text("SELECT id FROM public_models WHERE id=:id"), {"id": model_id}):
+            raise GatewayError("not_found", 404)
+        return model_id
+
+    async def _model_row(self, session, principal, model_id):
+        """Authorize a canonical ID; never strip prefixes or resolve aliases here."""
         policy = await self._policy(session, principal)
-        alias = await session.scalar(text("SELECT model_id FROM model_aliases WHERE alias=:alias"), {"alias": requested_model})
-        model_id = alias or requested_model
-        if not policy.all_models and model_id not in policy.model_ids:
+        if not self._allowed_model(policy, model_id):
             raise GatewayError("permission_denied", 403, "policy")
         model_row = (await session.execute(text("SELECT * FROM public_models WHERE id=:id FOR UPDATE"),
                                            {"id": model_id})).mappings().first()
@@ -184,7 +223,9 @@ class Catalog:
     async def resolve_model(self, principal, requested_model):
         """Resolve authorized model identity before looking up a continuation."""
         async with self.db.sessions.begin() as session:
-            row, _ = await self._model_row(session, principal, requested_model)
+            policy = await self._policy(session, principal)
+            canonical_model = await self._normalize_model(session, policy, requested_model)
+            row, _ = await self._model_row(session, principal, canonical_model)
             return row["id"]
 
     async def _candidate_state(self, session, principal, request, *, binding_id=None):
@@ -231,7 +272,11 @@ class Catalog:
             # locally stored cooldown deadline.
             return 0 if routes else delay
 
-    async def candidates(self, principal, request, *, binding_id=None):
+    async def candidates(self, principal, request, *, binding_id=None, canonical_model=False):
+        if not canonical_model:
+            from types import SimpleNamespace
+            request = SimpleNamespace(model=await self.resolve_model(principal, request.model),
+                                      required_capabilities=request.required_capabilities)
         async with self.db.sessions.begin() as session:
             model_row, routes, retry_after = await self._candidate_state(session, principal, request,
                                                                           binding_id=binding_id)
@@ -244,13 +289,13 @@ class Catalog:
             await session.execute(text("UPDATE public_models SET cursor=(cursor+1)%2147483647 WHERE id=:id"), {"id": model_row["id"]})
             return first[offset:] + first[:offset] + rest
 
-    async def account_candidates(self, principal, request, *, binding_id=None):
+    async def account_candidates(self, principal, request, *, binding_id=None, canonical_model=False):
         """Enrich authorized routes without changing their legacy order or policy.
 
         Metadata is an observation, not an authorization lease. Consumers still
         revalidate the chosen credential and binding before network dispatch.
         """
-        routes = await self.candidates(principal, request, binding_id=binding_id)
+        routes = await self.candidates(principal, request, binding_id=binding_id, canonical_model=canonical_model)
         return await self._account_observations(routes)
 
     async def _account_observations(self, routes):

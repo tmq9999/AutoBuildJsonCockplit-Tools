@@ -91,8 +91,7 @@ class Ledger:
             cache_read_micro = input_micro if rates.cache_read_micro is None else rates.cache_read_micro
             cache_write_micro = input_micro if rates.cache_write_micro is None else rates.cache_write_micro
             amount = hold_micro(admission.bounds, input_micro, output_micro, cache_read_micro, cache_write_micro)
-            if (admission.protocol not in policy.protocols or
-                    not (policy.all_models or admission.model_id in policy.model_ids)):
+            if admission.protocol not in policy.protocols or not policy.allows_model(admission.model_id):
                 raise GatewayError("permission_denied", 403, "policy")
             if not now < admission.deadline <= now + timedelta(seconds=600):
                 raise GatewayError("invalid_request", 400, "quota")

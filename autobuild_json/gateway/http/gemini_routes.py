@@ -12,15 +12,15 @@ def gemini_router(identity, catalog, engine):
     @router.get("/v1beta/models")
     async def models(request: Request):
         principal = await identity.authenticate(client_secret(request), "gemini")
-        values = await catalog.list_models(principal)
-        return {"models": [{"name": "models/"+m.model_id, "displayName": m.model_id,
+        values = await catalog.list_model_names(principal)
+        return {"models": [{"name": "models/"+m, "displayName": m,
                             "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]} for m in values]}
 
     @router.get("/v1beta/models/{model:path}")
     async def model_detail(model: str, request: Request):
         principal = await identity.authenticate(client_secret(request), "gemini")
-        values = await catalog.list_models(principal)
-        if model not in {m.model_id for m in values}:
+        values = await catalog.list_model_names(principal)
+        if model not in values:
             raise GatewayError("not_found", 404)
         return {"name": "models/"+model, "displayName": model,
                 "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]}
@@ -45,6 +45,7 @@ def gemini_router(identity, catalog, engine):
             return {"totalTokens": await engine.count_tokens(principal, decoded, meta)}
         prepared = await engine.prepare(principal, decoded, meta)
         codec.response_id = prepared.collector.id
+        codec.model = prepared.collector.model
         if streaming:
             return GatewayStreamResponse(prepared, codec)
         return JSONResponse(codec.encode_result(await prepared.collect()), headers={"Cache-Control": "no-store"})
