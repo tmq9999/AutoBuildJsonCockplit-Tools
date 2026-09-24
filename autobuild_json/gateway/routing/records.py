@@ -50,6 +50,8 @@ class ModelConfig(BaseModel):
     router_model: bool = False
     input_micro: Quota = 1_000_000
     output_micro: Quota = 1_000_000
+    cache_read_micro: Quota | None = None
+    cache_write_micro: Quota | None = None
 
 
 @dataclass(frozen=True)
@@ -93,3 +95,5 @@ class RouteSnapshot:
     timeout: int
     cost_schedule: CostSchedule | None = None
     wire_api: str = "chat"
+    cache_read_micro: int | None = None
+    cache_write_micro: int | None = None

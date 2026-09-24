@@ -2,14 +2,15 @@ import json
 
 from ..contracts import InferenceEvent, Text, ToolCall
 from ..errors import GatewayError
-from ..metering.records import Usage
+from ..metering.usage import normalize_provider_usage
 from ..protocols.frames import SSEDecoder
 
 
 def normalize_responses_usage(payload):
-    return Usage(payload["input_tokens"], payload["output_tokens"],
-                 cached_read=(payload.get("input_tokens_details") or {}).get("cached_tokens", 0),
-                 reasoning=(payload.get("output_tokens_details") or {}).get("reasoning_tokens", 0))
+    try:
+        return normalize_provider_usage(payload, "openai_responses")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise GatewayError("invalid_usage", 502, "upstream") from None
 
 
 async def responses_events(response):

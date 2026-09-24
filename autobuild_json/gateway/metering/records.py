@@ -43,11 +43,16 @@ class Admission:
     idempotency_digest: bytes | None = field(default=None, repr=False)
     payload_digest: bytes | None = field(default=None, repr=False)
     protocol: str = "openai"
+    cache_read_micro: int | None = None
+    cache_write_micro: int | None = None
 
     def __post_init__(self):
         if self.deadline.tzinfo is None:
             raise ValueError("invalid_deadline")
         weighted_micro(self.bounds.input_tokens, self.bounds.output_tokens, self.input_micro, self.output_micro)
+        for value in (self.cache_read_micro, self.cache_write_micro):
+            if value is not None and (type(value) is not int or value < 0 or value >= 10**38):
+                raise ValueError("invalid_usage")
         if self.idempotency_digest is not None and (
             len(self.idempotency_digest) != 32 or self.payload_digest is None or len(self.payload_digest) != 32
         ):

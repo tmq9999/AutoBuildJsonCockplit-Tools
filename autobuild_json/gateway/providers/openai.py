@@ -6,7 +6,7 @@ import time
 from ..contracts import InferenceEvent, Text, ToolCall
 from ..errors import GatewayError, UpstreamRejected
 from .retry import parse_retry_after
-from ..metering.records import Usage
+from ..metering.usage import normalize_provider_usage
 from ..protocols.frames import SSEDecoder
 from ..protocols.openai_chat import OpenAIChatCodec
 from ..protocols.openai_responses import ResponsesCodec
@@ -17,9 +17,7 @@ from ..transport.http import OutboundRequest
 
 def normalize_openai_usage(payload):
     try:
-        return Usage(input_tokens=payload["prompt_tokens"], output_tokens=payload["completion_tokens"],
-            cached_read=(payload.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
-            reasoning=(payload.get("completion_tokens_details") or {}).get("reasoning_tokens", 0))
+        return normalize_provider_usage(payload, "openai_chat")
     except (ValueError, KeyError, TypeError, AttributeError):
         raise GatewayError("invalid_usage", 502, "upstream") from None
 

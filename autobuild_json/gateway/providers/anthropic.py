@@ -6,7 +6,7 @@ import time
 from ..contracts import InferenceEvent, Text, ToolCall
 from ..errors import GatewayError, UpstreamRejected
 from .retry import parse_retry_after
-from ..metering.records import Usage
+from ..metering.usage import normalize_provider_usage
 from ..protocols.anthropic import AnthropicCodec
 from ..protocols.frames import SSEDecoder
 from ..transport.http import OutboundRequest
@@ -15,9 +15,10 @@ from .preflight import auth_header
 
 
 def normalize_anthropic_usage(payload):
-    read = payload.get("cache_read_input_tokens", 0)
-    write = payload.get("cache_creation_input_tokens", 0)
-    return Usage(payload["input_tokens"]+read+write, payload["output_tokens"], cached_read=read, cached_write=write)
+    try:
+        return normalize_provider_usage(payload, "anthropic")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise GatewayError("invalid_usage", 502, "upstream") from None
 
 
 async def anthropic_events(response):

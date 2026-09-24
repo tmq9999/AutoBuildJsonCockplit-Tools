@@ -8,7 +8,7 @@ from uuid import uuid4
 from ..contracts import InferenceEvent, Text, ToolCall
 from ..errors import GatewayError, UpstreamRejected
 from .retry import parse_retry_after
-from ..metering.records import Usage
+from ..metering.usage import normalize_provider_usage
 from ..protocols.gemini import GeminiCodec
 from ..protocols.frames import SSEDecoder
 from ..transport.http import OutboundRequest
@@ -17,9 +17,10 @@ from .preflight import auth_header
 
 
 def normalize_gemini_usage(payload):
-    thoughts = payload.get("thoughtsTokenCount", 0)
-    return Usage(payload["promptTokenCount"], payload["candidatesTokenCount"]+thoughts,
-                 cached_read=payload.get("cachedContentTokenCount", 0), reasoning=thoughts)
+    try:
+        return normalize_provider_usage(payload, "gemini")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise GatewayError("invalid_usage", 502, "upstream") from None
 
 
 async def gemini_events(response):

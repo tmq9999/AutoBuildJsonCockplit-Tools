@@ -14,6 +14,8 @@ class ModelRate(BaseModel):
     model_id: ModelId
     input_micro: Quota
     output_micro: Quota
+    cache_read_micro: Quota | None = None
+    cache_write_micro: Quota | None = None
 
 
 class KeyPolicy(BaseModel):
