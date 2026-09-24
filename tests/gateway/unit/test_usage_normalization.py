@@ -55,6 +55,35 @@ def test_cache_buckets_cannot_exceed_inclusive_input():
         )
 
 
+@pytest.mark.parametrize("provider,payload", [
+    ("openai_chat", {"prompt_tokens": 1, "completion_tokens": 1,
+                     "prompt_tokens_details": {"cached_tokens": None}}),
+    ("codex", {"input_tokens": 1, "output_tokens": 1,
+               "input_tokens_details": {"cached_tokens": None}}),
+    ("anthropic", {"input_tokens": 1, "output_tokens": 1,
+                   "cache_read_input_tokens": None}),
+    ("gemini", {"promptTokenCount": 1, "candidatesTokenCount": 1,
+                "thoughtsTokenCount": None}),
+])
+def test_present_null_optional_count_is_rejected(provider, payload):
+    from autobuild_json.gateway.metering.usage import normalize_provider_usage
+
+    with pytest.raises(ValueError, match="invalid_usage"):
+        normalize_provider_usage(payload, provider)
+
+
+@pytest.mark.parametrize("provider,payload", [
+    ("openai_responses", {"input_tokens": 1, "output_tokens": 1}),
+    ("anthropic", {"input_tokens": 1, "output_tokens": 1}),
+    ("gemini", {"promptTokenCount": 1, "candidatesTokenCount": 1}),
+])
+def test_absent_optional_count_remains_zero(provider, payload):
+    from autobuild_json.gateway.metering.usage import normalize_provider_usage
+
+    usage = normalize_provider_usage(payload, provider)
+    assert (usage.cached_read, usage.cached_write, usage.reasoning) == (0, 0, 0)
+
+
 def test_gemini_thoughts_are_in_output_and_reasoning():
     from autobuild_json.gateway.metering.usage import normalize_provider_usage
 

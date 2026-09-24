@@ -26,3 +26,14 @@ def test_cost_schedule_rejects_nonexact_or_negative_prices(amount):
     from autobuild_json.gateway.metering.costs import CostSchedule
     with pytest.raises(ValueError):
         CostSchedule("USD", amount, Decimal("1"))
+
+
+def test_customer_cache_rates_do_not_change_upstream_cost():
+    from autobuild_json.gateway.metering.costs import CostSchedule, estimate_cost
+    from autobuild_json.gateway.metering.records import Usage
+    from autobuild_json.gateway.metering.units import weighted_usage_micro
+
+    usage = Usage(100, 50, cached_read=70, cached_write=10)
+    schedule = CostSchedule("USD", Decimal("1"), Decimal("3"), Decimal("0.1"), Decimal("2"))
+    assert weighted_usage_micro(usage, 1_000_000, 3_000_000, 0, 0) == 170_000_000
+    assert estimate_cost(usage, schedule).amount == Decimal("0.000197")

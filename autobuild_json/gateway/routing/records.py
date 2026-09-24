@@ -97,3 +97,8 @@ class RouteSnapshot:
     wire_api: str = "chat"
     cache_read_micro: int | None = None
     cache_write_micro: int | None = None
+
+    def __post_init__(self):
+        for value in (self.cache_read_micro, self.cache_write_micro):
+            if value is not None and (type(value) is not int or value < 0 or value >= 10**38):
+                raise ValueError("invalid_usage")

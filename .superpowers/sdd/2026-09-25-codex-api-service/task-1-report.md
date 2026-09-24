@@ -56,3 +56,35 @@ Result: `933 passed, 1 warning in 147.78s`. The warning is the existing `google.
 ## Concerns
 
 No known Task 1 concerns. Database persistence and effective-rate snapshot wiring are intentionally deferred to Task 2.
+
+## Round 1 fixes
+
+Review findings addressed:
+
+- Present `None` optional usage leaves now raise `invalid_usage`; absent optional leaves still default to zero.
+- Added coverage for cache-rate arithmetic, strict model/policy rate validation, legacy constructors and policy JSON, upstream cost independence, and route snapshot construction.
+- `RouteSnapshot` validates both new cache rates as strict nonnegative integers below `10**38`.
+
+Fresh covering command:
+
+```text
+.venv/bin/python -m pytest tests/gateway/unit/test_usage_normalization.py tests/gateway/unit/test_units.py tests/gateway/unit/test_key_policy.py tests/gateway/unit/test_costs.py -q
+```
+
+Result: `70 passed in 0.12s`.
+
+Unit regression command:
+
+```text
+.venv/bin/python -m pytest tests/gateway/unit -q
+```
+
+Result: `368 passed in 6.22s`.
+
+Lint command:
+
+```text
+.venv/bin/ruff check autobuild_json/gateway/metering autobuild_json/gateway/identity autobuild_json/gateway/routing/records.py autobuild_json/gateway/providers tests/gateway/unit/test_usage_normalization.py tests/gateway/unit/test_units.py tests/gateway/unit/test_key_policy.py tests/gateway/unit/test_costs.py
+```
+
+Result: `All checks passed!`.

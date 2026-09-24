@@ -17,15 +17,15 @@ def _required(payload, name):
 
 
 def _optional(payload, name):
-    if name not in payload or payload[name] is None:
+    if name not in payload:
         return 0
     return _count(payload[name])
 
 
 def _nested_optional(payload, outer, inner):
-    details = payload.get(outer)
-    if details is None:
+    if outer not in payload:
         return 0
+    details = payload[outer]
     if not isinstance(details, dict):
         raise ValueError("invalid_usage")
     return _optional(details, inner)
