@@ -12,6 +12,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 
 from ..identity.policy import ModelId
 from ..metering.costs import CostSchedule
+from ..metering.budgets import money
+from ..errors import GatewayError
 from ..metering.records import Bounds, Usage
 from ..routing.records import Adapter, ModelConfig, ProviderConfig
 
@@ -33,9 +35,10 @@ def _utc(value: datetime) -> datetime:
 
 
 def _decimal(value: Decimal) -> Decimal:
-    if not value.is_finite() or value < 0 or value >= Decimal("1e20"):
-        raise ValueError("invalid_decimal_amount")
-    return value
+    try:
+        return money(value)
+    except GatewayError:
+        raise ValueError("invalid_decimal_amount") from None
 
 
 def _json_copy(value: Any) -> Any:
@@ -126,9 +129,14 @@ class ProbeIntent(CatalogRecord):
     @field_validator("max_hold")
     @classmethod
     def bounded_hold(cls, value: Decimal) -> Decimal:
-        if value <= 0:
-            raise ValueError("invalid_decimal_amount")
         return _decimal(value)
+
+    @field_validator("acknowledged", mode="before")
+    @classmethod
+    def explicit_acknowledgement(cls, value: Any) -> bool:
+        if value is not True:
+            raise ValueError("probe_acknowledgement_required")
+        return value
 
 
 class OperationRequest(CatalogRecord):

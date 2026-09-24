@@ -150,7 +150,7 @@ def test_probe_requires_acknowledgement_and_bounded_decimal():
     base = dict(binding_id=uuid4(), quote_digest="b" * 64, expected=_stamp(), currency="USD")
     with pytest.raises(ValidationError):
         ProbeIntent(**base, max_hold=Decimal("0.01"))
-    for amount in (Decimal("1e20"), Decimal("NaN"), Decimal("-1")):
+    for amount in (Decimal("1e26"), Decimal("NaN"), Decimal("-1")):
         with pytest.raises(ValidationError):
             ProbeIntent(**base, max_hold=amount, acknowledged=True)
 

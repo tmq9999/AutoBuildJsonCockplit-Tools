@@ -2,6 +2,7 @@
 
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from math import isfinite
 from typing import Any
@@ -78,10 +79,19 @@ def _view(row) -> OperationView:
             from ..metering.records import Usage
             usage = Usage(**usage)
         except (TypeError, ValueError):
-            usage = None
+            raise GatewayError("invalid_usage", 409) from None
     cost = row.get("cost")
     if isinstance(cost, dict):
-        cost = cost.get("amount")
+        if "amount" not in cost:
+            raise GatewayError("invalid_state", 409)
+        cost = cost["amount"]
+    if cost is not None:
+        if not isinstance(cost, (str, Decimal)):
+            raise GatewayError("invalid_state", 409)
+        try:
+            cost = Decimal(cost)
+        except InvalidOperation:
+            raise GatewayError("invalid_state", 409) from None
     return OperationView(
         id=row["id"], source_id=row["source_id"], kind=row["kind"], state=row["state"],
         version=row["version"], created_at=row["created_at"], deadline=row.get("deadline"),

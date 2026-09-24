@@ -48,3 +48,40 @@ async def test_budget_overage_records_actual_cost_and_blocks_further_admission(p
     assert await service.balance(budget_id) == (Decimal("1.2"), Decimal("0"), Decimal("1"))
     with pytest.raises(GatewayError, match="budget_exceeded"):
         await service.reserve(budget_id, uuid4(), "USD", Decimal("0.1"))
+
+
+async def test_session_aware_budget_writes_follow_callers_transaction(pg_db):
+    from autobuild_json.gateway.metering.budgets import BudgetService
+    service = BudgetService(pg_db)
+    budget = await service.create("USD", Decimal(10))
+    attempt = uuid4()
+    with pytest.raises(RuntimeError):
+        async with pg_db.sessions.begin() as session:
+            await service.reserve_in(session, budget, attempt, "USD", Decimal(1))
+            raise RuntimeError("synthetic rollback")
+    assert await service.balance(budget) == (Decimal(0), Decimal(0), Decimal(10))
+    await service.reserve(budget, attempt, "USD", Decimal(1))
+    with pytest.raises(RuntimeError):
+        async with pg_db.sessions.begin() as session:
+            await service.settle_in(session, attempt, Decimal("0.2"))
+            raise RuntimeError("synthetic rollback")
+    assert await service.balance(budget) == (Decimal(0), Decimal(1), Decimal(10))
+
+
+async def test_budget_admission_preserves_last_money_unit_near_storage_limit(pg_db):
+    from sqlalchemy import text
+    from autobuild_json.gateway.metering.budgets import BudgetService
+    from autobuild_json.gateway.errors import GatewayError
+    service = BudgetService(pg_db)
+    limit = Decimal("99999999999999999999999999.000000000001")
+    budget = await service.create("USD", limit)
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("UPDATE upstream_budgets SET spent=:spent WHERE id=:id"),
+                              {"id": budget, "spent": Decimal("99999999999999999999999999")})
+    with pytest.raises(GatewayError, match="budget_exceeded"):
+        await service.reserve(budget, uuid4(), "USD", Decimal("0.000000000002"))
+    assert await service.balance(budget) == (Decimal("99999999999999999999999999"), Decimal(0), limit)
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM upstream_reservations")) == 0
+    await service.reserve(budget, uuid4(), "USD", Decimal("0.000000000001"))
+    assert await service.balance(budget) == (Decimal("99999999999999999999999999"), Decimal("0.000000000001"), limit)
