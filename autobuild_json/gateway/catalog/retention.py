@@ -36,14 +36,17 @@ class Retention:
                 "WHERE NOT protected ORDER BY source_id LIMIT :limit"),
                 {"now": now, "limit": max(0, min(limit, 100))})).scalars().all()
             deleted = 0
-            protected = {}
+            # Status sampling has a separate bounded budget. A protected-only
+            # source is still reported without consuming a deletion slot.
+            protected_rows = (await session.execute(text(_RANKED +
+                "SELECT source_id,count(*) AS count FROM candidates WHERE protected "
+                "GROUP BY source_id ORDER BY source_id LIMIT 100"), {"now": now})).mappings().all()
+            protected = {str(row["source_id"]): row["count"] for row in protected_rows}
             for source_id in sources:
                 locked = await session.scalar(text("SELECT id FROM catalog_sources WHERE id=:id FOR UPDATE SKIP LOCKED"),
                                               {"id": source_id})
                 if locked is None:
                     continue
-                protected[str(source_id)] = await session.scalar(text(_RANKED + "SELECT count(*) FROM candidates "
-                    "WHERE source_id=:source AND protected"), {"now": now, "source": source_id})
                 ids = (await session.execute(text(_RANKED + "SELECT id FROM candidates WHERE source_id=:source "
                     "AND NOT protected ORDER BY created_at,id LIMIT :limit"),
                     {"now": now, "source": source_id, "limit": max(0, min(limit, 100)-deleted)})).scalars().all()

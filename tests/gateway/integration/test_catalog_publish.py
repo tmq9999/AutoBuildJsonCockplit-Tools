@@ -302,30 +302,62 @@ async def test_manual_binding_edit_invalidates_publish_version(pg_db):
                                     {"id": binding_id}) == "manual"
 
 
-async def test_scheduler_manual_publish_lock_order_completes_under_event_gate(pg_db, monkeypatch):
-    import asyncio
+@pytest.mark.parametrize("writer_kind", ["source_update", "publish"])
+async def test_scheduler_manual_publish_lock_order_completes_under_event_gate(pg_db, monkeypatch, writer_kind):
     from autobuild_json.gateway.catalog.operations import OperationStore
+    from autobuild_json.gateway.catalog.records import SourceInput
     from autobuild_json.gateway.catalog.scheduler import Scheduler
 
-    publisher, source, _, selected, request = await publication_case(pg_db, upstream=("gated",))
+    publisher, source, run_id, selected, request = await publication_case(pg_db, upstream=("gated",))
     sources = publisher.sources
     async with pg_db.sessions.begin() as session:
         await session.execute(text("UPDATE catalog_sources SET schedule_enabled=true,next_run_at=clock_timestamp()-interval '1 second' WHERE id=:id"), {"id": source.id})
+        # This test isolates due-source locking, not the separate terminal
+        # acknowledgement path which uses blocking locks.
+        await session.execute(text("UPDATE provider_operations SET schedule_completed_at=clock_timestamp() WHERE id=:id"), {"id": run_id})
     scheduler = Scheduler(pg_db, OperationStore(pg_db, sources), sources)
     entered, release = asyncio.Event(), asyncio.Event()
-    original = sources.lock_context
-    calls = 0
-    async def gated(session, source_id, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
+    original = sources._dependencies
+    writer_task = None
+    async def gated(session, provider_id, credential_id, **kwargs):
+        result = await original(session, provider_id, credential_id, **kwargs)
+        if asyncio.current_task() is writer_task:
+            # Real CRUD has acquired provider/credential/profile locks and is
+            # paused immediately before taking the source lock.
             entered.set()
             await release.wait()
-        return await original(session, source_id, **kwargs)
-    monkeypatch.setattr(sources, "lock_context", gated)
-    pub_task = asyncio.create_task(publisher.publish(request(selected("gated", "gated")), "admin"))
-    await asyncio.wait_for(entered.wait(), 2)
-    scheduler_task = asyncio.create_task(scheduler.tick())
-    release.set()
-    results = await asyncio.wait_for(asyncio.gather(pub_task, scheduler_task, return_exceptions=True), 3)
-    assert all(not isinstance(result, asyncio.TimeoutError) for result in results)
+        return result
+    monkeypatch.setattr(sources, "_dependencies", gated)
+    if writer_kind == "publish":
+        writer_task = asyncio.create_task(publisher.publish(request(selected("gated", "gated")), "admin"))
+    else:
+        writer_task = asyncio.create_task(sources.update(source.id, source.version,
+            SourceInput(provider_id=source.provider_id, credential_id=source.credential_id,
+                        mode=source.mode, schedule_enabled=True), "admin"))
+    scheduler_task = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        scheduler_task = asyncio.create_task(scheduler.tick())
+        # SKIP LOCKED must complete while the writer still owns provider locks,
+        # without queuing a job or delaying behind a reversed source->provider edge.
+        assert await asyncio.wait_for(scheduler_task, 2) == []
+        assert not writer_task.done()
+        async with pg_db.sessions.begin() as session:
+            await session.execute(text("SELECT id FROM catalog_sources WHERE id=:id FOR UPDATE NOWAIT"), {"id": source.id})
+            assert await session.scalar(text("SELECT count(*) FROM provider_operations WHERE state='queued'")) == 0
+        release.set()
+        result = await asyncio.wait_for(writer_task, 2)
+        if writer_kind == "publish":
+            assert result.run_id == run_id
+            assert result.bindings[0].public_model_id == "gated"
+            async with pg_db.sessions() as session:
+                assert await session.scalar(text("SELECT count(*) FROM catalog_publications WHERE run_id=:id"), {"id": run_id}) == 1
+        else:
+            assert result.id == source.id and result.version == source.version + 1
+    finally:
+        release.set()
+        tasks = [task for task in (writer_task, scheduler_task) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
