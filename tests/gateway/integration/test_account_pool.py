@@ -208,3 +208,43 @@ async def test_pool_metadata_cannot_authorize_a_model_and_no_policy_keeps_round_
         await session.execute(text("UPDATE api_keys SET policy=jsonb_set(policy,'{model_ids}','[]')"))
     with pytest.raises(GatewayError, match="permission_denied"):
         await catalog.account_candidates(principal, request)
+
+
+async def test_empty_auto_pool_is_persisted_explicit_pause_not_legacy_fallback(pg_db):
+    from autobuild_json.gateway.routing.account_pool import order_candidates
+    catalog, _, principal, request, routes, scope = await pool_case(pg_db)
+    pools = store(pg_db)
+    candidates = await catalog.account_candidates(principal, request)
+    assert len(candidates) == 2
+    assert len(order_candidates(None, candidates, datetime.now(timezone.utc), None)) == 2
+
+    assert await pools.put("public", None, AccountPoolPolicy(mode="auto", members=()), "fixture-admin") == 1
+    version, saved = await pools.get("public")
+    assert version == 1 and saved.mode == "auto" and saved.members == ()
+    assert order_candidates(saved, candidates, datetime.now(timezone.utc), None) == ()
+    with pytest.raises(GatewayError, match="invalid_state"):
+        await pools.bind(scope, routes[0], expiry())
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM account_session_bindings")) == 0
+
+
+async def test_empty_auto_pool_can_pause_enabled_canonical_model_without_bindings(pg_db):
+    catalog, _, _, _, _, _ = await pool_case(pg_db)
+    await catalog.put_model(ModelConfig(model_id="unbound", identity="identity", enabled=True))
+    pools = store(pg_db)
+    config = AccountPoolPolicy(mode="auto", members=())
+    assert await pools.put("unbound", None, config, "fixture-admin") == 1
+    assert await pools.get("unbound") == (1, config)
+
+
+@pytest.mark.parametrize("empty", [True, False])
+async def test_disabled_canonical_model_rejects_empty_and_nonempty_new_policy(pg_db, empty):
+    catalog, _, _, _, routes, _ = await pool_case(pg_db)
+    await catalog.put_model(ModelConfig(model_id="public", identity="identity", enabled=False))
+    pools = store(pg_db)
+    config = AccountPoolPolicy(mode="auto", members=()) if empty else policy(routes)
+    with pytest.raises(GatewayError, match="invalid_request"):
+        await pools.put("public", None, config, "fixture-admin")
+    assert await pools.get("public") is None
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM audit_events WHERE action='codex.pool.updated'")) == 0
