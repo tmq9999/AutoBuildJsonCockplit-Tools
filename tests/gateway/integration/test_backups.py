@@ -60,3 +60,77 @@ async def test_missing_backup_key_and_modified_ciphertext_fail_closed(pg_db, tmp
         path.write_bytes(data)
         with pytest.raises(GatewayError):
             await BackupService(clone, source_vault).restore(path)
+
+
+async def test_catalog_backup_restores_circular_pointer_decision_claim_and_probe_hold(pg_db, tmp_path):
+    import json
+    from decimal import Decimal
+    from sqlalchemy import text
+    from autobuild_json.gateway.storage.backup import BackupService
+    from tests.gateway.catalog_support import source_case, synthetic_vault
+
+    _, source = await source_case(pg_db)
+    run_id, probe_id, budget_id, attempt_id, client_id = (uuid4() for _ in range(5))
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("INSERT INTO upstream_budgets(id,currency,budget_limit,held) "
+                                   "VALUES (:id,'USD',100,2.5)"), {"id": budget_id})
+        await session.execute(text("INSERT INTO provider_operations"
+                                   "(id,source_id,kind,state,payload_digest,input,expected,queued_expires_at,result) "
+                                   "VALUES (:id,:source,'discover','succeeded',:digest,'{}'::jsonb,'{}'::jsonb,"
+                                   "clock_timestamp(),'{}'::jsonb)"),
+                              {"id": run_id, "source": source.id, "digest": b"r" * 32})
+        await session.execute(text("UPDATE catalog_sources SET latest_successful_run_id=:run WHERE id=:source"),
+                              {"run": run_id, "source": source.id})
+        await session.execute(text("INSERT INTO catalog_entries(run_id,upstream_id,metadata,digest) "
+                                   "VALUES (:run,'model-A',CAST(:metadata AS jsonb),:digest)"),
+                              {"run": run_id, "metadata": json.dumps({"display_name": "A"}), "digest": b"e" * 32})
+        await session.execute(text("INSERT INTO catalog_decisions(source_id,upstream_id,ignored) "
+                                   "VALUES (:source,'model-A',true)"), {"source": source.id})
+        await session.execute(text("INSERT INTO provider_operations"
+                                   "(id,source_id,kind,state,payload_digest,input,expected,queued_expires_at,"
+                                   "attempt_id,budget_id,upper_cost,settlement_source,retention_protected) "
+                                   "VALUES (:id,:source,'probe','usage_pending',:digest,'{}'::jsonb,'{}'::jsonb,"
+                                   "clock_timestamp(),:attempt,:budget,2.5,'unknown',true)"),
+                              {"id": probe_id, "source": source.id, "digest": b"p" * 32,
+                               "attempt": attempt_id, "budget": budget_id})
+        await session.execute(text("INSERT INTO upstream_reservations(attempt_id,budget_id,amount,state) "
+                                   "VALUES (:attempt,:budget,2.5,'pending')"),
+                              {"attempt": attempt_id, "budget": budget_id})
+        await session.execute(text("INSERT INTO provider_operation_claims(client_id,operation_id,payload_digest) "
+                                   "VALUES (:client,:operation,:digest)"),
+                              {"client": client_id, "operation": probe_id, "digest": b"p" * 32})
+        await session.execute(text("INSERT INTO catalog_publications"
+                                   "(id,source_id,run_id,payload_digest,result) "
+                                   "VALUES (:id,:source,:run,:digest,'{}'::jsonb)"),
+                              {"id": uuid4(), "source": source.id, "run": run_id, "digest": b"u" * 32})
+    vault = synthetic_vault()
+    backup = tmp_path / "catalog.enc"
+    await BackupService(pg_db, vault).export(backup)
+    async with empty_clone(pg_db) as clone:
+        await BackupService(clone, vault).restore(backup)
+        async with clone.sessions() as session:
+            assert await session.scalar(text("SELECT latest_successful_run_id FROM catalog_sources "
+                                             "WHERE id=:source"), {"source": source.id}) == run_id
+            assert await session.scalar(text("SELECT ignored FROM catalog_decisions WHERE source_id=:source"),
+                                        {"source": source.id}) is True
+            assert await session.scalar(text("SELECT operation_id FROM provider_operation_claims "
+                                             "WHERE client_id=:client"), {"client": client_id}) == probe_id
+            assert await session.scalar(text("SELECT held FROM upstream_budgets WHERE id=:id"),
+                                        {"id": budget_id}) == Decimal("2.5")
+            assert await session.scalar(text("SELECT count(*) FROM catalog_publications")) == 1
+
+
+async def test_catalog_backup_refuses_revision_mismatch(pg_db, tmp_path):
+    from sqlalchemy import text
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.gateway.storage.backup import BackupService
+    from tests.gateway.catalog_support import synthetic_vault
+
+    vault = synthetic_vault()
+    backup = tmp_path / "revision.enc"
+    await BackupService(pg_db, vault).export(backup)
+    async with empty_clone(pg_db) as clone:
+        async with clone.sessions.begin() as session:
+            await session.execute(text("UPDATE alembic_version SET version_num='0009_provider_admission'"))
+        with pytest.raises(GatewayError, match="invalid_state"):
+            await BackupService(clone, vault).restore(backup)

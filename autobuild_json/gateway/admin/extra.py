@@ -48,6 +48,7 @@ def mount_extra(router, services):
                     budget_limit=str(row["budget_limit"]) if row["budget_limit"] is not None else None,
                     spent=str(row["spent"]),
                     held=str(row["held"]),
+                    version=row["version"],
                 )
                 for row in (
                     await session.execute(text("SELECT * FROM upstream_budgets ORDER BY id"))

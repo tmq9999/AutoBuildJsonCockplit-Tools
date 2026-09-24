@@ -15,7 +15,9 @@ from ..errors import GatewayError
 
 TABLES = ("customers", "api_keys", "audit_events", "providers", "config_versions", "credentials", "public_models",
           "model_aliases", "model_bindings", "discovered_models", "quota_buckets", "requests", "attempts", "usage_ledger",
-          "upstream_budgets", "upstream_reservations", "proxy_profiles", "proxy_leases", "proxy_health", "continuation_handles",'provider_admissions')
+          "upstream_budgets", "upstream_reservations", "proxy_profiles", "proxy_leases", "proxy_health",
+          "continuation_handles", "provider_admissions", "catalog_sources", "provider_operations",
+          "provider_operation_claims", "catalog_entries", "catalog_decisions", "catalog_publications")
 MAX_BACKUP = 64*1024*1024
 
 
@@ -93,6 +95,10 @@ class BackupService:
                 await session.execute(text(f'LOCK TABLE "{table}" IN ACCESS EXCLUSIVE MODE'))
                 if await session.scalar(text(f'SELECT EXISTS(SELECT 1 FROM "{table}")')):
                     raise GatewayError("invalid_state", 409)
+            # Source snapshot pointers refer back to operations. All other FKs
+            # remain immediate while this same-revision restore inserts rows.
+            await session.execute(text("SET CONSTRAINTS catalog_sources_latest_run, "
+                                       "catalog_sources_previous_run DEFERRED"))
             for table in TABLES:
                 for row in payload["tables"][table]:
                     await session.execute(text(f'INSERT INTO "{table}" SELECT * FROM json_populate_record(NULL::"{table}", CAST(:row AS json))'),
