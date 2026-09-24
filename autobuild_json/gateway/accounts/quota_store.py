@@ -50,6 +50,21 @@ class QuotaStore:
                                 **{**stamp, "provider_id": UUID(stamp["provider_id"]),
                                    "proxy_id": UUID(stamp["proxy_id"]) if stamp["proxy_id"] else None})
 
+    async def assert_refresh(self, claim):
+        """Return False for stale/ineligible claims; no locks escape this read."""
+        if not isinstance(claim, RefreshClaim):
+            raise GatewayError('invalid_request')
+        async with self.db.sessions.begin() as session:
+            try:
+                stamp = await storage.dependencies(session, claim.credential_id, active=True)
+            except GatewayError:
+                return False
+            row = await storage.account_state(session, claim.credential_id, create=False)
+            now = await storage.clock(session)
+            expected = claim.model_dump(mode='json', exclude={'credential_id', 'generation', 'deadline'})
+            return bool(row and stamp == expected and row['generation'] == claim.generation
+                        and row['refresh_deadline'] == claim.deadline and now < claim.deadline)
+
     async def save_refresh(self, claim, usage, credits, error_codes):
         if not isinstance(claim, RefreshClaim) or not isinstance(error_codes, (tuple, list)) or len(error_codes) > 2:
             raise GatewayError("invalid_request")
@@ -196,25 +211,27 @@ class QuotaStore:
         count = 0
         # Independent per-account transactions avoid holding one account while
         # requesting a second provider. Whole cleanup is bounded to five seconds.
+        async def recover():
+            nonlocal count
+            async with self.db.sessions() as session:
+                ids = (await session.execute(text("SELECT id FROM codex_reset_requests WHERE state IN ('prepared','dispatched') "
+                    "AND deadline<=clock_timestamp() ORDER BY credential_id,id LIMIT 100"))).scalars().all()
+            for operation_id in ids:
+                async with self.db.sessions.begin() as session:
+                    _, _, row = await storage.operation_context(session, operation_id)
+                    now = await storage.clock(session)
+                    if row["state"] not in {"prepared", "dispatched"} or row["deadline"] > now:
+                        continue
+                    state = "rejected" if row["state"] == "prepared" else "unknown"
+                    code = "operation_expired" if state == "rejected" else "codex_reset_uncertain"
+                    row = (await session.execute(text("UPDATE codex_reset_requests SET state=:state,result_code=:code,"
+                        "generation=generation+1,version=version+1,completed_at=:now WHERE id=:id RETURNING *"),
+                        {"state": state, "code": code, "now": now, "id": operation_id})).mappings().one()
+                    await storage.audit(session, row, "recovered", actor="system")
+                count += 1
         try:
-            async with asyncio.timeout(5):
-                async with self.db.sessions() as session:
-                    ids = (await session.execute(text("SELECT id FROM codex_reset_requests WHERE state IN ('prepared','dispatched') "
-                        "AND deadline<=clock_timestamp() ORDER BY credential_id,id LIMIT 100"))).scalars().all()
-                for operation_id in ids:
-                    async with self.db.sessions.begin() as session:
-                        _, _, row = await storage.operation_context(session, operation_id)
-                        now = await storage.clock(session)
-                        if row["state"] not in {"prepared", "dispatched"} or row["deadline"] > now:
-                            continue
-                        state = "rejected" if row["state"] == "prepared" else "unknown"
-                        code = "operation_expired" if state == "rejected" else "codex_reset_uncertain"
-                        row = (await session.execute(text("UPDATE codex_reset_requests SET state=:state,result_code=:code,"
-                            "generation=generation+1,version=version+1,completed_at=:now WHERE id=:id RETURNING *"),
-                            {"state": state, "code": code, "now": now, "id": operation_id})).mappings().one()
-                        await storage.audit(session, row, "recovered", actor="system")
-                    count += 1
-        except TimeoutError:
+            await asyncio.wait_for(recover(), 5)
+        except asyncio.TimeoutError:
             pass
         return count
 

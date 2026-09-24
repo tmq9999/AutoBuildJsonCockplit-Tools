@@ -11,10 +11,10 @@ from ...oauth import ISSUER
 from ..errors import GatewayError
 from ..providers.catalog import Catalog
 from ..routing.records import ProviderConfig
-from ..proxy.config import ProxySelection
 from ..proxy.pg_leases import PgLeaseStore
 from ..secrets import Ciphertext
 from .refresh import exchange_tokens, verify_tokens
+from .proxy_selection import AccountProxyResolver
 
 CODEX_PROVIDER = UUID("25b064da-1b7a-4ac2-9067-386f04d02a3e")
 
@@ -104,11 +104,7 @@ class CredentialService:
             if row["health"] == "refreshing":
                 await self._mark_uncertain(credential_id)
                 raise GatewayError("refresh_uncertain", 503, "refresh")
-            selection = ProxySelection("direct")
-            if row["profile_id"] is not None:
-                if self.profile_resolver is None:
-                    raise GatewayError("proxy_not_ready", 503)
-                selection = await self.profile_resolver(row["profile_id"])
+            selection = await AccountProxyResolver(self.db, self.profile_resolver).resolve(credential_id)
             async with self.proxies.acquire(selection, owner, deadline) as lease:
                 async with self.db.sessions.begin() as session:
                     await session.execute(text("UPDATE credentials SET health='refreshing',refresh_owner=:owner WHERE id=:id"),

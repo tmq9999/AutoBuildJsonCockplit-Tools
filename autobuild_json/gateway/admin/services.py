@@ -23,6 +23,11 @@ class AdminServices:
         self.transport = transport or Transport(egress or EgressPolicy())
         self.engine = Engine(db, self.catalog, self.ledger, self.proxies, self.transport, vault,
                              digest_key=pepper, proxy_resolver=self.profiles.load)
+        from ..accounts.quota import CodexQuotaService
+        from ..accounts.quota_store import QuotaStore
+        self.quota_store = QuotaStore(db)
+        self.codex_quota = CodexQuotaService(db, self.engine.credentials, self.proxies,
+                                           self.profiles, self.transport, self.quota_store)
         self.catalog_worker = None
         self.sources = self.operations = self.snapshots = self.decisions = None
         self.publisher = self.quotes = self.probe_accounting = None

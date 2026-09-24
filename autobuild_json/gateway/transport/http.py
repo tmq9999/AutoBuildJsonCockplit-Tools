@@ -6,12 +6,32 @@ import ssl
 import time
 from urllib.parse import unquote, urlsplit
 from urllib.parse import urlencode
+from uuid import UUID
 
 import httpcore
 import httpx
 
 from ..errors import GatewayError
 from .network import GuardedBackend
+
+ACCOUNT_ROOT = 'https://chatgpt.com/backend-api/wham'
+ACCOUNT_CALLS = {('GET', 'usage'), ('GET', 'rate-limit-reset-credits'),
+                 ('POST', 'rate-limit-reset-credits/consume')}
+
+
+async def _account_close(response):
+    # Heartbeat loss and the caller's deadline can cancel the owner twice.
+    # Own and join closing before the proxy context is allowed to release.
+    close = asyncio.create_task(asyncio.wait_for(response.aclose(), 5))
+    cancelled = False
+    while not close.done():
+        try:
+            await asyncio.shield(close)
+        except asyncio.CancelledError:
+            cancelled = True
+    await close
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 @dataclass(frozen=True)
@@ -39,6 +59,27 @@ class OutboundRequest:
             if self.method != "GET" or self.body is not None or self.suffix != SUFFIXES[mode]:
                 raise ValueError("invalid_discovery_request")
             validate_query(mode, self.query)
+        elif self.kind == 'codex_account' and self.discovery_mode is None:
+            allowed = {'accept', 'content-type', 'chatgpt-account-id'}
+            if (self.method, self.suffix) not in ACCOUNT_CALLS or self.query:
+                raise ValueError('invalid_account_request')
+            if self.method == 'GET':
+                if self.body is not None:
+                    raise ValueError('invalid_account_body')
+            elif (not isinstance(self.body, dict) or set(self.body) != {'redeem_request_id'}
+                  or not isinstance(self.body['redeem_request_id'], str)
+                  or str(UUID(self.body['redeem_request_id'])) != self.body['redeem_request_id']):
+                raise ValueError('invalid_account_body')
+            if (self.auth_header is None or self.auth_header[0].lower() != 'authorization'
+                    or not self.auth_header[1].startswith('Bearer ') or not self.auth_header[1][7:]
+                    or any(ord(c) <= 32 or ord(c) >= 127 for c in self.auth_header[1][7:])):
+                raise ValueError('invalid_account_auth')
+            names = [name.lower() for name, _ in self.headers]
+            if len(names) != len(set(names)) or names.count('chatgpt-account-id') != 1:
+                raise ValueError('invalid_account_headers')
+            if any(not value or any(ord(c) <= 32 or ord(c) >= 127 for c in value)
+                   for name, value in self.headers if name.lower() == 'chatgpt-account-id'):
+                raise ValueError('invalid_account_headers')
         elif self.kind == "inference" and self.discovery_mode is None:
             if self.query not in {(), (("alt", "sse"),)}:
                 raise ValueError("invalid_upstream_query")
@@ -148,6 +189,10 @@ class Transport:
     @asynccontextmanager
     async def open(self, route, proxy, request):
         try:
+            if request.kind == 'codex_account' and route.root != ACCOUNT_ROOT:
+                raise ValueError('invalid_account_root')
+            if request.kind == 'codex_account':
+                request.__post_init__()
             remaining = request.deadline - time.monotonic()
             if remaining <= 0:
                 raise GatewayError("deadline_exceeded", 504, "upstream")
@@ -158,19 +203,24 @@ class Transport:
             if request.auth_header:
                 headers[request.auth_header[0]] = request.auth_header[1]
             adapter = self.adapter or CoreTransport(self.policy, proxy)
-            if request.kind == "discovery":
+            if request.kind in {"discovery", "codex_account"}:
                 # AsyncClient logs full URLs at INFO, including opaque cursors.
                 # Handle the guarded transport directly for this request kind.
                 try:
                     url = route.root.rstrip("/") + "/" + request.suffix + ("?"+urlencode(request.query) if request.query else "")
                     timeout = {"connect": min(10, remaining), "read": min(60, remaining),
                                "write": min(60, remaining), "pool": min(60, remaining)}
-                    call = httpx.Request(request.method, url, headers=headers, extensions={"timeout": timeout})
+                    call = httpx.Request(request.method, url, headers=headers,
+                                         json=request.body if request.body is not None else None,
+                                         extensions={"timeout": timeout})
                     response = await asyncio.wait_for(adapter.handle_async_request(call), timeout=remaining)
                     try:
                         yield UpstreamResponse(response, request.deadline)
                     finally:
-                        await response.aclose()
+                        if request.kind == 'codex_account':
+                            await _account_close(response)
+                        else:
+                            await response.aclose()
                 finally:
                     if self.adapter is None:
                         await adapter.aclose()
