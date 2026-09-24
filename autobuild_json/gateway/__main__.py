@@ -29,6 +29,11 @@ def build_services(settings):
                             trusted_proxy_origins=settings.trusted_egress_proxies))
 
 
+async def run_maintenance(services, stopped):
+    from .maintenance import Maintenance
+    await Maintenance(services.db, worker=services.build_catalog_worker()).run(stopped)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Optional multi-protocol gateway; private administration is separate")
     sub = parser.add_subparsers(dest="action", required=True)
@@ -80,8 +85,10 @@ def main():
             asyncio.run(snapshot())
             print("Gateway snapshot operation completed.")
         elif args.action == "maintenance":
-            from .maintenance import Maintenance
-            asyncio.run(Maintenance(services.db).run(asyncio.Event()))
+            try:
+                asyncio.run(run_maintenance(services, asyncio.Event()))
+            finally:
+                asyncio.run(services.close())
         elif args.action == "admin":
             from ..api import create_app
             from ..settings import Settings

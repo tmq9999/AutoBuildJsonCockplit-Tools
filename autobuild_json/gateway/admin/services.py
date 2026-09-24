@@ -23,8 +23,32 @@ class AdminServices:
         self.transport = transport or Transport(egress or EgressPolicy())
         self.engine = Engine(db, self.catalog, self.ledger, self.proxies, self.transport, vault,
                              digest_key=pepper, proxy_resolver=self.profiles.load)
+        self.catalog_worker = None
         self._loop = None
         self._thread = None
+
+    def build_catalog_worker(self):
+        """Compose the maintenance worker without starting network/background work."""
+        if self.catalog_worker is not None:
+            return self.catalog_worker
+        from ..catalog.sources import SourceRepository
+        from ..catalog.operations import OperationStore
+        from ..catalog.snapshots import SnapshotStore
+        from ..catalog.runner import OperationRunner
+        from ..catalog.worker import CatalogWorker
+        from ..catalog.scheduler import Scheduler
+        from ..providers.discovery.client import DiscoveryClient
+        from ..providers.limits import ProviderLimits
+        sources = SourceRepository(self.db, self.vault, self.pepper)
+        operations = OperationStore(self.db, sources)
+        snapshots = SnapshotStore(self.db, sources, operations,
+                                   self.vault.derive_key("client_keys", "catalog-cursor-v1"))
+        discovery = DiscoveryClient(self.transport, ProviderLimits(self.db), self.engine.credential)
+        runner = OperationRunner(sources, operations, snapshots, discovery, self.proxies,
+                                 self.profiles, self.catalog)
+        self.catalog_operations, self.catalog_sources = operations, sources
+        self.catalog_worker = CatalogWorker(self.db, runner, Scheduler(self.db, operations, sources))
+        return self.catalog_worker
 
     def load_proxy_sync(self, identity):
         if self._loop is None:

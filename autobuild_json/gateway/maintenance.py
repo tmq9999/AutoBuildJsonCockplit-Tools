@@ -18,8 +18,8 @@ def recover_request(state, dispatched):
 
 
 class Maintenance:
-    def __init__(self, db):
-        self.db, self.leases, self.ledger = db, PgLeaseStore(db), Ledger(db)
+    def __init__(self, db, worker=None):
+        self.db, self.leases, self.ledger, self.worker = db, PgLeaseStore(db), Ledger(db), worker
 
     async def tick(self):
         lease = await self.leases.claim("maintenance:gateway", uuid4(), datetime.now(timezone.utc)+timedelta(seconds=30))
@@ -62,14 +62,26 @@ class Maintenance:
             await self.leases.release(lease)
 
     async def run(self, stopped):
-        while not stopped.is_set():
-            try:
-                await self.tick()
-            except Exception:
-                # Hold state stays in PostgreSQL for another pass. Do not log DB
-                # driver exception strings that may contain connection credentials.
-                pass
-            try:
-                await asyncio.wait_for(stopped.wait(), 15)
-            except asyncio.TimeoutError:
-                pass
+        worker_task = asyncio.create_task(self.worker.run(stopped)) if self.worker is not None else None
+        try:
+            while not stopped.is_set():
+                try:
+                    await self.tick()
+                except Exception:
+                    # Hold state stays in PostgreSQL for another pass. Do not log DB
+                    # driver exception strings that may contain connection credentials.
+                    pass
+                if self.worker is not None:
+                    try:
+                        await self.worker.repair_expired()
+                    except Exception:
+                        pass
+                try:
+                    await asyncio.wait_for(stopped.wait(), 15)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if worker_task is not None:
+                stopped.set()
+                worker_task.cancel()
+                await asyncio.gather(worker_task, return_exceptions=True)
