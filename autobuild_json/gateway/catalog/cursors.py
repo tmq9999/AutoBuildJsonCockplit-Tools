@@ -25,7 +25,10 @@ def _b64(value: bytes) -> str:
 def _unb64(value: str) -> bytes:
     if not isinstance(value, str) or not value or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for ch in value):
         raise ValueError
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    if _b64(decoded) != value:
+        raise ValueError
+    return decoded
 
 
 def _validate(payload: Any) -> dict[str, Any]:

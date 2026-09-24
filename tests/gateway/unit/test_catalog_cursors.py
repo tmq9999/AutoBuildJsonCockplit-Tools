@@ -34,6 +34,23 @@ def test_cursor_rejects_expired_and_unknown_fields():
         encode_cursor(payload, b"k" * 32)
 
 
+def test_cursor_rejects_noncanonical_signature_padding_bits():
+    from autobuild_json.gateway.catalog.cursors import decode_cursor, encode_cursor
+    from autobuild_json.gateway.errors import GatewayError
+    payload = {"v": 1, "source": "00000000-0000-0000-0000-000000000001",
+               "run": "00000000-0000-0000-0000-000000000002", "previous": None,
+               "after": "model-a", "filter": "changed", "exp": 2000000000}
+    token = encode_cursor(payload, b"k" * 32)
+    assert decode_cursor(token, b"k" * 32, 1900000000) == payload
+    # SHA256's 32-byte digest has two unused bits in its last base64 character.
+    # Changing only these bits is a different wire token with identical bytes.
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    last = alphabet.index(token[-1])
+    for offset in (1, 2, 3):
+        with pytest.raises(GatewayError, match="invalid_request"):
+            decode_cursor(token[:-1] + alphabet[last + offset], b"k" * 32, 1900000000)
+
+
 def test_cursor_rejects_oversized_after_id():
     from autobuild_json.gateway.catalog.cursors import encode_cursor
     from autobuild_json.gateway.errors import GatewayError
