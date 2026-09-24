@@ -10,7 +10,7 @@ from sqlalchemy import text
 from ..errors import GatewayError
 from ..identity.policy import KeyPolicy
 from .records import Hold
-from .units import weighted_micro
+from .units import hold_micro, weighted_usage_micro
 
 TERMINAL = {"completed", "released", "adjusted"}
 
@@ -68,7 +68,10 @@ class Ledger:
             override = next((rate for rate in policy.model_overrides if rate.model_id == admission.model_id), None)
             input_micro = override.input_micro if override else admission.input_micro
             output_micro = override.output_micro if override else admission.output_micro
-            amount = weighted_micro(admission.bounds.input_tokens, admission.bounds.output_tokens, input_micro, output_micro)
+            rates = override if override else admission
+            cache_read_micro = input_micro if rates.cache_read_micro is None else rates.cache_read_micro
+            cache_write_micro = input_micro if rates.cache_write_micro is None else rates.cache_write_micro
+            amount = hold_micro(admission.bounds, input_micro, output_micro, cache_read_micro, cache_write_micro)
             if (admission.protocol not in policy.protocols or
                     not (policy.all_models or admission.model_id in policy.model_ids)):
                 raise GatewayError("permission_denied", 403, "policy")
@@ -95,13 +98,15 @@ class Ledger:
             await self._buckets(session, key["id"], periods, policy, amount)
             await session.execute(text("""INSERT INTO requests
                 (id,key_id,model_id,policy_version,protocol,state,admitted_at,deadline,periods,input_micro,
-                 output_micro,input_bound,output_bound,hold,idempotency_digest,payload_digest,idempotency_expires_at)
+                 output_micro,cache_read_micro,cache_write_micro,input_bound,output_bound,hold,
+                 idempotency_digest,payload_digest,idempotency_expires_at)
                 VALUES (:id,:key,:model,:version,:protocol,'reserved',:now,:deadline,CAST(:periods AS jsonb),
-                        :im,:om,:ib,:ob,:hold,:digest,:payload,:expiry)"""),
+                        :im,:om,:cr,:cw,:ib,:ob,:hold,:digest,:payload,:expiry)"""),
                 {"id": admission.request_id, "key": key["id"], "model": admission.model_id,
                  "version": key["version"], "protocol": admission.protocol, "now": now,
                  "deadline": admission.deadline, "periods": json.dumps(periods), "im": input_micro,
-                 "om": output_micro, "ib": admission.bounds.input_tokens, "ob": admission.bounds.output_tokens,
+                 "om": output_micro, "cr": cache_read_micro, "cw": cache_write_micro,
+                 "ib": admission.bounds.input_tokens, "ob": admission.bounds.output_tokens,
                  "hold": amount, "digest": admission.idempotency_digest, "payload": admission.payload_digest,
                  "expiry": now + timedelta(hours=24) if admission.idempotency_digest else None})
         return Hold(admission.request_id, admission.principal.key_id, amount)
@@ -129,13 +134,14 @@ class Ledger:
         async with self._request(hold.request_id) as (session, row, key):
             if row["state"] != "reserved" or hold.key_id != key["id"]:
                 raise GatewayError("invalid_state", 409, "quota")
-            amount = weighted_micro(bounds.input_tokens, bounds.output_tokens, int(row["input_micro"]), int(row["output_micro"]))
+            amount = hold_micro(bounds, int(row["input_micro"]), int(row["output_micro"]),
+                                int(row["cache_read_micro"]), int(row["cache_write_micro"]))
             await self._buckets(session, key["id"], row["periods"], KeyPolicy.model_validate(key["policy"]), amount - int(row["hold"]))
             await session.execute(text("UPDATE requests SET hold=:amount,input_bound=:ib,output_bound=:ob WHERE id=:id"),
                                   {"id": row["id"], "amount": amount, "ib": bounds.input_tokens, "ob": bounds.output_tokens})
             return Hold(row["id"], key["id"], amount)
 
-    async def _finalize(self, session, row, charge, state, *, usage=None, actor=None, reason=None):
+    async def _finalize(self, session, row, charge, state, *, usage=None, computed_micro=None, actor=None, reason=None):
         for window, period in row["periods"].items():
             await session.execute(text("UPDATE quota_buckets SET held=held-:hold,spent=spent+:charge "
                 "WHERE key_id=:key AND window_kind=:window AND period=:period"),
@@ -144,8 +150,9 @@ class Ledger:
             "VALUES (:entry,:id,'settlement',:amount,:source,:actor,:reason)"),
             {"entry": uuid4(), "id": row["id"], "amount": charge,
              "source": "admin_adjusted" if actor else "provider" if usage else "not_dispatched", "actor": actor, "reason": reason})
+        evidence = dict(asdict(usage), computed_micro=computed_micro, charged_micro=charge) if usage else None
         await session.execute(text("UPDATE requests SET state=:state,usage=CAST(:usage AS jsonb),reason=:reason WHERE id=:id"),
-            {"id": row["id"], "state": state, "usage": json.dumps(asdict(usage)) if usage else None, "reason": reason})
+            {"id": row["id"], "state": state, "usage": json.dumps(evidence) if evidence else None, "reason": reason})
 
     async def settle(self, request_id, usage):
         async with self._request(request_id) as (session, row, _):
@@ -153,8 +160,10 @@ class Ledger:
                 return
             if row["state"] not in {"dispatched", "usage_pending"}:
                 raise GatewayError("invalid_state", 409, "quota")
-            charge = weighted_micro(usage.input_tokens, usage.output_tokens, int(row["input_micro"]), int(row["output_micro"]))
+            charge = weighted_usage_micro(usage, int(row["input_micro"]), int(row["output_micro"]),
+                                          int(row["cache_read_micro"]), int(row["cache_write_micro"]))
             await self._finalize(session, row, min(charge, int(row["hold"])), "completed", usage=usage,
+                                 computed_micro=charge,
                                  reason="usage_exceeded_bound" if charge > row["hold"] or usage.input_tokens>row['input_bound'] or usage.output_tokens>row['output_bound'] else None)
 
     async def release_unspent(self, request_id, evidence):

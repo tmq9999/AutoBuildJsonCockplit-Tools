@@ -150,7 +150,8 @@ class Engine:
         bounds = Bounds(route.bounds.input_tokens, max_output)
         deadline = min(meta.deadline, datetime.now(timezone.utc)+timedelta(seconds=route.timeout))
         hold = await self.ledger.reserve(Admission(meta.request_id, principal, route.public_model_id, bounds,
-            route.input_micro, route.output_micro, deadline, meta.idempotency_digest, meta.payload_digest, meta.protocol))
+            route.input_micro, route.output_micro, deadline, meta.idempotency_digest, meta.payload_digest, meta.protocol,
+            cache_read_micro=route.cache_read_micro, cache_write_micro=route.cache_write_micro))
         stack = AsyncExitStack()
         dispatched = False
         budget_attempt = None

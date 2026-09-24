@@ -216,7 +216,8 @@ class Catalog:
             routes.append(RouteSnapshot(row["binding_id"], row["provider_id"], row["credential_id"], model_id,
                 binding["upstream_model"], provider.adapter, provider.root, provider.auth_mode, row["version"], caps,
                 Bounds(binding["input_bound"], binding["output_bound"]), row["credential_profile"] or provider.proxy_profile_id, provider.budget_id,
-                binding["priority"], model.input_micro, model.output_micro, provider.timeout, provider.cost_schedule, provider.wire_api))
+                binding["priority"], model.input_micro, model.output_micro, provider.timeout, provider.cost_schedule, provider.wire_api,
+                cache_read_micro=model.cache_read_micro, cache_write_micro=model.cache_write_micro))
         if not routes and not cooldowns:
             raise GatewayError("unsupported_feature" if mismatch else "upstream_unavailable", 400 if mismatch else 503)
         retry_after = min(86400, max(0, ceil((min(cooldowns) - now).total_seconds()))) if cooldowns else 0

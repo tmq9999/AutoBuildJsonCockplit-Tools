@@ -134,3 +134,31 @@ async def test_catalog_backup_refuses_revision_mismatch(pg_db, tmp_path):
             await session.execute(text("UPDATE alembic_version SET version_num='0009_provider_admission'"))
         with pytest.raises(GatewayError, match="invalid_state"):
             await BackupService(clone, vault).restore(backup)
+
+
+async def test_backup_roundtrip_preserves_cache_snapshots_and_pending_settlement(pg_db, tmp_path):
+    from sqlalchemy import text
+    from autobuild_json.gateway.storage.backup import BackupService
+    from autobuild_json.gateway.metering.ledger import Ledger
+    from autobuild_json.gateway.metering.records import Usage
+    from tests.gateway.catalog_support import synthetic_vault
+    from tests.gateway.harness import gateway_environment
+    from .test_cache_ledger import admission_for, RATES, QUOTA
+    from .test_ledger import bucket
+
+    async with gateway_environment(pg_db, quota=QUOTA) as env:
+        request = await admission_for(env, **RATES)
+        await env.ledger.reserve(request)
+        await env.ledger.mark_dispatched(request.request_id, uuid4())
+        await env.ledger.mark_pending(request.request_id, "interrupted")
+        vault = synthetic_vault()
+        path = tmp_path / "cache.enc"
+        await BackupService(pg_db, vault).export(path)
+        async with empty_clone(pg_db) as clone:
+            await BackupService(clone, vault).restore(path)
+            async with clone.sessions() as session:
+                row = (await session.execute(text("SELECT input_micro,output_micro,cache_read_micro,cache_write_micro FROM requests"))).one()
+            assert row == (1_000_000, 3_000_000, 100_000, 1_250_000)
+            assert await bucket(clone, env.key_id) == (0, 1_850_000_000)
+            await Ledger(clone).settle(request.request_id, Usage(1000, 200, cached_read=600, cached_write=100))
+            assert await bucket(clone, env.key_id) == (1_085_000_000, 0)

@@ -118,7 +118,8 @@ async def test_publish_existing_model_preserves_coefficients_and_enabled(pg_db):
 
     publisher, _, _, selected, request = await publication_case(pg_db)
     model = ModelConfig(model_id="existing", identity="existing", enabled=False,
-                        input_micro=1234567, output_micro=7654321)
+                        input_micro=1234567, output_micro=7654321,
+                        cache_read_micro=0, cache_write_micro=10**24 + 123)
     await Catalog(pg_db, synthetic_vault()).put_model(model)
     async with pg_db.sessions() as session:
         exact_before = await session.scalar(text("SELECT config::text FROM public_models WHERE id='existing'"))
@@ -146,6 +147,32 @@ async def test_publish_respects_new_decision_after_review(pg_db):
         assert await session.scalar(text("SELECT count(*) FROM catalog_publications")) == 0
         assert await session.scalar(text("SELECT count(*) FROM audit_events WHERE action='catalog.published'")) == 0
         assert await session.scalar(text("SELECT ignored FROM catalog_decisions WHERE upstream_id='a'")) is True
+
+
+async def test_publish_raw_model_cache_rates_reach_routing_snapshot(pg_db):
+    import json
+    from types import SimpleNamespace
+    from autobuild_json.gateway.identity.policy import KeyPolicy
+    from autobuild_json.gateway.identity.service import IdentityService
+    from autobuild_json.gateway.providers.catalog import Catalog
+    from tests.gateway.catalog_support import synthetic_vault
+
+    publisher, _, _, selected, request = await publication_case(pg_db, ("a",))
+    payload = request(selected("a")).model_dump(mode="json")
+    payload["selections"][0]["new_model"].update(cache_read_micro=0, cache_write_micro=10**24 + 123)
+    parsed = PublicationRequest.model_validate_json(json.dumps(payload))
+    await publisher.publish(parsed, "admin")
+    identity = IdentityService(pg_db, b"p" * 32)
+    owner = await identity.create_customer("Cache publication")
+    key = await identity.create_key(owner, KeyPolicy(model_ids={"a"}, protocols={"openai"}))
+    principal = await identity.authenticate(key.secret, "openai")
+    routes = await Catalog(pg_db, synthetic_vault()).candidates(
+        principal, SimpleNamespace(model="a", required_capabilities={"text"}))
+    assert (routes[0].cache_read_micro, routes[0].cache_write_micro) == (0, 10**24 + 123)
+    changed = json.loads(json.dumps(payload))
+    changed["selections"][0]["new_model"]["cache_read_micro"] = 1
+    with pytest.raises(GatewayError, match="catalog_conflict"):
+        await publisher.publish(PublicationRequest.model_validate_json(json.dumps(changed)), "admin")
 
 
 async def test_publish_after_cosmetic_source_edit_with_current_stamp(pg_db):
