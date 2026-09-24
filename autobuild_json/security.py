@@ -147,7 +147,11 @@ class BoundaryMiddleware:
         if scope["method"] != "GET":
             return False
         path = scope.get("path", "")
-        if path == "/api/service/catalog/sources":
+        if path == "/api/service/oauth-accounts":
+            allowed = {"limit", "after"}
+        elif path in {"/api/service/usage/accounts", "/api/service/usage/requests"}:
+            allowed = {"credential_id", "model_id", "from", "to", "limit", "after"}
+        elif path == "/api/service/catalog/sources":
             allowed = {"provider_id"}
         elif re.fullmatch(r"/api/service/catalog/sources/[0-9a-fA-F-]{36}/entries", path):
             allowed = {"cursor", "limit", "diff"}
@@ -160,7 +164,7 @@ class BoundaryMiddleware:
             return False
         try:
             pairs = parse_qsl(raw.decode("ascii"), keep_blank_values=True, strict_parsing=True,
-                              errors="strict", max_num_fields=3)
+                              errors="strict", max_num_fields=len(allowed))
             return bool(pairs) and len({key for key, _ in pairs}) == len(pairs) and all(
                 key in allowed and not any(ord(char) < 32 or ord(char) == 127 for char in value)
                 for key, value in pairs)

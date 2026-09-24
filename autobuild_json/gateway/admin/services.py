@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import threading
 
 from ..identity.service import IdentityService
@@ -18,6 +20,8 @@ class AdminServices:
         self.db, self.vault, self.pepper = db, vault, pepper
         self.identity, self.catalog = IdentityService(db, pepper), Catalog(db, vault)
         self.ledger, self.budgets = Ledger(db), BudgetService(db)
+        from ..metering.adjustments import QuotaAdjustments
+        self.adjustments = QuotaAdjustments(db)
         self.profiles = ProfileStore(db, vault, pepper)
         self.proxies = ProxyManager(PgLeaseStore(db))
         self.transport = transport or Transport(egress or EgressPolicy())
@@ -30,6 +34,8 @@ class AdminServices:
                                            self.profiles, self.transport, self.quota_store)
         from ..accounts.reset_credits import ResetCreditService
         self.codex_reset = ResetCreditService(self.codex_quota)
+        from ..routing.pool_store import PoolStore
+        self.pool_store = PoolStore(db, scope_key=hmac.digest(pepper, b"gateway-pool-scope-v1", hashlib.sha256))
         self.catalog_worker = None
         self.sources = self.operations = self.snapshots = self.decisions = None
         self.publisher = self.quotes = self.probe_accounting = None

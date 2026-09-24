@@ -66,6 +66,12 @@ def mount_extra(router, services):
     @router.delete("/proxies/{identity}")
     async def delete_proxy(identity: UUID, payload: VersionInput):
         async with services.db.sessions.begin() as session:
+            # Lock before checking references: account PATCH holds KEY SHARE
+            # through reference creation, so READ COMMITTED sees its commit.
+            version = await session.scalar(text("SELECT version FROM proxy_profiles WHERE id=:id FOR UPDATE"),
+                                           {"id": identity})
+            if version != payload.version:
+                raise GatewayError("version_conflict", 409)
             if await session.scalar(
                 text("SELECT count(*) FROM providers WHERE config->>'proxy_profile_id'=:id"),
                 {"id": str(identity)},

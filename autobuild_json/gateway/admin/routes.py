@@ -11,7 +11,6 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..errors import GatewayError
-from ..identity.service import key_view
 from ..routing.records import ProviderConfig, ModelConfig, BindingConfig
 from .schemas import CustomerInput, KeyInput, KeyUpdate, VersionInput, EnabledInput, CredentialInput, ProxyInput, AdjustmentInput, OAuthImportInput, PlaygroundInput
 from .usage import UsageReports
@@ -33,7 +32,9 @@ class SafeAdminRoute(APIRoute):
                 headers = {"Retry-After": str(exc.retry_after)} if type(exc.retry_after) is int and 0 <= exc.retry_after <= 86400 else None
                 catalog = (request.url.path.startswith(("/api/service/catalog/", "/api/service/provider-operations/"))
                            or request.url.path.endswith("/discover"))
-                status = 422 if catalog and exc.status == 400 else exc.status
+                codex = request.url.path.startswith(("/api/service/oauth-accounts", "/api/service/account-pools/",
+                    "/api/service/reset-requests/", "/api/service/usage/accounts", "/api/service/usage/requests")) or request.url.path.endswith("/quota-adjust")
+                status = 422 if (catalog or codex) and exc.status == 400 else exc.status
                 response = JSONResponse(exc.to_dict(), status_code=status, headers=headers)
             except SQLAlchemyError:
                 response = JSONResponse({"error": "STORAGE_UNAVAILABLE"}, status_code=503)
@@ -65,8 +66,7 @@ def create_admin_router(services, authorized):
 
     @router.get("/keys")
     async def keys():
-        async with services.db.sessions() as session:
-            return [key_view(row) for row in (await session.execute(text("SELECT * FROM api_keys ORDER BY created_at DESC"))).mappings()]
+        return await services.identity.admin_key_balances()
 
     @router.post("/keys", status_code=201)
     async def create_key(payload: KeyInput):
@@ -248,4 +248,6 @@ def create_admin_router(services, authorized):
     mount_extra(router,services)
     from .catalog_routes import mount_catalog_routes
     mount_catalog_routes(router, services)
+    from .codex_accounts import mount_codex_routes
+    mount_codex_routes(router, services)
     return router

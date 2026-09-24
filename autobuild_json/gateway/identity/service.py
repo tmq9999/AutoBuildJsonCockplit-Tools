@@ -1,7 +1,7 @@
 import hmac
 from uuid import uuid4
 
-from sqlalchemy import insert, select, update, func
+from sqlalchemy import insert, select, update, func, text
 
 from ..errors import GatewayError
 from ..secrets import issue_key, key_digest
@@ -24,6 +24,23 @@ class IdentityService:
     async def _audit(self, session, action, identity, details=None):
         await session.execute(insert(audit_events).values(id=uuid4(), actor=self.actor,
             action=action, record_id=identity, details=details or {}))
+
+    async def admin_key_balances(self):
+        """Storage-only total balances; null limits never hide known accounting."""
+        async with self.db.sessions() as session:
+            rows = (await session.execute(text("""SELECT k.*,COALESCE(b.spent,0) AS spent,COALESCE(b.held,0) AS held
+                FROM api_keys k LEFT JOIN quota_buckets b ON b.key_id=k.id AND b.window_kind='total'
+                ORDER BY k.created_at DESC,k.id"""))).mappings().all()
+        result = []
+        for row in rows:
+            view = key_view(row).model_dump(mode="json")
+            total = view["policy"]["total_micro"]
+            spent, held = int(row["spent"]), int(row["held"])
+            view["balance"] = {"total_micro": str(total) if total is not None else None,
+                               "spent_micro": str(spent), "held_micro": str(held),
+                               "available_micro": str(total-spent-held) if total is not None else None}
+            result.append(view)
+        return result
 
     async def create_customer(self, name):
         if not isinstance(name, str) or not 1 <= len(name.strip()) <= 200 or any(ord(c) < 32 for c in name):
