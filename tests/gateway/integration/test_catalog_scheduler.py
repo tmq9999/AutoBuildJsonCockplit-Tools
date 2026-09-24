@@ -104,3 +104,16 @@ async def test_locked_provider_does_not_lock_source_before_manual_update(pg_db):
         await session.execute(text("SELECT id FROM catalog_sources WHERE id=:id FOR UPDATE NOWAIT"), {"id": source.id})
     await asyncio.wait_for(sources.update(source.id, source.version, SourceInput(provider_id=source.provider_id,
         credential_id=source.credential_id, mode=source.mode, schedule_enabled=True), "admin"), 2)
+
+
+async def test_scheduler_and_manual_source_update_event_gate_no_deadlock(pg_db):
+    from autobuild_json.gateway.catalog.scheduler import Scheduler
+    from autobuild_json.gateway.catalog.records import SourceInput
+    sources, source = await source_case(pg_db)
+    await due(pg_db, source)
+    scheduler = Scheduler(pg_db, OperationStore(pg_db, sources), sources)
+    update = SourceInput(provider_id=source.provider_id, credential_id=source.credential_id,
+                         mode=source.mode, schedule_enabled=True)
+    results = await asyncio.wait_for(asyncio.gather(scheduler.tick(),
+        sources.update(source.id, source.version, update, "admin")), 3)
+    assert isinstance(results[0], list) and results[1].id == source.id

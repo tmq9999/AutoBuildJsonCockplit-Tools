@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import signal
 
 
 def initialize_keyring(path):
@@ -31,7 +32,22 @@ def build_services(settings):
 
 async def run_maintenance(services, stopped):
     from .maintenance import Maintenance
-    await Maintenance(services.db, worker=services.build_catalog_worker()).run(stopped)
+    loop = asyncio.get_running_loop()
+    handlers = []
+    def stop():
+        stopped.set()
+    try:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop)
+            handlers.append(sig)
+    except (NotImplementedError, RuntimeError):
+        handlers = []
+    try:
+        await Maintenance(services.db, worker=services.build_catalog_worker()).run(stopped)
+    finally:
+        for sig in handlers:
+            loop.remove_signal_handler(sig)
+        await services.close()
 
 
 def main():

@@ -76,6 +76,11 @@ class Maintenance:
                         await self.worker.repair_expired()
                     except Exception:
                         pass
+                    try:
+                        from .catalog.retention import Retention
+                        await Retention(self.db).purge(datetime.now(timezone.utc), limit=100)
+                    except Exception:
+                        pass
                 try:
                     await asyncio.wait_for(stopped.wait(), 15)
                 except asyncio.TimeoutError:

@@ -13,6 +13,16 @@ class CatalogWorker:
 
     async def _execute(self, identity):
         try:
+            async with self.db.sessions() as session:
+                row = (await session.execute(text("SELECT kind,dispatched_at,budget_id,upper_cost,usage,cost FROM provider_operations WHERE id=:id"), {"id": identity})).mappings().first()
+            if row is not None and row["kind"] == "probe" and self.probe_accounting is None:
+                # Never guess about an evidence-bearing probe. A clean, undispatched
+                # probe can be terminally rejected without touching money columns.
+                if row["dispatched_at"] is not None or row["budget_id"] is not None or row["upper_cost"] is not None or row["usage"] is not None or row["cost"] is not None:
+                    return
+                async with self.db.sessions.begin() as session:
+                    await session.execute(text("UPDATE provider_operations SET state='failed',error_code='unsupported_feature',finished_at=clock_timestamp(),version=version+1 WHERE id=:id AND state='queued'"), {"id": identity})
+                return
             await self.runner.run(identity)
         except asyncio.CancelledError:
             raise
@@ -40,7 +50,19 @@ class CatalogWorker:
                         await self.repair_expired()
                         next_repair = loop.time() + 15
                     if self.scheduler is not None:
-                        await self.scheduler.tick()
+                        tick = asyncio.create_task(self.scheduler.tick())
+                        stop_wait = asyncio.create_task(stopped.wait())
+                        done, pending = await asyncio.wait({tick, stop_wait}, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+                        for task in pending:
+                            task.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        if not done:
+                            tick.cancel()
+                            await asyncio.gather(tick, return_exceptions=True)
+                            continue
+                        if stop_wait in done:
+                            break
+                        await tick
                     if len(tasks) < 2:
                         async with self.db.sessions() as session:
                             queued = (await session.execute(text("SELECT id FROM provider_operations WHERE state='queued' "
@@ -96,4 +118,9 @@ class CatalogWorker:
                 if recover is None:
                     recover = self.probe_accounting.recover_expired
                 count += bool(await recover(identity))
+        try:
+            from .retention import Retention
+            await Retention(self.db).purge(__import__("datetime").datetime.now(__import__("datetime").timezone.utc), limit=100)
+        except Exception:
+            pass
         return count
