@@ -6,6 +6,7 @@ SAFE_CODES = frozenset({
     "storage_unavailable", "usage_pending", "invalid_usage", "invalid_state", "duplicate_request",
     "invalid_keyring", "secret_unavailable", "reauth_required", "refresh_uncertain", "egress_denied",
     "payload_mismatch", "budget_exceeded", "catalog_incomplete", "catalog_snapshot_stale",
+    "catalog_limit_exceeded", "catalog_conflict",
     "kiot_key_invalid", "kiot_unavailable", "kiot_allocation_uncertain",
     "operation_conflict", "claim_lost", "operation_cancelled", "operation_expired",
 })

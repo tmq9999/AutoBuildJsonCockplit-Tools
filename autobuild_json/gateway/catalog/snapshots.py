@@ -32,8 +32,9 @@ _SENSITIVE = re.compile(r"(?:secret|token|password|api[_-]?key|authorization|coo
 
 def _safe_entry(entry: CatalogEntry) -> CatalogEntry:
     nodes = 0
+    normalized_limits = frozenset({"input_token_limit", "output_token_limit"})
 
-    def walk(value, depth=0):
+    def walk(value, depth=0, path=()):
         nonlocal nodes
         nodes += 1
         if nodes > 1000 or depth > 12:
@@ -42,19 +43,26 @@ def _safe_entry(entry: CatalogEntry) -> CatalogEntry:
             for key, child in value.items():
                 if not isinstance(key, str) or _SENSITIVE.search(key) or any(ord(char) < 32 or ord(char) == 127 for char in key):
                     raise ValueError("sensitive_metadata")
-                walk(child, depth + 1)
+                walk(child, depth + 1, (*path, key))
         elif isinstance(value, (list, tuple)):
             for child in value:
-                walk(child, depth + 1)
+                walk(child, depth + 1, path)
         elif isinstance(value, str):
-            if any(ord(char) < 32 or ord(char) == 127 for char in value) or _SENSITIVE.search(value):
+            normalized_price_unit = path == ("pricing", "unit") and value in {"per_token", "per_million_tokens"}
+            if any(ord(char) < 32 or ord(char) == 127 for char in value) or (
+                _SENSITIVE.search(value) and not normalized_price_unit
+            ):
                 raise ValueError("sensitive_metadata")
 
     try:
         for name, observed in entry.metadata.items():
-            if _SENSITIVE.search(name) or any(ord(char) < 32 or ord(char) == 127 for char in name):
+            if (_SENSITIVE.search(name) and name not in normalized_limits) or any(
+                ord(char) < 32 or ord(char) == 127 for char in name
+            ):
                 raise ValueError("sensitive_metadata")
-            walk(observed.value)
+            if name in normalized_limits and (type(observed.value) is not int or not 0 < observed.value <= 1_000_000_000):
+                raise ValueError("invalid_limit")
+            walk(observed.value, path=(name,))
         return entry.model_copy(deep=True)
     except (TypeError, ValueError, ValidationError) as exc:
         raise GatewayError("invalid_request") from exc

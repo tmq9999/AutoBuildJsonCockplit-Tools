@@ -158,6 +158,23 @@ class Transport:
             if request.auth_header:
                 headers[request.auth_header[0]] = request.auth_header[1]
             adapter = self.adapter or CoreTransport(self.policy, proxy)
+            if request.kind == "discovery":
+                # AsyncClient logs full URLs at INFO, including opaque cursors.
+                # Handle the guarded transport directly for this request kind.
+                try:
+                    url = route.root.rstrip("/") + "/" + request.suffix + ("?"+urlencode(request.query) if request.query else "")
+                    timeout = {"connect": min(10, remaining), "read": min(60, remaining),
+                               "write": min(60, remaining), "pool": min(60, remaining)}
+                    call = httpx.Request(request.method, url, headers=headers, extensions={"timeout": timeout})
+                    response = await asyncio.wait_for(adapter.handle_async_request(call), timeout=remaining)
+                    try:
+                        yield UpstreamResponse(response, request.deadline)
+                    finally:
+                        await response.aclose()
+                finally:
+                    if self.adapter is None:
+                        await adapter.aclose()
+                return
             async with httpx.AsyncClient(transport=adapter, trust_env=False, follow_redirects=False,
                 timeout=httpx.Timeout(min(60, remaining), connect=min(10, remaining))) as client:
                 url = route.root.rstrip("/") + "/" + request.suffix + ("?"+urlencode(request.query) if request.query else "")
