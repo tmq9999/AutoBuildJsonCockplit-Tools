@@ -103,7 +103,7 @@ class OpenAIAdapter:
         self.transport, self.credential_resolver = transport, credential_resolver
 
     @asynccontextmanager
-    async def open(self, request, route, lease):
+    async def open(self, request, route, lease, *, on_rejected=None):
         request.validate_provider("openai_compatible")
         native = getattr(route, "wire_api", "chat") == "responses"
         body = (ResponsesCodec() if native else OpenAIChatCodec()).upstream_body(request, route.upstream_model)
@@ -115,6 +115,9 @@ class OpenAIAdapter:
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status != 200:
                 if response.status in {400, 401, 403, 404, 422, 429}:
-                    raise UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
+                    rejected = UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
+                    if on_rejected is not None:
+                        await on_rejected(rejected)
+                    raise rejected
                 raise GatewayError("rate_limited" if response.status == 429 else "upstream_error", 502, "upstream")
             yield ProviderStream(response, responses_events(response) if native else chat_events(response))

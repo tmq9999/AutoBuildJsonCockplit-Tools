@@ -58,14 +58,17 @@ class OllamaAdapter:
         self.transport, self.credential_resolver = transport, credential_resolver
 
     @asynccontextmanager
-    async def open(self, request, route, lease):
+    async def open(self, request, route, lease, *, on_rejected=None):
         body = OllamaCodec().upstream_body(request, route.upstream_model)
         auth = auth_header(route.auth_mode,await self.credential_resolver(route))
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
         call = OutboundRequest("POST", "chat", body, auth_header=auth, deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status in {400, 401, 403, 404, 422, 429}:
-                raise UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
+                rejected = UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
+                if on_rejected is not None:
+                    await on_rejected(rejected)
+                raise rejected
             if response.status != 200:
                 raise GatewayError("upstream_error", 502)
             yield ProviderStream(response, ollama_events(response))

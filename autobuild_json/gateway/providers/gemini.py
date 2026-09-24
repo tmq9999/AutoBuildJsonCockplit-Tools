@@ -84,11 +84,14 @@ class GeminiAdapter:
             query=(("alt", "sse"),) if action == "streamGenerateContent" else ())
 
     @asynccontextmanager
-    async def open(self, request, route, lease):
+    async def open(self, request, route, lease, *, on_rejected=None):
         request.validate_provider("gemini")
         async with self.transport.open(route, lease.proxy, await self._call(request, route, lease, "streamGenerateContent")) as response:
             if response.status in {400, 401, 403, 404, 422, 429}:
-                raise UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
+                rejected = UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
+                if on_rejected is not None:
+                    await on_rejected(rejected)
+                raise rejected
             if response.status != 200:
                 raise GatewayError("upstream_error", 502)
             yield ProviderStream(response, gemini_events(response))

@@ -39,15 +39,23 @@ class AdminServices:
         from ..catalog.scheduler import Scheduler
         from ..providers.discovery.client import DiscoveryClient
         from ..providers.limits import ProviderLimits
+        from ..catalog.probe import ProbeService
+        from ..catalog.probe_quote import ProbeQuotes
+        from ..catalog.probe_accounting import ProbeAccounting
         sources = SourceRepository(self.db, self.vault, self.pepper)
         operations = OperationStore(self.db, sources)
         snapshots = SnapshotStore(self.db, sources, operations,
                                    self.vault.derive_key("client_keys", "catalog-cursor-v1"))
-        discovery = DiscoveryClient(self.transport, ProviderLimits(self.db), self.engine.credential)
+        limits = ProviderLimits(self.db)
+        discovery = DiscoveryClient(self.transport, limits, self.engine.credential)
+        quotes = ProbeQuotes(self.db, sources)
+        accounting = ProbeAccounting(self.db, operations, self.budgets)
+        probe = ProbeService(self.db, sources, operations, quotes, accounting, self.engine.adapters,
+                             self.transport, limits, self.proxies, self.profiles, self.catalog)
         runner = OperationRunner(sources, operations, snapshots, discovery, self.proxies,
-                                 self.profiles, self.catalog)
+                                 self.profiles, self.catalog, probe=probe)
         self.catalog_operations, self.catalog_sources = operations, sources
-        self.catalog_worker = CatalogWorker(self.db, runner, Scheduler(self.db, operations, sources))
+        self.catalog_worker = CatalogWorker(self.db, runner, Scheduler(self.db, operations, sources), probe)
         return self.catalog_worker
 
     def load_proxy_sync(self, identity):

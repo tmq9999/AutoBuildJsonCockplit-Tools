@@ -17,13 +17,13 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError
 from sqlalchemy import text
 
-from ..errors import GatewayError
+from ..errors import GatewayError, SAFE_CODES
 from ..metering.budgets import money
 from ..metering.costs import estimate_cost
 from ..metering.records import Usage
 from ..secrets import Ciphertext
 from .digests import canonical_bytes
-from .operations import _json, _view
+from .operations import _json, _safe_result, _view
 from .probe_quote import ProbeQuotes
 from .records import OperationRequest, ProbeQuote
 
@@ -89,10 +89,13 @@ class ProbeAccounting:
             await session.execute(text("UPDATE provider_operations SET dispatched_at=clock_timestamp(),"
                                        "version=version+1 WHERE id=:id"), {"id": row["id"]})
 
-    async def record_evidence(self, claim, usage: Usage | None, outcome: str) -> None:
+    async def record_evidence(self, claim, usage: Usage | None, outcome: str, *, status=None, retry_after=None) -> None:
         if outcome not in {"success", "rejected", "uncertain"} or (usage is not None and not isinstance(usage, Usage)):
             raise GatewayError("invalid_request")
         if outcome == "rejected" and usage is not None:
+            raise GatewayError("invalid_request")
+        if (status is not None and (outcome != "rejected" or type(status) is not int or status not in {400, 401, 403, 404, 422, 429})
+                or retry_after is not None and (status != 429 or type(retry_after) is not int or not 0 <= retry_after <= 86400)):
             raise GatewayError("invalid_request")
         payload = asdict(usage) if usage is not None else None
         async with self.db.sessions.begin() as session:
@@ -106,9 +109,10 @@ class ProbeAccounting:
                     raise GatewayError("payload_mismatch", 409)
                 return
             await session.execute(text("UPDATE provider_operations SET usage=CAST(:usage AS jsonb),"
-                "result=CAST(:result AS jsonb),version=version+1 WHERE id=:id"),
+                "result=CAST(:result AS jsonb),upstream_status=:status,retry_after=:retry,version=version+1 WHERE id=:id"),
                 {"id": row["id"], "usage": _json(payload) if payload is not None else None,
-                 "result": _json({"probe_outcome": outcome, "rejected_before_generation": outcome == "rejected"})})
+                 "status": status, "retry": retry_after,
+                 "result": _safe_result({"probe_outcome": outcome, "rejected_before_generation": outcome == "rejected"})})
 
     @staticmethod
     def _actual(row):
@@ -126,11 +130,14 @@ class ProbeAccounting:
             with localcontext() as ctx:
                 ctx.prec = 80
                 actual = money(estimate.amount.quantize(Decimal("0.000000000001"), rounding=ROUND_CEILING))
-            return actual, "succeeded" if outcome == "success" else "failed", usage
+            within_bounds = usage.input_tokens <= quote.input_bound and usage.output_tokens <= quote.output_bound
+            return actual, "succeeded" if outcome == "success" and within_bounds else "failed", usage
         except (ValidationError, ValueError, TypeError, GatewayError):
             raise GatewayError("invalid_usage", 409) from None
 
-    async def settle(self, operation_id, *, claim=None):
+    async def settle(self, operation_id, *, claim=None, error=None):
+        if error is not None and error not in SAFE_CODES:
+            raise GatewayError("invalid_request")
         async with self.db.sessions.begin() as session:
             row = await self._row(session, operation_id)
             if row["state"] in {"succeeded", "failed", "cancelled", "stale"}:
@@ -149,21 +156,43 @@ class ProbeAccounting:
             elif row["state"] != "usage_pending" or row["finished_at"] is None:
                 raise GatewayError("claim_lost", 409)
             actual, state, usage = self._actual(row)
+            if row["dispatched_at"] is None and error is not None:
+                state = ("cancelled" if error == "operation_cancelled" else
+                         "stale" if error in {"catalog_snapshot_stale", "version_conflict", "invalid_state"} else "failed")
             if row["state"] == "usage_pending" and actual is None:
                 return _view(row)
-            return await self._settle_in(session, row, actual, state, "provider_estimated", usage=usage)
+            return await self._settle_in(session, row, actual, state, "provider_estimated", usage=usage, error=error)
 
-    async def _settle_in(self, session, row, actual, state, source, *, usage=None, actor="system", reason=None, digest=None):
-        if row["attempt_id"] is not None:
-            await self.budgets.settle_in(session, row["attempt_id"], actual)
-        elif row["dispatched_at"] is not None:
-            raise GatewayError("invalid_state", 409)
+    async def _settle_in(self, session, row, actual, state, source, *, usage=None, actor="system", reason=None, digest=None, error=None):
         snapshot = row["probe_cost_snapshot"] or {}
         currency = snapshot.get("currency")
         cost = {"amount": str(actual), "currency": currency, "source": source} if actual is not None else None
         details = {"amount": str(actual) if actual is not None else None, "currency": currency, "source": source}
         if reason is not None:
             details["reason"] = reason
+        if usage is not None:
+            stamp = snapshot.get("stamp") or {}
+            binding_id = stamp.get("binding_id")
+            binding_version = stamp.get("binding_version")
+            if binding_id is not None and binding_version is not None and (
+                    usage.input_tokens > int(snapshot.get("input_bound", usage.input_tokens))
+                    or usage.output_tokens > int(snapshot.get("output_bound", usage.output_tokens))):
+                binding = (await session.execute(text("SELECT version,config FROM model_bindings WHERE id=:id FOR UPDATE"),
+                                                  {"id": binding_id})).mappings().first()
+                if binding is not None and binding["version"] == binding_version:
+                    await session.execute(text("UPDATE model_bindings SET config=jsonb_set(config,'{enabled}','false'::jsonb),version=version+1 WHERE id=:id AND version=:version"),
+                                          {"id": binding_id, "version": binding_version})
+                    await self._audit(session, row["id"], "catalog.probe.binding_quarantined", actor,
+                                      {"binding_id": str(binding_id), "binding_version": binding_version})
+                else:
+                    await self._audit(session, row["id"], "catalog.probe.binding_version_changed", actor,
+                                      {"binding_id": str(binding_id), "binding_version": binding_version,
+                                       "current_version": binding["version"] if binding is not None else None})
+        # Source/operation -> binding -> budget -> reservation, never budget -> binding.
+        if row["attempt_id"] is not None:
+            await self.budgets.settle_in(session, row["attempt_id"], actual)
+        elif row["dispatched_at"] is not None:
+            raise GatewayError("invalid_state", 409)
         if actual is not None and row["upper_cost"] is not None and actual > row["upper_cost"]:
             await self._audit(session, row["id"], "catalog.probe.cost_overrun", actor, details)
         await self._audit(session, row["id"], "catalog.probe.reconciled" if digest is not None else "catalog.probe.settled", actor, details)
@@ -173,8 +202,8 @@ class ProbeAccounting:
             "settlement_source=:source,reconcile_digest=:digest,result=CAST(:result AS jsonb),"
             "error_code=:error,finished_at=clock_timestamp(),version=version+1 WHERE id=:id RETURNING *"),
             {"id": row["id"], "state": state, "cost": _json(cost) if cost is not None else None,
-             "source": source if actual is not None else None, "digest": digest, "result": _json(result),
-             "error": "usage_pending" if state == "usage_pending" else None})).mappings().one()
+             "source": source if actual is not None else None, "digest": digest, "result": _safe_result(result),
+             "error": "usage_pending" if state == "usage_pending" else error})).mappings().one()
         return _view(updated)
 
     @staticmethod

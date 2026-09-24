@@ -18,6 +18,68 @@ def synthetic_vault():
 
 
 @asynccontextmanager
+async def probe_case(db, *, upstream=None, zero=False, proxy_mode="direct"):
+    """Real admin composition, canonical adapters and PostgreSQL; synthetic HTTP only."""
+    from decimal import Decimal
+    from types import SimpleNamespace
+    from sqlalchemy import text
+    from autobuild_json.gateway.admin.services import AdminServices
+    from autobuild_json.gateway.admin.schemas import ProxyInput
+    from autobuild_json.gateway.catalog.records import OperationRequest, ProbeIntent
+    from autobuild_json.gateway.catalog.probe_quote import ProbeQuotes
+    from autobuild_json.gateway.catalog.probe_accounting import ProbeAccounting
+    from autobuild_json.gateway.metering.costs import CostSchedule
+    from autobuild_json.gateway.routing.records import BindingConfig, ModelConfig
+    from autobuild_json.gateway.transport.egress import EgressPolicy
+    from autobuild_json.gateway.transport.http import Transport
+    from tests.gateway.harness import chat_success
+
+    case = SimpleNamespace(generation_calls=0, requests=[])
+    async def respond(request):
+        case.generation_calls += 1
+        case.requests.append(request)
+        if upstream is not None:
+            response = upstream(request)
+            return await response if hasattr(response, "__await__") else response
+        return httpx.Response(200, content=chat_success())
+
+    async def resolver(host, port):
+        return ["93.184.216.34"]
+
+    transport = Transport(EgressPolicy(resolver=resolver), adapter=httpx.MockTransport(respond))
+    services = AdminServices(db, synthetic_vault(), b"s" * 32, transport=transport)
+    worker = services.build_catalog_worker()
+    sources, ops = services.catalog_sources, services.catalog_operations
+    budget = await services.budgets.create("USD", Decimal(1))
+    provider_id = await services.catalog.create_provider(ProviderConfig(
+        name="Synthetic probe", adapter="openai_compatible", root="https://provider.invalid/v1",
+        budget_id=budget, cost_schedule=CostSchedule("USD", Decimal(0 if zero else 1), Decimal(0 if zero else 3))))
+    credential_id = await services.catalog.put_credential(provider_id, "synthetic-probe-key")
+    if proxy_mode != "direct":
+        profile = await services.profiles.create(ProxyInput(name="Synthetic proxy", mode=proxy_mode,
+            entries_text="synthetic-kiot-key" if proxy_mode == "kiotproxy" else "http://93.184.216.34:39008"))
+        async with db.sessions.begin() as session:
+            await session.execute(text("UPDATE credentials SET profile_id=:profile WHERE id=:id"),
+                                  {"profile": profile, "id": credential_id})
+    source = await sources.create(SourceInput(provider_id=provider_id, credential_id=credential_id,
+                                              mode="openai_single"), "admin")
+    model_id = "probe-" + uuid4().hex
+    await services.catalog.put_model(ModelConfig(model_id=model_id, identity="probe"))
+    binding = BindingConfig(uuid4(), provider_id, credential_id, model_id, "upstream", "probe", 1000, 500,
+                            capabilities=frozenset({"text"}))
+    await services.catalog.put_binding(binding)
+    quotes = ProbeQuotes(db, sources)
+    quote = await quotes.quote(source.id, binding.id)
+    command = OperationRequest(id=uuid4(), source_id=source.id, kind="probe", expected=quote.stamp,
+        probe=ProbeIntent(binding_id=binding.id, quote_digest=quote.digest, expected=quote.stamp,
+                          max_hold=quote.upper_cost, currency="USD", acknowledged=True))
+    case.__dict__.update(services=services, worker=worker, runner=worker.runner, ops=ops, sources=sources,
+        source=source, context=await sources.context(source.id), binding=binding, budget=budget,
+        quotes=quotes, quote=quote, command=command, accounting=ProbeAccounting(db, ops, services.budgets))
+    yield case
+
+
+@asynccontextmanager
 async def runner_case(db, *, mode="openai_cursor", kind="discover", upstream=None, fixed=False):
     """Full catalog execution with synthetic HTTP and real persistence/leases."""
     from types import SimpleNamespace

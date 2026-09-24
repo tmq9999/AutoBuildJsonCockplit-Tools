@@ -26,6 +26,7 @@ _RESULT_COUNT = frozenset({"count", "added", "changed", "missing", "unchanged"})
 _RESULT_UUID = frozenset({"run_id", "binding_id"})
 _RESULT_WARNINGS = frozenset({"authentication_unverified", "metadata_incomplete", "catalog_partial",
                               "malformed_optional_metadata"})
+_RESULT_OUTCOME = frozenset({"success", "rejected", "uncertain"})
 
 
 def _safe_result(value: Any) -> str:
@@ -62,6 +63,9 @@ def _safe_result(value: Any) -> str:
             if not isinstance(item, list) or len(item) > 8 or any(
                 not isinstance(w, str) or w not in _RESULT_WARNINGS for w in item
             ):
+                raise GatewayError("invalid_request")
+        elif key == "probe_outcome":
+            if not isinstance(item, str) or item not in _RESULT_OUTCOME:
                 raise GatewayError("invalid_request")
         else:
             raise GatewayError("invalid_request")

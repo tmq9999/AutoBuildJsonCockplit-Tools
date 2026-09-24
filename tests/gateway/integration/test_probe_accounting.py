@@ -89,6 +89,18 @@ async def test_zero_explicit_price_still_reserves_and_settles(pg_db):
     assert (await c.accounting.settle(c.job.id, claim=c.claim)).cost == 0
 
 
+async def test_usage_over_bound_quarantines_the_original_binding_version(pg_db):
+    c = await case(pg_db)
+    await c.accounting.reserve(c.claim, c.quote)
+    await c.accounting.mark_dispatched(c.claim)
+    await c.accounting.record_evidence(c.claim, Usage(10, 17), "success")
+    assert (await c.accounting.settle(c.job.id, claim=c.claim)).state == "failed"
+    async with pg_db.sessions() as session:
+        row = (await session.execute(text("SELECT version,config FROM model_bindings WHERE id=:id"),
+                                     {"id": c.binding.id})).one()
+        assert row.config["enabled"] is False and row.version == 2
+
+
 @pytest.mark.parametrize("change", ["cost", "credential", "proxy", "binding", "budget"])
 async def test_stale_quote_never_writes_money(pg_db, change):
     c = await case(pg_db)

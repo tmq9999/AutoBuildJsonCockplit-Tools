@@ -46,6 +46,9 @@ class OperationRunner:
             raise
 
     async def execute(self, claim):
+        operation = await self.ops.get(claim.operation_id)
+        if operation.kind == "probe" and self.probe is not None:
+            return await self.probe.execute(claim)
         remaining = (claim.deadline - datetime.now(timezone.utc)).total_seconds()
         if remaining <= 0:
             return await asyncio.wait_for(self._current(claim), 5)
@@ -155,8 +158,6 @@ class OperationRunner:
                                                            on_warnings=warnings.update)
                 elif operation.kind == "check":
                     result = await self.discovery.check(context, lease, check_current, deadline)
-                else:
-                    result = await self.probe(context, lease, check_current, claim.deadline)
             # Do not let our heartbeat cancel a just-committed terminal result.
             # Atomic persistence fences below replace it after HTTP cleanup.
             pulse.cancel()
