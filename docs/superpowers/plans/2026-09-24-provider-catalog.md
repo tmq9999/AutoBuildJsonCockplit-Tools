@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+, FastAPI/Pydantic, SQLAlchemy async + psycopg, PostgreSQL 17, Alembic, HTTPX/httpcore, JS ES modules/assets local, pytest/Node/Playwright Chrome.
 
-**Spec:** [2026-09-24-provider-catalog-design.md](../specs/2026-09-24-provider-catalog-design.md), approved qua “tiếp” ngày 2026-09-24. Plan này **chờ review**, chưa được thực thi.
+**Spec:** [2026-09-24-provider-catalog-design.md](../specs/2026-09-24-provider-catalog-design.md), approved qua “tiếp” ngày 2026-09-24. Plan đã được người dùng duyệt qua “sub-driven đi”; thực thi Subagent-driven, mỗi task có implementer và reviewer riêng.
 
 ## Global Constraints
 
