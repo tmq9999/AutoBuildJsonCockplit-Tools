@@ -85,8 +85,12 @@ class SnapshotStore:
     def __init__(self, db, sources, ops, cursor_key: bytes):
         self.db, self.sources, self.ops, self.cursor_key = db, sources, ops, cursor_key
 
-    async def commit(self, claim, context, entries: tuple[CatalogEntry, ...]) -> UUID:
+    async def commit(self, claim, context, entries: tuple[CatalogEntry, ...], *, warnings=()) -> UUID:
         if not isinstance(entries, tuple):
+            raise GatewayError("invalid_request")
+        warnings = tuple(sorted(set(warnings)))
+        if len(warnings) > 8 or any(w not in {"authentication_unverified", "metadata_incomplete",
+                                              "catalog_partial", "malformed_optional_metadata"} for w in warnings):
             raise GatewayError("invalid_request")
         normalized = tuple(_safe_entry(entry) for entry in entries)
         ids = [entry.upstream_id for entry in normalized]
@@ -144,6 +148,8 @@ class SnapshotStore:
                     {"run": claim.operation_id, "id": entry.upstream_id, "metadata": _metadata(entry),
                      "digest": incoming_digest[entry.upstream_id]})
             result = {"run_id": str(claim.operation_id), "count": len(normalized), **counts}
+            if warnings:
+                result["warnings"] = list(warnings)
             updated = (await session.execute(text("""UPDATE provider_operations SET state='succeeded',
                 result=CAST(:result AS jsonb),finished_at=clock_timestamp(),version=version+1
                 WHERE id=:id AND owner=:owner AND generation=:generation AND state='running'

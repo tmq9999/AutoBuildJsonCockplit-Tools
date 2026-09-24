@@ -10,10 +10,83 @@ from datetime import datetime, timedelta, timezone
 import time
 
 import httpx
+import asyncio
 
 
 def synthetic_vault():
     return Vault({"v1": b"a" * 32, "client_keys": b"p" * 32}, active="v1")
+
+
+@asynccontextmanager
+async def runner_case(db, *, mode="openai_cursor", kind="discover", upstream=None, fixed=False):
+    """Full catalog execution with synthetic HTTP and real persistence/leases."""
+    from types import SimpleNamespace
+    from autobuild_json.gateway.catalog.operations import OperationStore
+    from autobuild_json.gateway.catalog.records import OperationRequest
+    from autobuild_json.gateway.catalog.runner import OperationRunner
+    from autobuild_json.gateway.catalog.snapshots import SnapshotStore
+    from autobuild_json.gateway.engine import Engine
+    from autobuild_json.gateway.admin.schemas import ProxyInput
+    from autobuild_json.gateway.providers.discovery.client import DiscoveryClient
+    from autobuild_json.gateway.providers.limits import ProviderLimits
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.pg_leases import PgLeaseStore
+    from autobuild_json.gateway.proxy.profiles import ProfileStore
+    from autobuild_json.gateway.transport.egress import EgressPolicy
+    from autobuild_json.gateway.transport.http import Transport
+
+    sources, source = await source_case(db, mode=mode)
+    vault = synthetic_vault()
+    catalog, profiles = Catalog(db, vault), ProfileStore(db, vault, b"p" * 32)
+    context = await sources.context(source.id)
+    if fixed:
+        profile = await profiles.create(ProxyInput(name="Synthetic proxy", mode="fixed",
+            entries_text="http://93.184.216.34:39008"))
+        async with db.sessions.begin() as session:
+            await session.execute(__import__("sqlalchemy").text(
+                "UPDATE credentials SET profile_id=:profile WHERE id=:id"),
+                {"profile": profile, "id": source.credential_id})
+        context = await sources.context(source.id)
+    ops = OperationStore(db, sources)
+    snapshots = SnapshotStore(db, sources, ops, vault.derive_key("client_keys", "catalog-cursor-v1"))
+    job = await ops.enqueue(OperationRequest(id=uuid4(), source_id=source.id, kind=kind,
+                                           expected=context.stamp), "admin")
+    case = SimpleNamespace(sources=sources, source=source, source_input=SourceInput(
+        provider_id=source.provider_id, credential_id=source.credential_id, mode=mode),
+        context=context, ops=ops, snapshots=snapshots, catalog=catalog, profiles=profiles,
+        job=job, sent_pages=0, pause_after_first_page=asyncio.Event(),
+        first_page_entered=asyncio.Event(), release_first_page=asyncio.Event(),
+        http_closed=asyncio.Event())
+
+    async def respond(request):
+        case.sent_pages += 1
+        try:
+            if case.sent_pages == 1:
+                case.first_page_entered.set()
+                if case.pause_after_first_page.is_set():
+                    await case.release_first_page.wait()
+            if upstream:
+                result = upstream(request)
+                return await result if hasattr(result, "__await__") else result
+            if case.sent_pages == 1:
+                return httpx.Response(200, json={"data": [{"id": "first", "owned_by": "synthetic"}],
+                    "has_more": True, "last_id": "first"})
+            return httpx.Response(200, json={"data": [{"id": "second"}], "has_more": False})
+        finally:
+            case.http_closed.set()
+
+    async def resolver(host, port):
+        return ["93.184.216.34"]
+
+    async def credential(route):
+        return await Engine.credential(SimpleNamespace(db=db, vault=vault), route)
+
+    policy = EgressPolicy(resolver=resolver, trusted_proxy_origins=("http://93.184.216.34:39008",))
+    discovery = DiscoveryClient(Transport(policy, adapter=httpx.MockTransport(respond)),
+                                ProviderLimits(db), credential)
+    proxies = ProxyManager(PgLeaseStore(db))
+    case.runner = OperationRunner(sources, ops, snapshots, discovery, proxies, profiles, catalog)
+    yield case
 
 
 @asynccontextmanager

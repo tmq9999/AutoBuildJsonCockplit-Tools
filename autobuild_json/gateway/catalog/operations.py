@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..errors import GatewayError, SAFE_CODES
 from .digests import operation_digest
-from .records import Claim, OperationRequest, OperationView, SourceContext
+from .records import Claim, ConfigStamp, OperationRequest, OperationView, SourceContext
 
 
 def _json(value: Any) -> str:
@@ -287,6 +287,14 @@ class OperationStore:
         async with self.db.sessions() as session:
             return await self.assert_claim(session, claim)
 
+    async def expected_stamp(self, claim: Claim) -> ConfigStamp:
+        async with self.db.sessions() as session:
+            row = (await session.execute(text("SELECT expected FROM provider_operations WHERE id=:id"),
+                                         {"id": claim.operation_id})).scalar_one_or_none()
+        if row is None:
+            raise GatewayError("not_found", 404)
+        return ConfigStamp.model_validate_json(json.dumps(row))
+
     async def cancel(self, operation_id: UUID, expected_version: int, actor) -> OperationView:
         async with self.db.sessions.begin() as session:
             row = await self._row(session, operation_id, lock=True)
@@ -311,11 +319,36 @@ class OperationStore:
             updated = (await session.execute(text("""UPDATE provider_operations SET state=:state,
                 result=CAST(:result AS jsonb),error_code=:code,finished_at=clock_timestamp(),version=version+1
                 WHERE id=:id AND owner=:owner AND generation=:generation AND state='running'
-                  AND deadline>clock_timestamp() AND NOT cancel_requested RETURNING *"""),
+                  AND deadline>clock_timestamp()
+                  AND (NOT cancel_requested OR :state IN ('cancelled','usage_pending')) RETURNING *"""),
                 {"state": state, "result": _safe_result(result) if result is not None else None, "code": code,
                  "id": claim.operation_id, "owner": claim.owner, "generation": claim.generation})).mappings().first()
             if updated is None:
                 raise _error("claim_lost")
+            return _view(updated)
+
+    async def finish_fenced(self, claim: Claim, state: str, result=None, error=None) -> OperationView:
+        """Finalize cleanup outcomes without requiring a live deadline.
+
+        This path is intentionally unable to write ``succeeded``.  It is used
+        after cancellation, source invalidation, expiry, or a lost heartbeat,
+        when the normal terminal write's deadline/cancel fence must reject.
+        """
+        if state not in {"failed", "cancelled", "stale", "usage_pending"}:
+            raise GatewayError("invalid_request")
+        code = error.code if isinstance(error, GatewayError) else error
+        code = code if isinstance(code, str) and code in SAFE_CODES else ("internal_error" if code else None)
+        async with self.db.sessions.begin() as session:
+            updated = (await session.execute(text("""UPDATE provider_operations SET state=:state,
+                result=CAST(:result AS jsonb),error_code=:code,finished_at=clock_timestamp(),version=version+1
+                WHERE id=:id AND owner=:owner AND generation=:generation AND state='running' RETURNING *"""),
+                {"state": state, "result": _safe_result(result) if result is not None else None, "code": code,
+                 "id": claim.operation_id, "owner": claim.owner, "generation": claim.generation})).mappings().first()
+            if updated is None:
+                row = await self._row(session, claim.operation_id)
+                if row is None:
+                    raise GatewayError("not_found", 404)
+                return _view(row)
             return _view(updated)
 
     async def mark_dispatched(self, claim: Claim, attempt_id: UUID) -> None:
