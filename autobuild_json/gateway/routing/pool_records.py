@@ -11,6 +11,13 @@ from ..accounts.quota_records import CodexQuotaSnapshot
 class _Record(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
 
+    @field_validator("*", mode="after")
+    @classmethod
+    def printable(cls, value):
+        if isinstance(value, str) and not value.isprintable():
+            raise ValueError("invalid_text")
+        return value
+
 
 class PoolMember(_Record):
     credential_id: UUID

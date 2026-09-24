@@ -244,6 +244,34 @@ class Catalog:
             await session.execute(text("UPDATE public_models SET cursor=(cursor+1)%2147483647 WHERE id=:id"), {"id": model_row["id"]})
             return first[offset:] + first[:offset] + rest
 
+    async def account_candidates(self, principal, request, *, binding_id=None):
+        """Enrich authorized routes without changing their legacy order or policy.
+
+        Metadata is an observation, not an authorization lease. Consumers still
+        revalidate the chosen credential and binding before network dispatch.
+        """
+        from ..accounts.quota_records import CodexQuotaSnapshot
+        from ..routing.pool_records import AccountCandidate
+        routes = await self.candidates(principal, request, binding_id=binding_id)
+        result = []
+        async with self.db.sessions() as session:
+            for route in routes:
+                row = (await session.execute(text("""SELECT c.health,
+                    GREATEST(c.cooldown_until,p.cooldown_until) AS cooldown_until,
+                    a.usage_snapshot,a.usage_error,a.subscription_expires_at
+                    FROM credentials c JOIN providers p ON p.id=c.provider_id
+                    LEFT JOIN codex_account_state a ON a.credential_id=c.id WHERE c.id=:id"""),
+                    {"id": route.credential_id})).mappings().first()
+                if row is None:
+                    continue
+                quota = (CodexQuotaSnapshot.model_validate_json(json.dumps(row["usage_snapshot"]))
+                         if row["usage_snapshot"] is not None else None)
+                if quota is not None and row["usage_error"] is not None:
+                    quota = quota.model_copy(update={"last_error": "codex_usage_unavailable"})
+                result.append(AccountCandidate(route=route, quota=quota, health=row["health"],
+                    cooldown_until=row["cooldown_until"], subscription_expires_at=row["subscription_expires_at"]))
+        return tuple(result)
+
     async def cooldown(self, provider_id, credential_id, seconds, *, started_at=None):
         if type(seconds) is not int or not 0 <= seconds <= 86400:
             raise GatewayError("invalid_request")
