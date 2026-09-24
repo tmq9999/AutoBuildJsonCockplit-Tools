@@ -247,6 +247,30 @@ async def test_source_disable_heartbeat_aborts_blocked_http(pg_db):
         await assert_released(pg_db)
 
 
+async def test_cancel_between_heartbeat_check_and_update_finishes_cancelled(pg_db, monkeypatch):
+    """A cancel arriving after check_current must not be mistaken for fence loss."""
+    async with runner_case(pg_db, fixed=True) as case:
+        case.pause_after_first_page.set()
+        entered, release = asyncio.Event(), asyncio.Event()
+        original_heartbeat = case.ops.heartbeat
+
+        async def gated_heartbeat(claim):
+            entered.set()
+            await release.wait()
+            return await original_heartbeat(claim)
+
+        monkeypatch.setattr(case.ops, "heartbeat", gated_heartbeat)
+        task = asyncio.create_task(case.runner.run(case.job.id))
+        await asyncio.wait_for(entered.wait(), 5)
+        current = await case.ops.get(case.job.id)
+        await case.ops.cancel(current.id, current.version, "admin")
+        release.set()
+        result = await asyncio.wait_for(task, 5)
+        assert result.state == "cancelled"
+        assert result.error == "operation_cancelled"
+        await assert_released(pg_db)
+
+
 async def test_check_final_write_rechecks_source_under_lock(pg_db, monkeypatch):
     async with runner_case(pg_db, kind="check") as case:
         finish = case.ops.finish

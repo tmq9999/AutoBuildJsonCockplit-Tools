@@ -105,6 +105,19 @@ class OperationRunner:
                     await asyncio.sleep(1)
                     await check_current()
                     if not await self.ops.heartbeat(claim):
+                        # heartbeat() deliberately returns only whether the
+                        # fenced UPDATE matched.  Re-read the claim to
+                        # distinguish an expected cancellation from genuine
+                        # owner/generation loss; otherwise a cancel racing
+                        # this update would leave the row running forever.
+                        try:
+                            await self.ops.read_claim(claim)
+                        except GatewayError as exc:
+                            if exc.code == "operation_cancelled":
+                                raise
+                            if exc.code in {"claim_lost", "operation_expired"}:
+                                raise GatewayError("claim_lost", 409) from None
+                            raise
                         raise GatewayError("claim_lost", 409)
             except asyncio.CancelledError:
                 raise
