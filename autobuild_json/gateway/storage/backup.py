@@ -18,6 +18,8 @@ TABLES = ("customers", "api_keys", "audit_events", "providers", "config_versions
           "upstream_budgets", "upstream_reservations", "proxy_profiles", "proxy_leases", "proxy_health",
           "continuation_handles", "provider_admissions", "catalog_sources", "provider_operations",
           "provider_operation_claims", "catalog_entries", "catalog_decisions", "catalog_publications")
+TABLES = TABLES + ("codex_account_state", "codex_reset_requests", "account_pool_policies",
+                   "account_session_bindings", "key_quota_adjustments")
 MAX_BACKUP = 64*1024*1024
 
 
@@ -103,3 +105,19 @@ class BackupService:
                 for row in payload["tables"][table]:
                     await session.execute(text(f'INSERT INTO "{table}" SELECT * FROM json_populate_record(NULL::"{table}", CAST(:row AS json))'),
                                           {"row": json.dumps(row)})
+            # Restoring a snapshot cannot resurrect a worker lease or replay a
+            # potentially submitted redemption. Preserve unknown active locks.
+            await session.execute(text("UPDATE codex_account_state SET generation=generation+1,refresh_deadline=NULL"))
+            rows = (await session.execute(text("""UPDATE codex_reset_requests SET
+                state=CASE WHEN state='prepared' THEN 'rejected' WHEN state='dispatched' THEN 'unknown' ELSE state END,
+                result_code=CASE WHEN state='prepared' THEN 'operation_expired'
+                    WHEN state='dispatched' THEN 'codex_reset_uncertain' ELSE result_code END,
+                generation=generation+1,version=version+1,completed_at=clock_timestamp()
+                WHERE state IN ('prepared','dispatched') RETURNING *"""))).mappings().all()
+            from ..accounts.quota_storage import audit
+            for row in rows:
+                await audit(session, row, "restored", actor="system")
+            rows = (await session.execute(text("UPDATE codex_reset_requests SET generation=generation+1,version=version+1 "
+                "WHERE state='succeeded_refresh_failed' RETURNING *"))).mappings().all()
+            for row in rows:
+                await audit(session, row, "restore_fenced", actor="system")
