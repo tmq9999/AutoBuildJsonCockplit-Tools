@@ -72,11 +72,11 @@ class GeminiAdapter:
     def __init__(self, transport, credential_resolver):
         self.transport, self.credential_resolver = transport, credential_resolver
 
-    async def _call(self, request, route, lease, action):
+    async def _call(self, request, route, lease, action, *, credential=None):
         body = GeminiCodec().upstream_body(request, route.upstream_model)
         if action == "countTokens":
             body.pop("generationConfig", None)
-        secret = await self.credential_resolver(route)
+        secret = credential if credential is not None else await self.credential_resolver(route)
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
         model = route.upstream_model.removeprefix("models/")
         return OutboundRequest("POST", "models/"+quote(model, safe="")+":"+action, body,
@@ -84,9 +84,10 @@ class GeminiAdapter:
             query=(("alt", "sse"),) if action == "streamGenerateContent" else ())
 
     @asynccontextmanager
-    async def open(self, request, route, lease, *, on_rejected=None):
+    async def open(self, request, route, lease, *, on_rejected=None, credential=None):
         request.validate_provider("gemini")
-        async with self.transport.open(route, lease.proxy, await self._call(request, route, lease, "streamGenerateContent")) as response:
+        call = await self._call(request, route, lease, "streamGenerateContent", credential=credential)
+        async with self.transport.open(route, lease.proxy, call) as response:
             if response.status in {400, 401, 403, 404, 422, 429}:
                 rejected = UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
                 if on_rejected is not None:

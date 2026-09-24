@@ -58,9 +58,9 @@ class OllamaAdapter:
         self.transport, self.credential_resolver = transport, credential_resolver
 
     @asynccontextmanager
-    async def open(self, request, route, lease, *, on_rejected=None):
+    async def open(self, request, route, lease, *, on_rejected=None, credential=None):
         body = OllamaCodec().upstream_body(request, route.upstream_model)
-        auth = auth_header(route.auth_mode,await self.credential_resolver(route))
+        auth = auth_header(route.auth_mode, credential if credential is not None else await self.credential_resolver(route))
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
         call = OutboundRequest("POST", "chat", body, auth_header=auth, deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:

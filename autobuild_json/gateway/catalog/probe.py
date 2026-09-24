@@ -118,7 +118,7 @@ class ProbeService:
             lease = await resources.stack.enter_async_context(self.proxies.acquire(selection, claim.owner, claim.deadline))
             await self.transport._validate(route, lease.proxy)
             await resources.stack.enter_async_context(self.limits.acquire(route, claim.deadline))
-            await adapter.credential_resolver(route)
+            credential = await adapter.credential_resolver(route)
             await self._current(claim, quote)
             await self.accounting.reserve(claim, quote)
             await self._current(claim, quote)
@@ -129,7 +129,7 @@ class ProbeService:
                     await self.accounting.record_evidence(claim, None, "rejected",
                         status=exc.upstream_status, retry_after=exc.retry_after)
                 stream = await resources.stack.enter_async_context(
-                    adapter.open(request, route, lease, on_rejected=on_rejected))
+                    adapter.open(request, route, lease, on_rejected=on_rejected, credential=credential))
                 collector = EventCollector("probe", route.public_model_id)
                 nonempty = False
                 async for event in stream.events:

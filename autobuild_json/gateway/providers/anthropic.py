@@ -97,10 +97,10 @@ class AnthropicAdapter:
             return payload["input_tokens"]
 
     @asynccontextmanager
-    async def open(self, request, route, lease, *, on_rejected=None):
+    async def open(self, request, route, lease, *, on_rejected=None, credential=None):
         request.validate_provider("anthropic")
         body = AnthropicCodec().upstream_body(request, route.upstream_model)
-        secret = await self.credential_resolver(route)
+        secret = credential if credential is not None else await self.credential_resolver(route)
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
         call = OutboundRequest("POST", "messages", body, auth_header=auth_header(route.auth_mode,secret),
             headers=(("anthropic-version", "2023-06-01"),), deadline=time.monotonic()+remaining)

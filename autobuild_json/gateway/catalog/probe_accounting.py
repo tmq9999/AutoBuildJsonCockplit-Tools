@@ -126,7 +126,7 @@ class ProbeAccounting:
             usage = Usage(**row["usage"]) if row["usage"] is not None else None
             estimate = estimate_cost(usage, quote.cost_schedule)
             if estimate is None:
-                return None, "usage_pending", None
+                return None, "usage_pending", usage
             with localcontext() as ctx:
                 ctx.prec = 80
                 actual = money(estimate.amount.quantize(Decimal("0.000000000001"), rounding=ROUND_CEILING))

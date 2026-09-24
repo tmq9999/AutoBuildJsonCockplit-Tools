@@ -139,3 +139,193 @@ async def test_output_bound_violation_records_usage_and_quarantines_binding(pg_d
             binding = (await session.execute(text("SELECT version,config FROM model_bindings WHERE id=:id"),
                                              {"id": case.binding.id})).one()
             assert binding.config["enabled"] is False and binding.version == 2
+
+
+async def test_probe_pins_preflight_credential_without_second_resolution(pg_db):
+    from autobuild_json.gateway.errors import GatewayError
+    async with probe_case(pg_db) as case:
+        adapter = case.services.engine.adapters["openai_compatible"]
+        resolve = adapter.credential_resolver
+        calls = 0
+        async def once(route):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise GatewayError("secret_unavailable")
+            return await resolve(route)
+        adapter.credential_resolver = once
+        operation = await case.ops.enqueue(case.command, "admin")
+        view = await case.runner.run(operation.id)
+        assert view.state == "succeeded" and case.generation_calls == 1
+        assert calls == 1
+        assert case.requests[0].headers["authorization"] == "Bearer synthetic-probe-key"
+
+
+async def test_unknown_cache_cost_still_quarantines_overbound_usage(pg_db):
+    payload = chat_success().replace(b'"completion_tokens": 5', b'"completion_tokens": 17').replace(
+        b'"prompt_tokens": 4', b'"prompt_tokens": 4, "prompt_tokens_details": {"cached_tokens": 2}')
+    async with probe_case(pg_db, upstream=lambda request: httpx.Response(200, content=payload)) as case:
+        operation = await case.ops.enqueue(case.command, "admin")
+        view = await case.runner.run(operation.id)
+        assert view.state == "usage_pending" and view.cost is None and view.usage.output_tokens == 17
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT config->'enabled' FROM model_bindings WHERE id=:id"),
+                                        {"id": case.binding.id}) is False
+            assert await session.scalar(text("SELECT held FROM upstream_budgets")) == Decimal("0.001048")
+
+
+async def test_probe_kind_lookup_is_deadline_bounded_and_joined(pg_db, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from autobuild_json.gateway.errors import GatewayError
+    async with probe_case(pg_db) as case:
+        operation = await case.ops.enqueue(case.command, "admin")
+        claim = await case.ops.claim(operation.id, uuid4())
+        claim = claim.model_copy(update={"deadline": datetime.now(timezone.utc) + timedelta(seconds=.05)})
+        closed = asyncio.Event()
+        async def blocked_get(identity):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+        monkeypatch.setattr(case.ops, "get", blocked_get)
+        before = asyncio.all_tasks()
+        with pytest.raises(GatewayError, match="storage_unavailable"):
+            await asyncio.wait_for(case.runner.execute(claim), .5)
+        assert closed.is_set() and not (asyncio.all_tasks() - before)
+
+
+@pytest.mark.parametrize("seam,want", [("reserve", "cancelled"), ("dispatch", "usage_pending"),
+                                       ("chunk", "usage_pending"), ("evidence", "succeeded")])
+async def test_cancellation_at_durable_seams_releases_slots_and_never_replays(pg_db, monkeypatch, seam, want):
+    entered, release = asyncio.Event(), asyncio.Event()
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
+            entered.set()
+            await release.wait()
+        async def aclose(self):
+            pass
+    upstream = (lambda request: httpx.Response(200, stream=Body())) if seam == "chunk" else None
+    async with probe_case(pg_db, proxy_mode="fixed", upstream=upstream) as case:
+        accounting = case.runner.probe.accounting
+        if seam != "chunk":
+            method = {"reserve": "reserve", "dispatch": "mark_dispatched", "evidence": "record_evidence"}[seam]
+            original = getattr(accounting, method)
+            async def gate(*args, **kwargs):
+                result = await original(*args, **kwargs)
+                entered.set()
+                await release.wait()
+                return result
+            monkeypatch.setattr(accounting, method, gate)
+        operation = await case.ops.enqueue(case.command, "admin")
+        before = asyncio.all_tasks()
+        task = asyncio.create_task(case.runner.run(operation.id))
+        await asyncio.wait_for(entered.wait(), 3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+        view = await case.ops.get(operation.id)
+        assert view.state == want
+        await case.runner.run(operation.id)
+        assert case.generation_calls == (1 if seam in {"chunk", "evidence"} else 0)
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
+            assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 0
+            assert await session.scalar(text("SELECT held FROM upstream_budgets")) == (
+                Decimal("0.001048") if want == "usage_pending" else 0)
+        assert not (asyncio.all_tasks() - before)
+
+
+async def test_kiot_probe_429_keeps_one_endpoint_and_no_rotation(pg_db):
+    from autobuild_json.gateway.proxy.kiot import KiotClient
+    from tests.gateway.unit.test_kiot import success
+    paths = []
+    def control(request):
+        paths.append(request.url.path)
+        return httpx.Response(200, json=success())
+    async with probe_case(pg_db, proxy_mode="kiotproxy", upstream=lambda request: httpx.Response(429)) as case:
+        case.services.proxies.kiot = KiotClient(adapter=httpx.MockTransport(control))
+        operation = await case.ops.enqueue(case.command, "admin")
+        result = await case.runner.run(operation.id)
+        assert result.state == "failed" and result.cost == 0
+        assert case.generation_calls == 1 and paths == ["/api/v1/proxies/current"]
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 0
+            assert await session.scalar(text("SELECT count(*) FROM proxy_leases")) == 2
+
+
+async def test_changed_binding_is_not_overwritten_by_overbound_probe(pg_db):
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def upstream(request):
+        entered.set()
+        await release.wait()
+        return httpx.Response(200, content=chat_success().replace(b'"completion_tokens": 5', b'"completion_tokens": 17'))
+    async with probe_case(pg_db, upstream=upstream) as case:
+        operation = await case.ops.enqueue(case.command, "admin")
+        task = asyncio.create_task(case.runner.run(operation.id))
+        await asyncio.wait_for(entered.wait(), 3)
+        async with pg_db.sessions.begin() as session:
+            await session.execute(text("UPDATE model_bindings SET version=version+1 WHERE id=:id"), {"id": case.binding.id})
+        release.set()
+        await task
+        async with pg_db.sessions() as session:
+            row = (await session.execute(text("SELECT version,config FROM model_bindings WHERE id=:id"), {"id": case.binding.id})).one()
+            assert row.version == 2 and row.config["enabled"] is True
+            details = await session.scalar(text("SELECT details FROM audit_events WHERE record_id=:id AND action='catalog.probe.binding_version_changed'"), {"id": operation.id})
+            assert details["binding_version"] == 1 and details["current_version"] == 2
+
+
+async def test_timeout_after_dispatch_retains_hold_for_fenced_recovery(pg_db):
+    from datetime import datetime, timedelta, timezone
+    entered, closed = asyncio.Event(), asyncio.Event()
+    async def upstream(request):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+    async with probe_case(pg_db, upstream=upstream, proxy_mode="fixed") as case:
+        operation = await case.ops.enqueue(case.command, "admin")
+        claim = await case.ops.claim(operation.id, uuid4())
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=.5)
+        async with pg_db.sessions.begin() as session:
+            await session.execute(text("UPDATE provider_operations SET deadline=:deadline WHERE id=:id"), {"id": operation.id, "deadline": deadline})
+        claim = claim.model_copy(update={"deadline": deadline})
+        before = asyncio.all_tasks()
+        view = await asyncio.wait_for(case.runner.execute(claim), 3)
+        assert entered.is_set() and closed.is_set() and view.state == "running"
+        async with pg_db.sessions.begin() as session:
+            assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
+            assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 0
+            await session.execute(text("UPDATE provider_operations SET deadline=clock_timestamp()-interval '16 seconds' WHERE id=:id"), {"id": operation.id})
+        result = await case.runner.probe.recover(operation.id)
+        assert result.state == "usage_pending" and result.cost is None
+        assert not (asyncio.all_tasks() - before)
+
+
+async def test_shared_resource_cleanup_is_once_and_joins_cancelled_waiter(pg_db):
+    from contextlib import asynccontextmanager
+    from autobuild_json.gateway.catalog.probe import _Resources
+    entered, release = asyncio.Event(), asyncio.Event()
+    exits = 0
+    @asynccontextmanager
+    async def resource():
+        nonlocal exits
+        try:
+            yield
+        finally:
+            exits += 1
+            entered.set()
+            await release.wait()
+    resources = _Resources()
+    await resources.stack.enter_async_context(resource())
+    before = asyncio.all_tasks()
+    first = asyncio.create_task(resources.close())
+    await entered.wait()
+    second = asyncio.create_task(resources.close())
+    first.cancel()
+    await asyncio.sleep(0)
+    assert not first.done() and not second.done()
+    release.set()
+    await asyncio.gather(first, second)
+    assert exits == 1 and not (asyncio.all_tasks() - before)

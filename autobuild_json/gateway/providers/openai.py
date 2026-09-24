@@ -103,11 +103,11 @@ class OpenAIAdapter:
         self.transport, self.credential_resolver = transport, credential_resolver
 
     @asynccontextmanager
-    async def open(self, request, route, lease, *, on_rejected=None):
+    async def open(self, request, route, lease, *, on_rejected=None, credential=None):
         request.validate_provider("openai_compatible")
         native = getattr(route, "wire_api", "chat") == "responses"
         body = (ResponsesCodec() if native else OpenAIChatCodec()).upstream_body(request, route.upstream_model)
-        secret = await self.credential_resolver(route)
+        secret = credential if credential is not None else await self.credential_resolver(route)
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
         auth_mode = getattr(route, "auth_mode", "bearer")
         auth = auth_header(auth_mode,secret)

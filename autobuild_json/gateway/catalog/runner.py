@@ -46,12 +46,16 @@ class OperationRunner:
             raise
 
     async def execute(self, claim):
-        operation = await self.ops.get(claim.operation_id)
-        if operation.kind == "probe" and self.probe is not None:
-            return await self.probe.execute(claim)
         remaining = (claim.deadline - datetime.now(timezone.utc)).total_seconds()
         if remaining <= 0:
             return await asyncio.wait_for(self._current(claim), 5)
+        try:
+            operation = await asyncio.wait_for(self.ops.get(claim.operation_id), remaining)
+        except asyncio.TimeoutError:
+            raise GatewayError("storage_unavailable", 503, "storage") from None
+        if operation.kind == "probe" and self.probe is not None:
+            return await self.probe.execute(claim)
+        remaining = max(0, (claim.deadline - datetime.now(timezone.utc)).total_seconds())
         # The one owner acquires, uses and exits the proxy context itself.
         owner = asyncio.create_task(self._owned(claim))
         try:
