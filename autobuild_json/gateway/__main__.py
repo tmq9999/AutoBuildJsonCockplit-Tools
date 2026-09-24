@@ -101,10 +101,7 @@ def main():
             asyncio.run(snapshot())
             print("Gateway snapshot operation completed.")
         elif args.action == "maintenance":
-            try:
-                asyncio.run(run_maintenance(services, asyncio.Event()))
-            finally:
-                asyncio.run(services.close())
+            asyncio.run(run_maintenance(services, asyncio.Event()))
         elif args.action == "admin":
             from ..api import create_app
             from ..settings import Settings

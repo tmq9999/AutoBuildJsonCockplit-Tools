@@ -11,6 +11,22 @@ class CatalogWorker:
         self.db, self.runner, self.scheduler = db, runner, scheduler
         self.probe_accounting = probe_accounting
 
+    async def available(self):
+        async with self.db.sessions() as session:
+            return bool(await session.scalar(text("SELECT EXISTS(SELECT 1 FROM proxy_leases WHERE "
+                "resource LIKE 'catalog-worker:%' AND owner IS NOT NULL AND hard_deadline>clock_timestamp())")))
+
+    async def _presence(self, owner, *, release=False):
+        async with self.db.sessions.begin() as session:
+            if release:
+                await session.execute(text("UPDATE proxy_leases SET owner=NULL WHERE resource=:resource AND owner=:owner"),
+                    {"resource": f"catalog-worker:{owner}", "owner": owner})
+            else:
+                await session.execute(text("INSERT INTO proxy_leases(resource,owner,generation,hard_deadline) "
+                    "VALUES (:resource,:owner,1,clock_timestamp()+interval '5 seconds') ON CONFLICT(resource) "
+                    "DO UPDATE SET owner=:owner,hard_deadline=clock_timestamp()+interval '5 seconds'"),
+                    {"resource": f"catalog-worker:{owner}", "owner": owner})
+
     async def _execute(self, identity):
         try:
             async with self.db.sessions() as session:
@@ -36,6 +52,7 @@ class CatalogWorker:
                 pass
 
     async def run(self, stopped: asyncio.Event) -> None:
+        presence_owner = uuid4()
         tasks = {}
         helpers = set()
         self._helper_tasks = helpers
@@ -48,6 +65,7 @@ class CatalogWorker:
                         await asyncio.gather(task, return_exceptions=True)
                         del tasks[task]
                 try:
+                    await self._presence(presence_owner)
                     if loop.time() >= next_repair:
                         await self.repair_expired()
                         next_repair = loop.time() + 15
@@ -89,6 +107,7 @@ class CatalogWorker:
                     continue
             await cleanup
             self._helper_tasks = set()
+            await self._presence(presence_owner, release=True)
 
     async def _scheduler_pass(self, stopped, helpers) -> bool:
         """Run one bounded scheduler tick and always join both helper tasks."""

@@ -17,6 +17,43 @@ from tests.gateway.catalog_support import observe, snapshot_case
 pytestmark = [pytest.mark.postgres, pytest.mark.asyncio]
 
 
+async def test_receipt_and_model_namespace_do_not_deadlock(pg_db, monkeypatch):
+    """Two receipts held before either reaches the other's literal model name."""
+    first, _, _, select_a, request_a = await publication_case(pg_db, ("a",))
+    second, _, _, select_b, request_b = await publication_case(pg_db, ("b",))
+    id_a, id_b = uuid4(), uuid4()
+    a = request_a(select_a("a", f"publication:{id_b}")).model_copy(update={"id": id_a})
+    b = request_b(select_b("b", f"publication:{id_a}")).model_copy(update={"id": id_b})
+    arrived = set()
+    both = asyncio.Event()
+    # Gate immediately after receipt lock by intercepting source context read;
+    # all real SQL remains active. Two distinct source dependencies avoid other locks.
+    async def gate(repository, session, identity, **kwargs):
+        arrived.add(identity)
+        if len(arrived) == 2:
+            both.set()
+        await asyncio.wait_for(both.wait(), 2)
+        return await originals[repository](session, identity, **kwargs)
+    originals = {first.sources: first.sources.lock_context, second.sources: second.sources.lock_context}
+    for repository in originals:
+        async def wrapped(session, identity, _repository=repository, **kwargs):
+            return await gate(_repository, session, identity, **kwargs)
+        monkeypatch.setattr(repository, "lock_context", wrapped)
+    results = await asyncio.wait_for(asyncio.gather(first.publish(a, "admin"), second.publish(b, "admin"), return_exceptions=True), 5)
+    assert not any(isinstance(result, BaseException) for result in results), results
+    assert {result.operation_id for result in results} == {id_a, id_b}
+
+
+async def test_model_lock_remains_compatible_with_historical_key(pg_db):
+    import hashlib
+    from autobuild_json.gateway.providers.registry_writes import lock_model_names
+    key = int.from_bytes(hashlib.sha256(b"historical-model").digest()[:8], "big", signed=True)
+    async with pg_db.sessions.begin() as owner:
+        await lock_model_names(owner, ("historical-model",))
+        async with pg_db.sessions.begin() as contender:
+            assert not await contender.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": key})
+
+
 async def publication_case(db, upstream=("a", "b")):
     from autobuild_json.gateway.catalog.publish import Publisher
 

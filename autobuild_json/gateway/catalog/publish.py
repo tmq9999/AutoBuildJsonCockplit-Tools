@@ -28,6 +28,14 @@ def _same_stamp(actual, expected):
                              "proxy_id", "proxy_version", "content_digest"))
 
 
+async def _lock_receipt(session, identity):
+    # PostgreSQL's two-int advisory space is disjoint from the bigint space used
+    # by model/alias writers. Keep those historical model keys unchanged.
+    key = int.from_bytes(hashlib.sha256(identity.bytes).digest()[:4], "big", signed=True)
+    await session.execute(text("SELECT pg_advisory_xact_lock(CAST(:domain AS integer),CAST(:key AS integer))"),
+                          {"domain": 1094862672, "key": key})
+
+
 class Publisher:
     def __init__(self, db, sources):
         self.db, self.sources = db, sources
@@ -46,7 +54,7 @@ class Publisher:
         names = [item.public_model_id for item in request.selections]
         async with self.db.sessions.begin() as session:
             # The receipt lock makes concurrent retries deterministic before any registry mutation.
-            await lock_model_names(session, (f"publication:{request.id}",))
+            await _lock_receipt(session, request.id)
             receipt = (await session.execute(text("SELECT payload_digest,result FROM catalog_publications WHERE id=:id FOR UPDATE"),
                                              {"id": request.id})).mappings().first()
             if receipt is not None:

@@ -12,7 +12,7 @@ async def admin_env(pg_db):
     from autobuild_json.gateway.admin.routes import create_admin_router
     from autobuild_json.gateway.admin.services import AdminServices
     from autobuild_json.gateway.secrets import Vault
-    services = AdminServices(pg_db, Vault({"v1": b"a"*32}, active="v1"), b"p"*32)
+    services = AdminServices(pg_db, Vault({"v1": b"a"*32, "client_keys": b"p"*32}, active="v1"), b"p"*32)
     app = FastAPI()
     def authorized(request: Request):
         if request.headers.get("x-test-session") != "synthetic-session":

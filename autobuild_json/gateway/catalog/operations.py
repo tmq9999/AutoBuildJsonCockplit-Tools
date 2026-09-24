@@ -6,12 +6,12 @@ from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from math import isfinite
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from ..errors import GatewayError, SAFE_CODES
+from ..errors import GatewayError, SAFE_CODES, UpstreamRejected
 from .digests import operation_digest
 from .records import Claim, ConfigStamp, OperationRequest, OperationView, SourceContext
 
@@ -94,7 +94,9 @@ def _view(row) -> OperationView:
             raise GatewayError("invalid_state", 409)
         try:
             cost = Decimal(cost)
-        except InvalidOperation:
+            from ..metering.budgets import money
+            money(cost)
+        except (InvalidOperation, GatewayError):
             raise GatewayError("invalid_state", 409) from None
     return OperationView(
         id=row["id"], source_id=row["source_id"], kind=row["kind"], state=row["state"],
@@ -203,7 +205,38 @@ class OperationStore:
             await self._claim_client(session, request.id, existing["id"], digest)
             return _view(existing)
         await self._claim_client(session, request.id, row["id"], digest)
+        await session.execute(text("INSERT INTO audit_events(id,actor,action,record_id,details) VALUES (:id,:actor,'catalog.operation.enqueued',:record,CAST(:details AS jsonb))"),
+                              {"id": uuid4(), "actor": str(actor), "record": request.source_id,
+                               "details": json.dumps({"operation_id": str(row["id"]), "kind": request.kind})})
         return _view(row)
+
+    async def enqueue_claimed(self, request: OperationRequest, owner: UUID, actor) -> Claim:
+        """Enqueue and claim in one transaction for the synchronous legacy wrapper."""
+        async with self.db.sessions.begin() as session:
+            context = await self.sources.lock_context(session, request.source_id)
+            if context is None or not self._same_source_stamp(context.stamp, request.expected):
+                raise _error("version_conflict")
+            active = await session.scalar(text("SELECT id FROM provider_operations WHERE source_id=:source AND state IN ('queued','running') FOR UPDATE"), {"source": request.source_id})
+            replay = await self._claim_for_request(session, request.id, operation_digest(request))
+            if active is not None or replay is not None:
+                raise _error("operation_conflict")
+            view = await self.enqueue_in(session, request, actor, context)
+            claim = await self._claim_in(session, view.id, owner, context.route.timeout)
+            if claim is None:
+                raise _error("operation_conflict")
+            return claim
+
+    async def _claim_in(self, session, operation_id, owner, timeout):
+        row = (await session.execute(text("""UPDATE provider_operations SET state='running',owner=:owner,
+            generation=generation+1,started_at=clock_timestamp(),heartbeat_at=clock_timestamp(),
+            deadline=clock_timestamp()+make_interval(secs=>LEAST(:timeout,60)),version=version+1
+            WHERE id=:id AND state='queued' AND queued_expires_at>clock_timestamp()
+            RETURNING id,source_id,generation,deadline"""),
+            {"id": operation_id, "owner": owner, "timeout": timeout})).mappings().first()
+        if row is None:
+            return None
+        return Claim(operation_id=row["id"], source_id=row["source_id"], owner=owner,
+                     generation=row["generation"], deadline=row["deadline"])
 
     async def _claim_client(self, session, client_id: UUID, operation_id: UUID, digest: bytes) -> None:
         try:
@@ -248,17 +281,7 @@ class OperationStore:
                         finished_at=clock_timestamp(),version=version+1 WHERE id=:id AND state='queued'"""),
                                           {"id": operation_id})
                     return None
-                timeout = context.route.timeout
-                row = (await session.execute(text("""UPDATE provider_operations SET state='running',owner=:owner,
-                generation=generation+1,started_at=clock_timestamp(),heartbeat_at=clock_timestamp(),
-                deadline=clock_timestamp()+make_interval(secs=>LEAST(:timeout,60)),version=version+1
-                WHERE id=:id AND state='queued' AND queued_expires_at>clock_timestamp()
-                RETURNING id,source_id,generation,deadline"""),
-                {"id": operation_id, "owner": owner, "timeout": timeout})).mappings().first()
-                if row is None:
-                    return None
-                return Claim(operation_id=row["id"], source_id=row["source_id"], owner=owner,
-                             generation=row["generation"], deadline=row["deadline"])
+                return await self._claim_in(session, operation_id, owner, context.route.timeout)
         except GatewayError as exc:
             await self._stale(operation_id, "invalid_state" if exc.code != "not_found" else "not_found")
             return None
@@ -316,19 +339,27 @@ class OperationStore:
                 raise GatewayError("not_found", 404)
             if row["version"] != expected_version:
                 raise _error("version_conflict")
+            changed = False
             if row["state"] == "queued":
                 await session.execute(text("UPDATE provider_operations SET state='cancelled',finished_at=clock_timestamp(),version=version+1 WHERE id=:id"),
                                       {"id": operation_id})
+                changed = True
             elif row["state"] == "running" and not row["cancel_requested"]:
                 await session.execute(text("UPDATE provider_operations SET cancel_requested=true,version=version+1 WHERE id=:id"),
                                       {"id": operation_id})
-            return _view(await self._row(session, operation_id))
+                changed = True
+            result = _view(await self._row(session, operation_id))
+            if changed:
+                await session.execute(text("INSERT INTO audit_events(id,actor,action,record_id,details) VALUES (:id,:actor,'catalog.operation.cancelled',:record,CAST(:details AS jsonb))"), {"id": uuid4(), "actor": str(actor), "record": operation_id, "details": json.dumps({"operation_id": str(operation_id), "state": result.state})})
+            return result
 
     async def finish(self, claim: Claim, state: str, result=None, error=None, *, context=None) -> OperationView:
         if state not in {"succeeded", "failed", "cancelled", "stale", "usage_pending"}:
             raise GatewayError("invalid_request")
         code = error.code if isinstance(error, GatewayError) else error
         code = code if isinstance(code, str) and code in SAFE_CODES else ("internal_error" if code else None)
+        status = error.upstream_status if isinstance(error, UpstreamRejected) else None
+        retry = error.retry_after if isinstance(error, UpstreamRejected) else None
         async with self.db.sessions.begin() as session:
             if state == "succeeded" and context is not None:
                 try:
@@ -346,11 +377,13 @@ class OperationStore:
                 if not self._same_source_stamp(current.stamp, ConfigStamp.model_validate_json(json.dumps(expected))):
                     raise GatewayError("catalog_snapshot_stale", 409)
             updated = (await session.execute(text("""UPDATE provider_operations SET state=:state,
-                result=CAST(:result AS jsonb),error_code=:code,finished_at=clock_timestamp(),version=version+1
+                result=CAST(:result AS jsonb),error_code=:code,upstream_status=:status,retry_after=:retry,
+                finished_at=clock_timestamp(),version=version+1
                 WHERE id=:id AND owner=:owner AND generation=:generation AND state='running'
                   AND deadline>clock_timestamp()
                   AND (NOT cancel_requested OR :state IN ('cancelled','usage_pending')) RETURNING *"""),
                 {"state": state, "result": _safe_result(result) if result is not None else None, "code": code,
+                 "status": status, "retry": retry,
                  "id": claim.operation_id, "owner": claim.owner, "generation": claim.generation})).mappings().first()
             if updated is None:
                 raise _error("claim_lost")

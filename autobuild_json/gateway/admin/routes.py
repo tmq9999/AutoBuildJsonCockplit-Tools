@@ -26,15 +26,21 @@ class SafeAdminRoute(APIRoute):
             try:
                 if request.method in {'POST','PUT','PATCH','DELETE'} and await request.body():
                     request._json=exact_input(await request.json())
-                return await original(request)
+                response = await original(request)
             except RequestValidationError:
-                return JSONResponse({"error": "INVALID_REQUEST", "reason": "Invalid request fields"}, status_code=422)
+                response = JSONResponse({"error": "INVALID_REQUEST", "reason": "Invalid request fields"}, status_code=422)
             except GatewayError as exc:
-                return JSONResponse(exc.to_dict(), status_code=exc.status)
+                headers = {"Retry-After": str(exc.retry_after)} if type(exc.retry_after) is int and 0 <= exc.retry_after <= 86400 else None
+                catalog = (request.url.path.startswith(("/api/service/catalog/", "/api/service/provider-operations/"))
+                           or request.url.path.endswith("/discover"))
+                status = 422 if catalog and exc.status == 400 else exc.status
+                response = JSONResponse(exc.to_dict(), status_code=status, headers=headers)
             except SQLAlchemyError:
-                return JSONResponse({"error": "STORAGE_UNAVAILABLE"}, status_code=503)
+                response = JSONResponse({"error": "STORAGE_UNAVAILABLE"}, status_code=503)
             except ValueError:
-                return JSONResponse({'error':'INVALID_REQUEST'},status_code=422)
+                response = JSONResponse({'error':'INVALID_REQUEST'},status_code=422)
+            response.headers["Cache-Control"] = "no-store"
+            return response
         return handle
 
 
@@ -227,10 +233,11 @@ def create_admin_router(services, authorized):
         await services.ledger.adjust(identity, payload.amount_micro, "admin", payload.reason)
         return {"id": identity}
 
+    from .catalog_schemas import LegacyDiscoverInput
     @router.post('/providers/{identity}/discover')
-    async def provider_discovery(identity: UUID):
+    async def provider_discovery(identity: UUID, payload: LegacyDiscoverInput, request: Request):
         from .actions import discover
-        return await discover(services,identity)
+        return await discover(services, identity, request=request)
 
     @router.post('/playground')
     async def run_playground(payload: PlaygroundInput):
@@ -239,4 +246,6 @@ def create_admin_router(services, authorized):
 
     from .extra import mount_extra
     mount_extra(router,services)
+    from .catalog_routes import mount_catalog_routes
+    mount_catalog_routes(router, services)
     return router

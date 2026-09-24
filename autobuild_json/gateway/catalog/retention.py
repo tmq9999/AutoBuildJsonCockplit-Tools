@@ -24,6 +24,13 @@ class Retention:
     def __init__(self, db):
         self.db = db
 
+    async def protected_count(self, source_id) -> int:
+        """Read-only status for the requested source, independent of purge batches."""
+        from datetime import datetime, timezone
+        async with self.db.sessions() as session:
+            return await session.scalar(text(_RANKED + "SELECT count(*) FROM candidates WHERE protected AND source_id=:source"),
+                                        {"now": datetime.now(timezone.utc), "source": source_id})
+
     async def purge(self, now, limit=100) -> dict:
         async with self.db.sessions.begin() as session:
             # Serialize with source snapshot/publication writers, before operation

@@ -157,6 +157,14 @@ class SourceRepository:
             await self._audit(session, "catalog.source.updated", source_id, actor)
             return _view(row)
 
+    async def current_stamp(self, source_id: UUID) -> ConfigStamp:
+        """Administrative configuration view, including disabled sources."""
+        async with self.db.sessions.begin() as session:
+            try:
+                return (await self._load_context(session, source_id, skip_locked=False, allow_disabled=True)).stamp
+            except ValueError:
+                raise GatewayError("invalid_state", 409) from None
+
     async def context(self, source_id: UUID) -> SourceContext:
         async with self.db.sessions.begin() as session:
             return await self.lock_context(session, source_id)
@@ -170,18 +178,20 @@ class SourceRepository:
                 return None
         return await self._load_context(session, source_id, skip_locked=False)
 
-    async def _load_context(self, session, source_id: UUID, *, skip_locked: bool) -> SourceContext:
+    async def _load_context(self, session, source_id: UUID, *, skip_locked: bool,
+                            allow_disabled: bool = False) -> SourceContext:
         identity = (await session.execute(text("SELECT provider_id,credential_id FROM catalog_sources WHERE id=:id"),
                                           {"id": source_id})).mappings().first()
         if identity is None:
             raise GatewayError("not_found", 404)
         provider_row, credential_row, provider, proxy_row, proxy_id = await self._dependencies(
-            session, identity["provider_id"], identity["credential_id"], skip_locked=skip_locked)
+            session, identity["provider_id"], identity["credential_id"], skip_locked=skip_locked,
+            require_healthy=not allow_disabled, allow_missing_profile=allow_disabled)
         source_row = await _locked_row(session, "catalog_sources", source_id, skip_locked=skip_locked)
         if source_row is None:
             raise GatewayError("invalid_state", 409)
         if (source_row["provider_id"] != provider_row["id"] or
-                source_row["credential_id"] != credential_row["id"] or not source_row["enabled"]):
+                source_row["credential_id"] != credential_row["id"] or (not source_row["enabled"] and not allow_disabled)):
             raise GatewayError("invalid_state", 409)
         source = _view(source_row)
         self._mode(provider, source.mode)

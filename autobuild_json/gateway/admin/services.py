@@ -24,12 +24,18 @@ class AdminServices:
         self.engine = Engine(db, self.catalog, self.ledger, self.proxies, self.transport, vault,
                              digest_key=pepper, proxy_resolver=self.profiles.load)
         self.catalog_worker = None
+        self.sources = self.operations = self.snapshots = self.decisions = None
+        self.publisher = self.quotes = self.probe_accounting = None
+        self.discovery_client = self.operation_runner = None
         self._loop = None
         self._thread = None
+        self.build_catalog_worker()
 
     def build_catalog_worker(self):
         """Compose the maintenance worker without starting network/background work."""
         if self.catalog_worker is not None:
+            # Compatibility callers may replace transport after construction.
+            self.discovery_client.transport = self.transport
             return self.catalog_worker
         from ..catalog.sources import SourceRepository
         from ..catalog.operations import OperationStore
@@ -42,10 +48,19 @@ class AdminServices:
         from ..catalog.probe import ProbeService
         from ..catalog.probe_quote import ProbeQuotes
         from ..catalog.probe_accounting import ProbeAccounting
+        from ..catalog.decisions import DecisionStore
+        from ..catalog.publish import Publisher
+        from ..catalog.retention import Retention
         sources = SourceRepository(self.db, self.vault, self.pepper)
         operations = OperationStore(self.db, sources)
-        snapshots = SnapshotStore(self.db, sources, operations,
-                                   self.vault.derive_key("client_keys", "catalog-cursor-v1"))
+        try:
+            cursor_key = self.vault.derive_key("client_keys", "catalog-cursor-v1")
+        except ValueError:
+            # Older service keyrings predate the catalog cursor key slot. Keep
+            # startup/read paths compatible while new keyrings use the namespaced
+            # vault derivation above; no upstream network is performed here.
+            cursor_key = self.pepper
+        snapshots = SnapshotStore(self.db, sources, operations, cursor_key)
         limits = ProviderLimits(self.db)
         discovery = DiscoveryClient(self.transport, limits, self.engine.credential)
         quotes = ProbeQuotes(self.db, sources)
@@ -55,6 +70,10 @@ class AdminServices:
         runner = OperationRunner(sources, operations, snapshots, discovery, self.proxies,
                                  self.profiles, self.catalog, probe=probe)
         self.catalog_operations, self.catalog_sources = operations, sources
+        self.sources, self.operations, self.snapshots = sources, operations, snapshots
+        self.decisions, self.publisher, self.quotes = DecisionStore(self.db, sources), Publisher(self.db, sources), quotes
+        self.probe_accounting, self.discovery_client, self.operation_runner = accounting, discovery, runner
+        self.retention = Retention(self.db)
         self.catalog_worker = CatalogWorker(self.db, runner, Scheduler(self.db, operations, sources), probe)
         return self.catalog_worker
 

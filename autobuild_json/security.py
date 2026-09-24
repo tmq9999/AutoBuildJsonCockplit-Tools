@@ -4,7 +4,9 @@ import secrets
 import threading
 import time
 import uuid
+import re
 from collections import deque
+from urllib.parse import parse_qsl
 
 from fastapi import HTTPException
 from starlette.responses import JSONResponse
@@ -108,7 +110,7 @@ class BoundaryMiddleware:
         mutation = scope["method"] not in {"GET", "HEAD", "OPTIONS"}
         if (origin and origin != expected_origin) or (mutation and origin != expected_origin):
             return await reject(403, "INVALID_ORIGIN")
-        if scope.get("query_string"):
+        if scope.get("query_string") and not self._catalog_query(scope):
             return await reject(400, "QUERY_NOT_ALLOWED")
         if mutation and scope["method"] != "DELETE" and headers.get(b"content-type", b"").split(b";")[0].strip() != b"application/json":
             return await reject(415, "JSON_REQUIRED")
@@ -138,3 +140,29 @@ class BoundaryMiddleware:
                 ]
             await send(message)
         await self.app(scope, replay, secured_send)
+
+    @staticmethod
+    def _catalog_query(scope):
+        """Permit only the private catalog's read-only, non-secret query contract."""
+        if scope["method"] != "GET":
+            return False
+        path = scope.get("path", "")
+        if path == "/api/service/catalog/sources":
+            allowed = {"provider_id"}
+        elif re.fullmatch(r"/api/service/catalog/sources/[0-9a-fA-F-]{36}/entries", path):
+            allowed = {"cursor", "limit", "diff"}
+        elif re.fullmatch(r"/api/service/catalog/sources/[0-9a-fA-F-]{36}/probe-quote", path):
+            allowed = {"binding_id"}
+        else:
+            return False
+        raw = scope["query_string"]
+        if len(raw) > 16384:
+            return False
+        try:
+            pairs = parse_qsl(raw.decode("ascii"), keep_blank_values=True, strict_parsing=True,
+                              errors="strict", max_num_fields=3)
+            return bool(pairs) and len({key for key, _ in pairs}) == len(pairs) and all(
+                key in allowed and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+                for key, value in pairs)
+        except (ValueError, UnicodeError):
+            return False
