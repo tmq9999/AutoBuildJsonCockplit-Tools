@@ -50,6 +50,40 @@ async def test_snapshot_rejects_sensitive_metadata(pg_db):
     assert caught.value.code == "invalid_request"
 
 
+@pytest.mark.parametrize("payload", [
+    {"outer": {"auth": "secret-value"}},
+    {"outer": [{"api_key": "synthetic"}]},
+    [{"safe": ["ok", "Bearer synthetic-token"]}],
+    {"safe": {"nested": ["line\nbreak"]}},
+])
+async def test_snapshot_rejects_nested_sensitive_metadata(pg_db, payload):
+    from datetime import datetime, timezone
+    from autobuild_json.gateway.catalog.records import CatalogEntry, ObservedValue
+    from autobuild_json.gateway.errors import GatewayError
+    from tests.gateway.catalog_support import snapshot_case
+
+    entry = CatalogEntry(upstream_id="nested", metadata={
+        "info": ObservedValue(value=payload, observed_at=datetime(2026, 9, 24, tzinfo=timezone.utc))
+    })
+    with pytest.raises(GatewayError) as caught:
+        await snapshot_case(pg_db, (entry,))
+    assert caught.value.code == "invalid_request"
+
+
+async def test_snapshot_keeps_safe_nested_metadata(pg_db):
+    from datetime import datetime, timezone
+    from autobuild_json.gateway.catalog.records import CatalogEntry, ObservedValue
+    from tests.gateway.catalog_support import snapshot_case
+
+    entry = CatalogEntry(upstream_id="nested", metadata={
+        "capabilities": ObservedValue(value={"modalities": ["text", "image"], "limits": {"input": 1000}},
+                                      path="capabilities", observed_at=datetime(2026, 9, 24, tzinfo=timezone.utc))
+    })
+    _, source, store, _ = await snapshot_case(pg_db, (entry,))
+    assert (await store.page(source.id)).items[0].entry.metadata["capabilities"].value == {
+        "modalities": ["text", "image"], "limits": {"input": 1000}}
+
+
 async def test_cursor_for_purged_snapshot_is_stale(pg_db):
     from sqlalchemy import text
     from tests.gateway.catalog_support import snapshot_case

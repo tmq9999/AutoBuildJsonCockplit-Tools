@@ -31,16 +31,30 @@ _SENSITIVE = re.compile(r"(?:secret|token|password|api[_-]?key|authorization|coo
 
 
 def _safe_entry(entry: CatalogEntry) -> CatalogEntry:
+    nodes = 0
+
+    def walk(value, depth=0):
+        nonlocal nodes
+        nodes += 1
+        if nodes > 1000 or depth > 12:
+            raise ValueError("metadata_bounds")
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if not isinstance(key, str) or _SENSITIVE.search(key) or any(ord(char) < 32 or ord(char) == 127 for char in key):
+                    raise ValueError("sensitive_metadata")
+                walk(child, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                walk(child, depth + 1)
+        elif isinstance(value, str):
+            if any(ord(char) < 32 or ord(char) == 127 for char in value) or _SENSITIVE.search(value):
+                raise ValueError("sensitive_metadata")
+
     try:
         for name, observed in entry.metadata.items():
-            if _SENSITIVE.search(name):
+            if _SENSITIVE.search(name) or any(ord(char) < 32 or ord(char) == 127 for char in name):
                 raise ValueError("sensitive_metadata")
-            for value in (observed.value if isinstance(observed.value, (list, dict)) else (observed.value,)):
-                values = value.values() if isinstance(value, dict) else value if isinstance(value, list) else (value,)
-                for item in values:
-                    if isinstance(item, str) and (any(ord(char) < 32 or ord(char) == 127 for char in item)
-                                                  or _SENSITIVE.search(item)):
-                        raise ValueError("sensitive_metadata")
+            walk(observed.value)
         return entry.model_copy(deep=True)
     except (TypeError, ValueError, ValidationError) as exc:
         raise GatewayError("invalid_request") from exc
