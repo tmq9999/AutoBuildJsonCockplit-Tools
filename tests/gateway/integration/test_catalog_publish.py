@@ -300,3 +300,32 @@ async def test_manual_binding_edit_invalidates_publish_version(pg_db):
         assert await session.scalar(text("SELECT count(*) FROM catalog_publications")) == 1
         assert await session.scalar(text("SELECT config->>'upstream_model' FROM model_bindings WHERE id=:id"),
                                     {"id": binding_id}) == "manual"
+
+
+async def test_scheduler_manual_publish_lock_order_completes_under_event_gate(pg_db, monkeypatch):
+    import asyncio
+    from autobuild_json.gateway.catalog.operations import OperationStore
+    from autobuild_json.gateway.catalog.scheduler import Scheduler
+
+    publisher, source, _, selected, request = await publication_case(pg_db, upstream=("gated",))
+    sources = publisher.sources
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("UPDATE catalog_sources SET schedule_enabled=true,next_run_at=clock_timestamp()-interval '1 second' WHERE id=:id"), {"id": source.id})
+    scheduler = Scheduler(pg_db, OperationStore(pg_db, sources), sources)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = sources.lock_context
+    calls = 0
+    async def gated(session, source_id, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return await original(session, source_id, **kwargs)
+    monkeypatch.setattr(sources, "lock_context", gated)
+    pub_task = asyncio.create_task(publisher.publish(request(selected("gated", "gated")), "admin"))
+    await asyncio.wait_for(entered.wait(), 2)
+    scheduler_task = asyncio.create_task(scheduler.tick())
+    release.set()
+    results = await asyncio.wait_for(asyncio.gather(pub_task, scheduler_task, return_exceptions=True), 3)
+    assert all(not isinstance(result, asyncio.TimeoutError) for result in results)

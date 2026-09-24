@@ -197,3 +197,28 @@ async def test_stop_wakes_worker_during_blocked_scheduler(pg_db, monkeypatch):
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_cancellation_joins_scheduler_and_stop_helpers(pg_db, monkeypatch):
+    from autobuild_json.gateway.catalog.worker import CatalogWorker
+    from autobuild_json.gateway.catalog.scheduler import Scheduler
+    async with runner_case(pg_db) as case:
+        scheduler = Scheduler(pg_db, case.ops, case.sources)
+        entered, cleaned = asyncio.Event(), asyncio.Event()
+        async def stalled():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+        monkeypatch.setattr(scheduler, "tick", stalled)
+        worker = CatalogWorker(pg_db, case.runner, scheduler)
+        stopped = asyncio.Event()
+        before = asyncio.all_tasks()
+        task = asyncio.create_task(worker.run(stopped))
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cleaned.is_set()
+        assert not (asyncio.all_tasks() - before)

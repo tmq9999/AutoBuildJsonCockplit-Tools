@@ -37,6 +37,7 @@ class CatalogWorker:
 
     async def run(self, stopped: asyncio.Event) -> None:
         tasks = {}
+        helpers = set()
         next_repair = 0.0
         loop = asyncio.get_running_loop()
         try:
@@ -52,6 +53,7 @@ class CatalogWorker:
                     if self.scheduler is not None:
                         tick = asyncio.create_task(self.scheduler.tick())
                         stop_wait = asyncio.create_task(stopped.wait())
+                        helpers.update((tick, stop_wait))
                         done, pending = await asyncio.wait({tick, stop_wait}, timeout=1, return_when=asyncio.FIRST_COMPLETED)
                         for task in pending:
                             task.cancel()
@@ -59,10 +61,16 @@ class CatalogWorker:
                         if not done:
                             tick.cancel()
                             await asyncio.gather(tick, return_exceptions=True)
+                            helpers.discard(tick)
+                            helpers.discard(stop_wait)
                             continue
                         if stop_wait in done:
+                            helpers.discard(tick)
+                            helpers.discard(stop_wait)
                             break
                         await tick
+                        helpers.discard(tick)
+                        helpers.discard(stop_wait)
                     if len(tasks) < 2:
                         async with self.db.sessions() as session:
                             queued = (await session.execute(text("SELECT id FROM provider_operations WHERE state='queued' "
@@ -77,6 +85,15 @@ class CatalogWorker:
                 except asyncio.TimeoutError:
                     pass
         finally:
+            for helper in helpers:
+                helper.cancel()
+            helper_cleanup = asyncio.gather(*helpers, return_exceptions=True)
+            while not helper_cleanup.done():
+                try:
+                    await asyncio.shield(helper_cleanup)
+                except asyncio.CancelledError:
+                    continue
+            await helper_cleanup
             for task in tasks:
                 task.cancel()
             # Task7 runner owns a shared <=5s cancellation/cleanup budget.

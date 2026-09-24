@@ -28,8 +28,13 @@ class Retention:
         async with self.db.sessions.begin() as session:
             # Serialize with source snapshot/publication writers, before operation
             # locks. Deletion never asks for provider locks, avoiding a reverse edge.
+            # Only sources that can actually yield an unprotected row consume
+            # the bounded deletion-source budget. Protected-only sources are
+            # intentionally excluded here so low UUIDs cannot starve purgeable
+            # sources forever; their protected rows remain untouched.
             sources = (await session.execute(text(_RANKED + "SELECT DISTINCT source_id FROM candidates "
-                "ORDER BY source_id LIMIT :limit"), {"now": now, "limit": max(0, min(limit, 100))})).scalars().all()
+                "WHERE NOT protected ORDER BY source_id LIMIT :limit"),
+                {"now": now, "limit": max(0, min(limit, 100))})).scalars().all()
             deleted = 0
             protected = {}
             for source_id in sources:
