@@ -38,6 +38,7 @@ class CatalogWorker:
     async def run(self, stopped: asyncio.Event) -> None:
         tasks = {}
         helpers = set()
+        self._helper_tasks = helpers
         next_repair = 0.0
         loop = asyncio.get_running_loop()
         try:
@@ -51,26 +52,8 @@ class CatalogWorker:
                         await self.repair_expired()
                         next_repair = loop.time() + 15
                     if self.scheduler is not None:
-                        tick = asyncio.create_task(self.scheduler.tick())
-                        stop_wait = asyncio.create_task(stopped.wait())
-                        helpers.update((tick, stop_wait))
-                        done, pending = await asyncio.wait({tick, stop_wait}, timeout=1, return_when=asyncio.FIRST_COMPLETED)
-                        for task in pending:
-                            task.cancel()
-                        await asyncio.gather(*pending, return_exceptions=True)
-                        if not done:
-                            tick.cancel()
-                            await asyncio.gather(tick, return_exceptions=True)
-                            helpers.discard(tick)
-                            helpers.discard(stop_wait)
-                            continue
-                        if stop_wait in done:
-                            helpers.discard(tick)
-                            helpers.discard(stop_wait)
+                        if await self._scheduler_pass(stopped, helpers):
                             break
-                        await tick
-                        helpers.discard(tick)
-                        helpers.discard(stop_wait)
                     if len(tasks) < 2:
                         async with self.db.sessions() as session:
                             queued = (await session.execute(text("SELECT id FROM provider_operations WHERE state='queued' "
@@ -105,6 +88,32 @@ class CatalogWorker:
                 except asyncio.CancelledError:
                     continue
             await cleanup
+            self._helper_tasks = set()
+
+    async def _scheduler_pass(self, stopped, helpers) -> bool:
+        """Run one bounded scheduler tick and always join both helper tasks."""
+        tick = asyncio.create_task(self.scheduler.tick())
+        stop_wait = asyncio.create_task(stopped.wait())
+        helpers.update((tick, stop_wait))
+        try:
+            done, pending = await asyncio.wait({tick, stop_wait}, timeout=1,
+                                               return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if not done:
+                return False
+            if stop_wait in done:
+                return True
+            await tick
+            return False
+        finally:
+            for helper in (tick, stop_wait):
+                if not helper.done():
+                    helper.cancel()
+            await asyncio.gather(tick, stop_wait, return_exceptions=True)
+            helpers.discard(tick)
+            helpers.discard(stop_wait)
 
     async def repair_expired(self, limit=100) -> int:
         limit = max(0, min(limit, 100))

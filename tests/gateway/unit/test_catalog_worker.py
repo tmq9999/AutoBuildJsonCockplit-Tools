@@ -222,3 +222,31 @@ async def test_cancellation_joins_scheduler_and_stop_helpers(pg_db, monkeypatch)
             await task
         assert cleaned.is_set()
         assert not (asyncio.all_tasks() - before)
+
+
+async def test_repeated_scheduler_failures_join_helpers_each_iteration(pg_db, monkeypatch):
+    from autobuild_json.gateway.catalog.worker import CatalogWorker
+    from autobuild_json.gateway.catalog.scheduler import Scheduler
+    async with runner_case(pg_db) as case:
+        scheduler = Scheduler(pg_db, case.ops, case.sources)
+        stopped = asyncio.Event()
+        worker = CatalogWorker(pg_db, case.runner, scheduler)
+        async def no_repair(*args, **kwargs):
+            return 0
+        monkeypatch.setattr(worker, "repair_expired", no_repair)
+        calls = 0
+        task = None
+        async def failing_tick():
+            nonlocal calls
+            calls += 1
+            assert worker._helper_tasks and all(not helper.done() for helper in worker._helper_tasks)
+            if calls == 3:
+                stopped.set()
+            raise RuntimeError("synthetic scheduler failure")
+        monkeypatch.setattr(scheduler, "tick", failing_tick)
+        before = asyncio.all_tasks()
+        task = asyncio.create_task(worker.run(stopped))
+        await asyncio.wait_for(task, 5)
+        assert calls == 3
+        assert worker._helper_tasks == set()
+        assert not (asyncio.all_tasks() - before)
