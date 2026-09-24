@@ -1,8 +1,9 @@
 # Provider & Catalog — đợt 1 của gateway mở rộng
 
-Ngày: 2026-09-24. Trạng thái: **bản đặc tả chờ người dùng duyệt**.
-Người dùng đã duyệt hướng thiết kế trong hội thoại bằng “được”; phản hồi đó
-cho phép viết tài liệu này, chưa phê duyệt nội dung chi tiết hoặc kế hoạch code.
+Ngày: 2026-09-24. Trạng thái: **đặc tả đã được người dùng duyệt**.
+Người dùng duyệt file spec qua phản hồi “tiếp” sau khi nhận đường dẫn tài liệu
+và câu hỏi duyệt bản này. Bước tiếp theo là viết và trình kế hoạch triển khai;
+việc duyệt spec chưa phải duyệt kế hoạch hoặc cho phép bỏ qua bước đó.
 
 Nền kỹ thuật: commit `20a1caf` trên `feat/api-gateway`, đã mở
 [PR #1](https://github.com/tmq9999/AutoBuildJsonCockplit-Tools/pull/1), chưa merge
@@ -488,5 +489,5 @@ live chỉ thực hiện riêng khi người dùng cung cấp credential và ph�
 Đã tự rà soát scope, source/snapshot/publish/probe, scheduler, concurrency và
 uncertain billing; bổ sung digest không phụ thuộc thời điểm quan sát, phân biệt
 version/fingerprint, legacy wrapper và giới hạn hủy request đã gửi. Không có phần
-code đã được triển khai bởi tài liệu này. Sau khi người dùng duyệt **file spec**,
-mới viết kế hoạch triển khai chi tiết và trình lựa chọn cách thực thi.
+code đã được triển khai bởi tài liệu này. Người dùng đã duyệt file spec; kế hoạch
+triển khai và cách thực thi là cửa duyệt tiếp theo.
