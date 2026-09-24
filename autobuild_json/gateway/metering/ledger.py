@@ -33,8 +33,27 @@ class Ledger:
         return owner, enabled, key
 
     @asynccontextmanager
-    async def _request(self, request_id):
+    async def _request(self, request_id, *, route=None):
         async with self.db.sessions.begin() as session:
+            if route is not None:
+                # Attribution INSERT takes implicit FK KEY SHARE locks. Take
+                # their DB-resolved parents before accounting locks, matching
+                # provider/credential -> model/binding -> customer/key writers.
+                from ..providers.registry_writes import lock_model_names
+                parent = (await session.execute(text("SELECT provider_id,credential_id,model_id FROM model_bindings "
+                    "WHERE id=:id"), {"id": route.binding_id})).mappings().first()
+                if parent is None or (parent["provider_id"], parent["credential_id"], parent["model_id"]) != (
+                        route.provider_id, route.credential_id, route.public_model_id):
+                    raise GatewayError("invalid_state", 409, "quota")
+                for table, identity in (("providers", parent["provider_id"]), ("credentials", parent["credential_id"])):
+                    await session.execute(text(f"SELECT id FROM {table} WHERE id=:id FOR KEY SHARE"), {"id": identity})
+                await lock_model_names(session, (parent["model_id"],))
+                await session.execute(text("SELECT id FROM model_bindings WHERE id=:id FOR KEY SHARE"),
+                                      {"id": route.binding_id})
+                current = (await session.execute(text("SELECT provider_id,credential_id,model_id FROM model_bindings "
+                    "WHERE id=:id"), {"id": route.binding_id})).mappings().first()
+                if current != parent:
+                    raise GatewayError("invalid_state", 409, "quota")
             key_id = await session.scalar(text("SELECT key_id FROM requests WHERE id=:id"), {"id": request_id})
             if key_id is None:
                 raise GatewayError("not_found", 404, "quota")
@@ -111,13 +130,21 @@ class Ledger:
                  "expiry": now + timedelta(hours=24) if admission.idempotency_digest else None})
         return Hold(admission.request_id, admission.principal.key_id, amount)
 
-    async def mark_dispatched(self, request_id, attempt_id):
-        async with self._request(request_id) as (session, row, _):
+    async def mark_dispatched(self, request_id, attempt_id, *, route=None):
+        async with self._request(request_id, route=route) as (session, row, _):
             count = await session.scalar(text("SELECT count(*) FROM attempts WHERE request_id=:id"), {"id": request_id})
             if row["state"] != "reserved" or count >= 2 or row["deadline"] <= await self._now(session):
                 raise GatewayError("invalid_state", 409, "quota")
-            await session.execute(text("INSERT INTO attempts(id,request_id) VALUES (:attempt,:id)"),
-                                  {"attempt": attempt_id, "id": request_id})
+            if route is not None and row["model_id"] != route.public_model_id:
+                raise GatewayError("invalid_state", 409, "quota")
+            if route is None:
+                await session.execute(text("INSERT INTO attempts(id,request_id) VALUES (:attempt,:id)"),
+                                      {"attempt": attempt_id, "id": request_id})
+            else:
+                await session.execute(text("INSERT INTO attempts(id,request_id,provider_id,credential_id,binding_id,config_version) "
+                    "VALUES (:attempt,:id,:provider,:credential,:binding,:version)"),
+                    {"attempt": attempt_id, "id": request_id, "provider": route.provider_id,
+                     "credential": route.credential_id, "binding": route.binding_id, "version": route.config_version})
             await session.execute(text("UPDATE requests SET state='dispatched' WHERE id=:id"), {"id": request_id})
 
     async def mark_rejected(self, request_id, attempt_id, evidence):

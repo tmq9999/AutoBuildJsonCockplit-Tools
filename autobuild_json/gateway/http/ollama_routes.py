@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 
 from ..errors import GatewayError
 from ..protocols.ollama import OllamaCodec
-from .auth import client_secret
+from .auth import client_secret, gateway_session
 from .streaming import GatewayStreamResponse
 
 
@@ -37,7 +37,8 @@ def ollama_router(identity, catalog, engine):
             raise GatewayError("invalid_request") from None
         codec = OllamaCodec(generate=generate)
         decoded = codec.decode(body, {})
-        prepared = await engine.prepare(principal, decoded, engine.meta(body, request.headers.get("idempotency-key"), protocol="ollama"))
+        prepared = await engine.prepare(principal, decoded, engine.meta(body, request.headers.get("idempotency-key"), protocol="ollama",
+            session_digest=await engine.session_digest(principal, decoded.model, gateway_session(request))))
         codec.response_id = prepared.collector.id
         if decoded.stream:
             return GatewayStreamResponse(prepared, codec)

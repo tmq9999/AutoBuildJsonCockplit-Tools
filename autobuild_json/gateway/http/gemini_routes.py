@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 
 from ..errors import GatewayError
 from ..protocols.gemini import GeminiCodec, validate_query
-from .auth import client_secret
+from .auth import client_secret, gateway_session
 from .streaming import GatewayStreamResponse
 
 
@@ -39,7 +39,8 @@ def gemini_router(identity, catalog, engine):
             raise GatewayError("invalid_request") from None
         codec = GeminiCodec()
         decoded = codec.decode(body, {"model": model, "stream": streaming})
-        meta = engine.meta(body, request.headers.get("idempotency-key"), protocol="gemini")
+        meta = engine.meta(body, request.headers.get("idempotency-key"), protocol="gemini",
+                           session_digest=await engine.session_digest(principal, decoded.model, gateway_session(request)))
         if action == "countTokens":
             return {"totalTokens": await engine.count_tokens(principal, decoded, meta)}
         prepared = await engine.prepare(principal, decoded, meta)

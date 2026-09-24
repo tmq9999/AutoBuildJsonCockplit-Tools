@@ -24,9 +24,11 @@ from .providers.codex import CodexAdapter
 from .providers.preflight import validate_request
 from .providers.limits import ProviderLimits
 from .accounts.imports import CredentialService
+from .accounts.proxy_selection import AccountProxyResolver
 from .proxy.config import ProxySelection
 from .secrets import Ciphertext
-from .routing.continuations import ContinuationStore, ContinuationScope, ContinuationBinding
+from .routing.continuations import ContinuationStore, ContinuationBinding
+from .routing import session as routing_session
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class RequestMeta:
     idempotency_digest: bytes | None = None
     payload_digest: bytes | None = None
     protocol: str = "openai"
+    session_digest: bytes | None = None
 
 
 class Engine:
@@ -67,7 +70,13 @@ class Engine:
             raise GatewayError("upstream_unavailable", 503)
         return self.vault.open("credential", route.credential_id, Ciphertext.from_dict(cipher)).decode()
 
-    def meta(self, body, idempotency_key=None, *, protocol="openai"):
+    async def session_digest(self, principal, model, value):
+        if value is None:
+            return None
+        model_id = await self.catalog.resolve_model(principal, model)
+        return routing_session.session_digest(self.digest_key, principal, model_id, value)
+
+    def meta(self, body, idempotency_key=None, *, protocol="openai", session_digest=None):
         now = datetime.now(timezone.utc)
         claim, payload = None, None
         if idempotency_key is not None:
@@ -76,7 +85,7 @@ class Engine:
             claim = hmac.new(self.digest_key, b"abgw:claim:"+idempotency_key.encode(), hashlib.sha256).digest()
             payload = hmac.new(self.digest_key, b"abgw:payload:"+json.dumps(body, sort_keys=True,
                                separators=(",", ":")).encode(), hashlib.sha256).digest()
-        return RequestMeta(uuid4(), now, now+timedelta(seconds=180), claim, payload, protocol)
+        return RequestMeta(uuid4(), now, now+timedelta(seconds=180), claim, payload, protocol, session_digest)
 
     async def count_tokens(self, principal, request, meta):
         routes = await self.catalog.candidates(principal, request)
@@ -123,22 +132,18 @@ class Engine:
             raise
 
     async def prepare(self, principal, request, meta):
-        if request.continuation:
-            model_id = await self.catalog.resolve_model(principal, request.model)
-            scope = ContinuationScope(principal.customer_id, principal.key_id, model_id)
-            binding = await self.continuations.resolve(request.continuation, scope)
-            routes = await self.catalog.candidates(principal, request, binding_id=binding.route_id)
-            routes = [route for route in routes if route.credential_id == binding.credential_id]
-            if not routes:
-                raise GatewayError("invalid_state")
-            request = request.model_copy(update={"continuation": binding.upstream_id})
-        else:
-            routes = await self.catalog.candidates(principal, request)
-            scope = ContinuationScope(principal.customer_id, principal.key_id, routes[0].public_model_id)
+        selection_state = await routing_session.select(self, principal, request, meta)
+        request, routes, scope = selection_state.request, selection_state.routes, selection_state.scope
         route = routes[0]
         if route.adapter not in self.adapters:
             raise GatewayError("upstream_unavailable", 503)
         codex = route.adapter == "codex_oauth"
+        if codex:
+            # A fresh Codex call may retry only a distinct account on this
+            # provider. Never let a duplicate binding consume that opportunity.
+            fallback = next((r for r in routes[1:] if r.provider_id == route.provider_id
+                             and r.credential_id != route.credential_id and r.adapter == "codex_oauth"), None)
+            routes = (route, fallback) if fallback and not selection_state.pinned and selection_state.retry_limit else (route,)
         if codex and request.options.max_output_tokens is not None:
             raise GatewayError("unsupported_feature")
         max_output = route.bounds.output_tokens if codex else request.options.max_output_tokens or min(4096, route.bounds.output_tokens)
@@ -158,20 +163,23 @@ class Engine:
         hinted_providers = set()
         try:
             for number, selected in enumerate(routes[:2]):
+                attempt_output = selected.bounds.output_tokens if codex else max_output
                 validate_request(request,selected)
-                if selected.adapter not in self.adapters or max_output > selected.bounds.output_tokens:
+                if selected.adapter not in self.adapters or attempt_output > selected.bounds.output_tokens:
                     raise GatewayError("upstream_unavailable", 503)
                 if (selected.adapter == "codex_oauth") != codex:
                     raise GatewayError("unsupported_feature")
                 if number:
-                    hold = await self.ledger.resize(hold, Bounds(selected.bounds.input_tokens, max_output))
+                    hold = await self.ledger.resize(hold, Bounds(selected.bounds.input_tokens, attempt_output))
                 selection = ProxySelection("direct")
-                if selected.proxy_profile_id is not None:
+                stamp = None
+                if codex:
+                    await self.credentials.fresh_tokens(selected.credential_id, deadline)
+                    selection, stamp = await AccountProxyResolver(self.db, self.proxy_resolver).policy(selected.credential_id)
+                elif selected.proxy_profile_id is not None:
                     if self.proxy_resolver is None:
                         raise GatewayError("proxy_not_ready", 503, "proxy")
                     selection = await self.proxy_resolver(selected.proxy_profile_id)
-                if codex:
-                    await self.credentials.fresh_tokens(selected.credential_id, deadline)
                 lease = await stack.enter_async_context(self.proxies.acquire(selection, meta.request_id, deadline))
                 await self.transport._validate(selected,lease.proxy)
                 await stack.enter_async_context(self.provider_limits.acquire(selected,deadline))
@@ -185,53 +193,88 @@ class Engine:
                         raise GatewayError("upstream_unavailable", 503)
                     rates = [price.input_per_million, price.cache_read_per_million or price.input_per_million,
                              price.cache_write_per_million or price.input_per_million]
-                    upper = (selected.bounds.input_tokens*max(rates)+max_output*price.output_per_million)/1_000_000
+                    upper = (selected.bounds.input_tokens*max(rates)+attempt_output*price.output_per_million)/1_000_000
                     await self.budgets.reserve(selected.budget_id, attempt, price.currency,
                                                upper.quantize(Decimal("0.000000000001"), rounding=ROUND_CEILING),request_id=meta.request_id)
                     budget_attempt = attempt
-                await self.ledger.mark_dispatched(meta.request_id, attempt)
+                await routing_session.revalidate(self, principal, request, selected, stamp)
+                await self.ledger.mark_dispatched(meta.request_id, attempt, route=selected)
                 dispatched = True
                 try:
+                    # Attribution may wait on FK/config writers. Fence again
+                    # after its committed transaction and before provider I/O.
+                    try:
+                        await routing_session.revalidate(self, principal, request, selected, stamp)
+                    except BaseException:
+                        await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
+                        dispatched = False
+                        raise
                     stream = await stack.enter_async_context(self.adapters[selected.adapter].open(request, selected, lease))
                 except UpstreamRejected as exc:
-                    received_at = time.monotonic()
+                    received_at = getattr(exc, "received_at", time.monotonic())
                     if exc.upstream_status == 429 and exc.retry_after is not None:
                         hinted_providers.add(selected.provider_id)
                     await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
                     dispatched = False
+                    if codex:
+                        await self.catalog.credential_outcome(selected.provider_id, selected.credential_id, exc.code)
                     if budget_attempt is not None:
                         await self.budgets.settle(budget_attempt, Decimal(0))
                         budget_attempt = None
-                    await stack.aclose()
-                    stack = AsyncExitStack()
                     if exc.upstream_status == 429:
-                        await self.catalog.cooldown(selected.provider_id, None,
+                        await self.catalog.cooldown(selected.provider_id, selected.credential_id if codex else None,
                                                     exc.retry_after if exc.retry_after is not None else 60,
                                                     started_at=received_at)
-                    if not exc.safe_retry or number == 1 or len(routes) < 2 or routes[1].provider_id == selected.provider_id:
+                    await stack.aclose()
+                    stack = AsyncExitStack()
+                    if (not exc.safe_retry or number == 1 or len(routes) < 2 or selection_state.pinned
+                            or not codex and routes[1].provider_id == selected.provider_id):
                         if exc.upstream_status == 429:
                             # No promise for untried/unhinted providers. Re-read
                             # local deadlines, including routes already cooling at
                             # selection and longer concurrent cooldown updates.
                             if {r.provider_id for r in routes} <= hinted_providers:
                                 exc.retry_after = await self.catalog.retry_after(
-                                    principal, request, binding_id=selected.binding_id if request.continuation else None)
+                                    principal, request, binding_id=selected.binding_id if codex or selection_state.pinned else None)
                             else:
                                 exc.retry_after = None
                         raise
                     continue
                 return PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt, scope)
             raise GatewayError("upstream_unavailable", 503)
-        except BaseException:
+        except BaseException as error:
+            failure_code = error.code if isinstance(error, GatewayError) else "upstream_error"
+            async def cleanup():
+                try:
+                    if budget_attempt is not None:
+                        await self.budgets.settle(budget_attempt, None if dispatched else Decimal(0))
+                    if dispatched:
+                        await self.ledger.mark_pending(meta.request_id, "interrupted")
+                        if codex:
+                            await self.catalog.credential_outcome(selected.provider_id, selected.credential_id, failure_code)
+                    else:
+                        await self.ledger.release_unspent(meta.request_id, "not_dispatched")
+                finally:
+                    await stack.aclose()
+            owned = asyncio.create_task(asyncio.wait_for(cleanup(), 5))
+            cancelled = isinstance(error, asyncio.CancelledError)
             try:
-                if budget_attempt is not None:
-                    await self.budgets.settle(budget_attempt, None if dispatched else Decimal(0))
-                if dispatched:
-                    await self.ledger.mark_pending(meta.request_id, "interrupted")
-                else:
-                    await self.ledger.release_unspent(meta.request_id, "not_dispatched")
-            finally:
-                await stack.aclose()
+                while not owned.done():
+                    try:
+                        await asyncio.shield(owned)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                await owned
+            except asyncio.TimeoutError:
+                if cancelled:
+                    raise asyncio.CancelledError from None
+                raise GatewayError("deadline_exceeded", 504, "request") from None
+            except Exception:
+                if cancelled:
+                    raise asyncio.CancelledError from None
+                raise GatewayError("storage_unavailable", 503, "storage") from None
+            if cancelled:
+                raise asyncio.CancelledError
             raise
 
 
@@ -258,6 +301,8 @@ class PreparedCall:
             if usage.input_tokens>input_bound or usage.output_tokens>output_bound:
                 await session.execute(text("UPDATE model_bindings SET config=jsonb_set(config,'{enabled}','false'::jsonb),version=version+1 WHERE id=:id"),{'id':self.route.binding_id})
                 await self.engine.catalog._audit(session,'binding.quarantined.usage_bound',self.route.binding_id)
+        if self.route.adapter == "codex_oauth":
+            await self.engine.catalog.credential_outcome(self.route.provider_id, self.route.credential_id)
 
     async def events(self):
         if self.started:
@@ -288,7 +333,13 @@ class PreparedCall:
             if not self.settled:
                 raise GatewayError("upstream_error", 502, "stream")
         except ValueError:
+            if self.route.adapter == "codex_oauth":
+                await self.engine.catalog.credential_outcome(self.route.provider_id, self.route.credential_id, "upstream_error")
             raise GatewayError("upstream_error", 502, "stream") from None
+        except GatewayError as error:
+            if self.route.adapter == "codex_oauth":
+                await self.engine.catalog.credential_outcome(self.route.provider_id, self.route.credential_id, error.code)
+            raise
         finally:
             await self.close()
 

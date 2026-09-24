@@ -17,3 +17,15 @@ def client_secret(request):
     if not values or not values[0] or any(value != values[0] for value in values):
         raise GatewayError("invalid_api_key", 401, "auth")
     return values[0]
+
+
+def gateway_session(request):
+    values = request.headers.getlist("x-gateway-session")
+    if len(values) > 1:
+        raise GatewayError("invalid_request")
+    if not values:
+        return None
+    value = values[0]
+    if not 1 <= len(value) <= 200 or any(not 32 <= ord(char) <= 126 for char in value):
+        raise GatewayError("invalid_request")
+    return value

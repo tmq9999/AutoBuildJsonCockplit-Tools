@@ -33,7 +33,9 @@ class CodexAdapter:
             headers=(("chatgpt-account-id", account_id),), deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status in {400, 401, 403, 404, 422, 429}:
-                raise UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
+                rejected = UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))
+                rejected.received_at = time.monotonic()
+                raise rejected
             if response.status != 200:
                 raise GatewayError("upstream_error", 502)
             yield ProviderStream(response, responses_events(response))

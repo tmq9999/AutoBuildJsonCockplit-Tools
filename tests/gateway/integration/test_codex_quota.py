@@ -235,11 +235,27 @@ async def test_change_after_last_get_fences_save(pg_db):
     await no_leases(pg_db)
 
 
-async def test_deadline_cancels_and_joins_http_before_lease_release(pg_db):
+async def test_deadline_cancels_and_joins_http_before_lease_release(pg_db, monkeypatch):
+    from types import SimpleNamespace
+    from autobuild_json.gateway.accounts import quota as quota_module
     env = await setup(pg_db, 'fixed')
     closed, cancelled, held = [], [], []
+    entered = asyncio.Event()
+    original_wait_for = asyncio.wait_for
+    owner = asyncio.current_task()
+    async def deadline_at_http_entry(awaitable, timeout):
+        if asyncio.current_task() is owner and timeout > 5:
+            await original_wait_for(entered.wait(), 5)
+            # The service's deadline expires only after this case reaches the
+            # streaming boundary. No startup speed assumption is involved.
+            awaitable.cancel()
+            raise asyncio.TimeoutError
+        return await original_wait_for(awaitable, timeout)
+    monkeypatch.setattr(quota_module, "asyncio", SimpleNamespace(**{
+        **vars(asyncio), "wait_for": deadline_at_http_entry}))
     class Slow(httpx.AsyncByteStream):
         async def __aiter__(self):
+            entered.set()
             try:
                 await asyncio.sleep(10)
                 yield b'{}'
@@ -254,10 +270,38 @@ async def test_deadline_cancels_and_joins_http_before_lease_release(pg_db):
     env.payloads['usage'] = slow
     started = time.monotonic()
     with pytest.raises(GatewayError, match='deadline_exceeded'):
-        await env.service.refresh(env.identity, deadline(.1))
-    assert time.monotonic() - started < 1
+        await env.service.refresh(env.identity, deadline(20))
+    assert time.monotonic() - started < 5
     assert cancelled and closed and held == [1]
     assert len(env.calls) == 1
+    await no_leases(pg_db)
+
+
+async def test_deadline_before_proxy_resolution_never_opens_http(pg_db, monkeypatch):
+    from types import SimpleNamespace
+    from autobuild_json.gateway.accounts import quota as quota_module
+    env = await setup(pg_db, 'fixed')
+    entered, joined = asyncio.Event(), asyncio.Event()
+    original_wait_for = asyncio.wait_for
+    owner = asyncio.current_task()
+    async def blocked_policy(*args):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            joined.set()
+    async def deadline_at_policy(awaitable, timeout):
+        if asyncio.current_task() is owner and timeout > 5:
+            await original_wait_for(entered.wait(), 5)
+            awaitable.cancel()
+            raise asyncio.TimeoutError
+        return await original_wait_for(awaitable, timeout)
+    monkeypatch.setattr(env.service.resolver, "policy", blocked_policy)
+    monkeypatch.setattr(quota_module, "asyncio", SimpleNamespace(**{
+        **vars(asyncio), "wait_for": deadline_at_policy}))
+    with pytest.raises(GatewayError, match="deadline_exceeded"):
+        await env.service.refresh(env.identity, deadline(20))
+    assert joined.is_set() and not env.calls
     await no_leases(pg_db)
 
 

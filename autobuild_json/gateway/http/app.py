@@ -7,7 +7,7 @@ from ..errors import GatewayError
 from ..protocols.openai_chat import OpenAIChatCodec
 from ..protocols.openai_responses import ResponsesCodec
 from ..protocols.anthropic import AnthropicCodec
-from .auth import client_secret
+from .auth import client_secret, gateway_session
 from .boundary import GatewayBoundary
 from .streaming import GatewayStreamResponse
 from .gemini_routes import gemini_router
@@ -71,7 +71,8 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
             raise GatewayError("invalid_request") from None
         codec = OpenAIChatCodec()
         decoded = codec.decode(body, {})
-        meta = engine.meta(body, request.headers.get("idempotency-key"))
+        meta = engine.meta(body, request.headers.get("idempotency-key"),
+                           session_digest=await engine.session_digest(principal, decoded.model, gateway_session(request)))
         prepared = await engine.prepare(principal, decoded, meta)
         codec.response_id = prepared.collector.id
         if decoded.stream:
@@ -87,7 +88,8 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
             raise GatewayError("invalid_request") from None
         codec = ResponsesCodec()
         decoded = codec.decode(body, {})
-        prepared = await engine.prepare(principal, decoded, engine.meta(body, request.headers.get("idempotency-key")))
+        prepared = await engine.prepare(principal, decoded, engine.meta(body, request.headers.get("idempotency-key"),
+            session_digest=await engine.session_digest(principal, decoded.model, gateway_session(request))))
         codec.response_id = prepared.collector.id
         if decoded.stream:
             return GatewayStreamResponse(prepared, codec)
@@ -104,7 +106,8 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
             raise GatewayError("invalid_request") from None
         codec = AnthropicCodec()
         decoded = codec.decode(body, {})
-        prepared = await engine.prepare(principal, decoded, engine.meta(body, request.headers.get("idempotency-key"), protocol="anthropic"))
+        prepared = await engine.prepare(principal, decoded, engine.meta(body, request.headers.get("idempotency-key"), protocol="anthropic",
+            session_digest=await engine.session_digest(principal, decoded.model, gateway_session(request))))
         codec.response_id = prepared.collector.id
         if decoded.stream:
             return GatewayStreamResponse(prepared, codec)

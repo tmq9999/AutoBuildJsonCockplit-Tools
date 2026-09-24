@@ -250,9 +250,12 @@ class Catalog:
         Metadata is an observation, not an authorization lease. Consumers still
         revalidate the chosen credential and binding before network dispatch.
         """
+        routes = await self.candidates(principal, request, binding_id=binding_id)
+        return await self._account_observations(routes)
+
+    async def _account_observations(self, routes):
         from ..accounts.quota_records import CodexQuotaSnapshot
         from ..routing.pool_records import AccountCandidate
-        routes = await self.candidates(principal, request, binding_id=binding_id)
         result = []
         async with self.db.sessions() as session:
             for route in routes:
@@ -272,6 +275,23 @@ class Catalog:
                     cooldown_until=row["cooldown_until"], subscription_expires_at=row["subscription_expires_at"]))
         return tuple(result)
 
+    async def pool_policy(self, model_id):
+        from ..routing.pool_records import AccountPoolPolicy
+        async with self.db.sessions() as session:
+            value = await session.scalar(text("SELECT policy FROM account_pool_policies WHERE model_id=:id"),
+                                         {"id": model_id})
+        return AccountPoolPolicy.model_validate_json(json.dumps(value)) if value is not None else None
+
+    async def revalidate(self, principal, request, route):
+        """Live authorization without advancing the legacy round-robin cursor."""
+        async with self.db.sessions.begin() as session:
+            _, routes, retry_after = await self._candidate_state(session, principal, request, binding_id=route.binding_id)
+        if not routes:
+            raise GatewayError("rate_limited", 429, "upstream", retry_after)
+        if routes[0].credential_id != route.credential_id:
+            raise GatewayError("invalid_state")
+        return routes[0]
+
     async def cooldown(self, provider_id, credential_id, seconds, *, started_at=None):
         if type(seconds) is not int or not 0 <= seconds <= 86400:
             raise GatewayError("invalid_request")
@@ -285,3 +305,21 @@ class Catalog:
             else:
                 await session.execute(text("UPDATE credentials SET cooldown_until=GREATEST(cooldown_until,:until) WHERE id=:id AND provider_id=:provider"),
                                       {"until": now + timedelta(seconds=remaining), "id": credential_id, "provider": provider_id})
+
+    async def credential_outcome(self, provider_id, credential_id, error=None):
+        """Observation only: transport success never repairs OAuth health."""
+        from ..accounts.quota_storage import safe_code
+        safe_code(error)
+        async with self.db.sessions.begin() as session:
+            await session.execute(text("SELECT id FROM providers WHERE id=:id FOR KEY SHARE"), {"id": provider_id})
+            identity = await session.scalar(text("SELECT id FROM credentials WHERE id=:id AND provider_id=:provider "
+                "FOR KEY SHARE"), {"id": credential_id, "provider": provider_id})
+            if identity is None:
+                raise GatewayError("invalid_state")
+            await session.execute(text("INSERT INTO codex_account_state(credential_id) VALUES (:id) ON CONFLICT DO NOTHING"),
+                                  {"id": identity})
+            await session.execute(text("UPDATE codex_account_state SET last_attempt_at=clock_timestamp(),"
+                "last_success_at=CASE WHEN CAST(:error AS text) IS NULL THEN clock_timestamp() ELSE last_success_at END,"
+                "last_failure_at=CASE WHEN CAST(:error AS text) IS NOT NULL THEN clock_timestamp() ELSE last_failure_at END,"
+                "last_error=CAST(:error AS text),failure_count=CASE WHEN CAST(:error AS text) IS NULL THEN 0 ELSE LEAST(failure_count+1,2147483647) END "
+                "WHERE credential_id=:id"), {"id": identity, "error": error})
