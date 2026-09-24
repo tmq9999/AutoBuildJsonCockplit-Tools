@@ -120,13 +120,17 @@ class SourceRepository:
 
     async def update(self, source_id: UUID, expected_version: int, input: SourceInput, actor) -> SourceView:
         async with self.db.sessions.begin() as session:
-            identity = (await session.execute(text("SELECT provider_id,credential_id FROM catalog_sources WHERE id=:id"),
-                                              {"id": source_id})).mappings().first()
-            if identity is None:
+            current_read = (await session.execute(text("SELECT * FROM catalog_sources WHERE id=:id"),
+                                                  {"id": source_id})).mappings().first()
+            if current_read is None:
                 raise GatewayError("not_found", 404)
-            if identity["provider_id"] != input.provider_id or identity["credential_id"] != input.credential_id:
+            if current_read["version"] != expected_version:
+                raise GatewayError("version_conflict", 409)
+            if (current_read["provider_id"] != input.provider_id
+                    or current_read["credential_id"] != input.credential_id):
                 raise GatewayError("invalid_request")
-            stopping = not input.enabled or not input.schedule_enabled
+            stopping = (not input.enabled or
+                        (current_read["enabled"] and input.enabled and not input.schedule_enabled))
             _, _, provider, _, _ = await self._dependencies(
                 session, input.provider_id, input.credential_id,
                 require_healthy=not stopping, allow_missing_profile=stopping,

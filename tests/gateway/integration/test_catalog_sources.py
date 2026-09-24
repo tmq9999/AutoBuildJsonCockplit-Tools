@@ -219,6 +219,30 @@ async def test_source_can_be_disabled_after_credential_is_disabled(pg_db):
     assert stopped.next_run_at is None
 
 
+async def test_cannot_activate_unhealthy_source_with_schedule_off(pg_db):
+    from autobuild_json.gateway.catalog.records import SourceInput
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.gateway.providers.catalog import Catalog
+    from tests.gateway.catalog_support import source_case, synthetic_vault
+
+    sources, source = await source_case(pg_db)
+    catalog = Catalog(pg_db, synthetic_vault())
+    await catalog.set_credential_enabled(source.credential_id, False)
+    stopped = await sources.update(
+        source.id, source.version,
+        SourceInput(provider_id=source.provider_id, credential_id=source.credential_id,
+                    mode=source.mode, enabled=False),
+        "test-admin",
+    )
+    with pytest.raises(GatewayError, match="invalid_state"):
+        await sources.update(
+            source.id, stopped.version,
+            SourceInput(provider_id=source.provider_id, credential_id=source.credential_id,
+                        mode=source.mode, enabled=True, schedule_enabled=False),
+            "test-admin",
+        )
+
+
 async def test_source_schedule_can_be_stopped_after_profile_disappears(pg_db):
     import json
     from sqlalchemy import text
