@@ -573,3 +573,91 @@ async def test_preparation_cleanup_hang_is_bounded_and_joined(pg_db, monkeypatch
                             child.cancel()
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("rejection", ["preopen", "429"])
+@pytest.mark.parametrize("committed", [False, True])
+async def test_repeated_cancel_persists_known_rejection_and_releases_all_holds(pg_db, monkeypatch, rejection, committed):
+    from decimal import Decimal
+    from pydantic import SecretStr
+    from types import SimpleNamespace
+    from autobuild_json.gateway.metering.costs import CostSchedule
+    from autobuild_json.gateway.protocols.openai_responses import ResponsesCodec
+    from autobuild_json.gateway.proxy.profiles import ProfileStore
+    from autobuild_json.gateway.routing.records import ProviderConfig
+    from autobuild_json.gateway.routing import session as routing_session
+    preopen, rejecting, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    async with codex_environment(pg_db, respond=lambda r: httpx.Response(429)) as env:
+        profiles = ProfileStore(pg_db, env.engine.vault, b"p"*32)
+        profile = await profiles.create(SimpleNamespace(name="fixture", mode="fixed", region="random", protocol="http",
+            rotate=False, entries_text=SecretStr("http://proxy.invalid:8080")))
+        env.engine.proxy_resolver = profiles.load
+        budget = await env.engine.budgets.create("USD", Decimal(10))
+        await env.engine.catalog.update_provider(CODEX_PROVIDER, 1, ProviderConfig(name="fixture", adapter="codex_oauth",
+            root="https://chatgpt.com/backend-api/codex", auth_mode="oauth", wire_api="responses", budget_id=budget,
+            cost_schedule=CostSchedule("USD", Decimal(1), Decimal(2)), proxy_profile_id=profile))
+        validate = routing_session.revalidate
+        validations = 0
+        async def gate_validate(*args, **kwargs):
+            nonlocal validations
+            await validate(*args, **kwargs)
+            validations += 1
+            if rejection == "preopen" and validations == 2:
+                preopen.set()
+                await asyncio.Event().wait()
+        mark = env.ledger.mark_rejected
+        async def gate_rejected(*args, **kwargs):
+            if committed:
+                await mark(*args, **kwargs)
+            rejecting.set()
+            await release.wait()
+            if not committed:
+                await mark(*args, **kwargs)
+        monkeypatch.setattr(routing_session, "revalidate", gate_validate)
+        monkeypatch.setattr(env.ledger, "mark_rejected", gate_rejected)
+        task = asyncio.create_task(env.engine.prepare(env.principal, ResponsesCodec().decode(BODY, {}), env.engine.meta(BODY)))
+        try:
+            if rejection == "preopen":
+                await asyncio.wait_for(preopen.wait(), 5)
+                task.cancel()
+            await asyncio.wait_for(rejecting.wait(), 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert len(env.upstream_requests) == (0 if rejection == "preopen" else 1)
+            async with pg_db.sessions() as session:
+                assert await session.scalar(text("SELECT state FROM requests")) == "released"
+                assert (await session.execute(text("SELECT status,usage FROM attempts"))).one() == ("rejected", None)
+                assert (await session.execute(text("SELECT count(*),sum(amount_micro) FROM usage_ledger"))).one() == (1, 0)
+                assert await session.scalar(text("SELECT sum(held) FROM quota_buckets")) == 0
+                assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
+                assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 0
+                assert (await session.execute(text("SELECT state,actual FROM upstream_reservations"))).one() == ("settled", 0)
+            assert (await env.engine.budgets.balance(budget))[:2] == (0, 0)
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_old_rejection_cannot_release_later_attempt_hold(pg_db):
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.gateway.metering.records import Admission, Bounds
+    async with codex_environment(pg_db) as env:
+        request_id, first, second = uuid4(), uuid4(), uuid4()
+        await env.ledger.reserve(Admission(request_id, env.principal, "codex-test", Bounds(1000, 500), 2, 3,
+            datetime.now(timezone.utc)+timedelta(seconds=60)))
+        await env.ledger.mark_dispatched(request_id, first)
+        await env.ledger.mark_rejected(request_id, first, "rejected_before_generation")
+        await env.ledger.mark_dispatched(request_id, second)
+        with pytest.raises(GatewayError, match="invalid_state"):
+            await env.ledger.reject_and_release(request_id, first)
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT state FROM requests")) == "dispatched"
+            assert await session.scalar(text("SELECT held FROM quota_buckets WHERE window_kind='total'")) == 3500
+            assert await session.scalar(text("SELECT count(*) FROM usage_ledger")) == 0
+            assert await session.scalar(text("SELECT status FROM attempts WHERE id=:id"), {"id": second}) == "started"

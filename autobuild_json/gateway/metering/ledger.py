@@ -157,6 +157,36 @@ class Ledger:
                 raise GatewayError("invalid_state", 409, "quota")
             await session.execute(text("UPDATE requests SET state='reserved' WHERE id=:id"), {"id": request_id})
 
+    async def reject_and_release(self, request_id, attempt_id, evidence="rejected_before_generation"):
+        """Join a locally proven rejection, including an uncertain commit ack.
+
+        The request lock serializes dispatch and release. Earlier attempt
+        evidence can never settle a later attempt's potentially active hold.
+        """
+        if evidence != "rejected_before_generation":
+            raise GatewayError("invalid_state", 409, "quota")
+        async with self._request(request_id) as (session, row, _):
+            status = await session.scalar(text("SELECT status FROM attempts WHERE id=:attempt AND request_id=:id FOR UPDATE"),
+                                          {"attempt": attempt_id, "id": request_id})
+            if status not in {"started", "rejected"}:
+                raise GatewayError("invalid_state", 409, "quota")
+            superseded = await session.scalar(text("SELECT EXISTS(SELECT 1 FROM attempts other JOIN attempts target "
+                "ON target.id=:attempt WHERE other.request_id=:id AND other.id<>target.id "
+                "AND (other.status<>'rejected' OR other.started_at>=target.started_at))"),
+                {"attempt": attempt_id, "id": request_id})
+            if superseded:
+                raise GatewayError("invalid_state", 409, "quota")
+            if status == "started":
+                await session.execute(text("UPDATE attempts SET status='rejected' WHERE id=:attempt"), {"attempt": attempt_id})
+            if row["state"] == "dispatched":
+                await session.execute(text("UPDATE requests SET state='reserved' WHERE id=:id"), {"id": request_id})
+                row = dict(row)
+                row["state"] = "reserved"
+            if row["state"] == "reserved":
+                await self._finalize(session, row, 0, "released", reason=evidence)
+            elif row["state"] != "released":
+                raise GatewayError("invalid_state", 409, "quota")
+
     async def resize(self, hold, bounds):
         async with self._request(hold.request_id) as (session, row, key):
             if row["state"] != "reserved" or hold.key_id != key["id"]:

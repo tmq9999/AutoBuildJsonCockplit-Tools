@@ -160,9 +160,11 @@ class Engine:
         stack = AsyncExitStack()
         dispatched = False
         budget_attempt = None
+        known_rejection = None
         hinted_providers = set()
         try:
             for number, selected in enumerate(routes[:2]):
+                known_rejection = None
                 attempt_output = selected.bounds.output_tokens if codex else max_output
                 validate_request(request,selected)
                 if selected.adapter not in self.adapters or attempt_output > selected.bounds.output_tokens:
@@ -206,11 +208,13 @@ class Engine:
                     try:
                         await routing_session.revalidate(self, principal, request, selected, stamp)
                     except BaseException:
+                        known_rejection = attempt
                         await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
                         dispatched = False
                         raise
                     stream = await stack.enter_async_context(self.adapters[selected.adapter].open(request, selected, lease))
                 except UpstreamRejected as exc:
+                    known_rejection = attempt
                     received_at = getattr(exc, "received_at", time.monotonic())
                     if exc.upstream_status == 429 and exc.retry_after is not None:
                         hinted_providers.add(selected.provider_id)
@@ -239,6 +243,7 @@ class Engine:
                             else:
                                 exc.retry_after = None
                         raise
+                    known_rejection = None
                     continue
                 return PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt, scope)
             raise GatewayError("upstream_unavailable", 503)
@@ -246,9 +251,12 @@ class Engine:
             failure_code = error.code if isinstance(error, GatewayError) else "upstream_error"
             async def cleanup():
                 try:
+                    no_generation = known_rejection is not None
                     if budget_attempt is not None:
-                        await self.budgets.settle(budget_attempt, None if dispatched else Decimal(0))
-                    if dispatched:
+                        await self.budgets.settle(budget_attempt, None if dispatched and not no_generation else Decimal(0))
+                    if no_generation:
+                        await self.ledger.reject_and_release(meta.request_id, known_rejection)
+                    elif dispatched:
                         await self.ledger.mark_pending(meta.request_id, "interrupted")
                         if codex:
                             await self.catalog.credential_outcome(selected.provider_id, selected.credential_id, failure_code)
