@@ -1,5 +1,6 @@
 """Private quota transaction primitives; caller owns every session/commit."""
 from datetime import datetime, timedelta
+from math import ceil
 import json
 import re
 from uuid import uuid4
@@ -121,6 +122,13 @@ def consumable(account, version, now):
         raise GatewayError("version_conflict", 409)
     if credits.available_count is None or credits.available_count <= 0:
         raise GatewayError("codex_no_credits", 409)
+
+
+async def reset_cooldown(session, credential_id, now):
+    until = await session.scalar(text('SELECT GREATEST(c.cooldown_until,p.cooldown_until) FROM credentials c '
+        'JOIN providers p ON p.id=c.provider_id WHERE c.id=:id'), {'id': credential_id})
+    if until is not None and until > now:
+        raise GatewayError('rate_limited', 429, 'quota', min(86400, ceil((until-now).total_seconds())))
 
 
 async def audit(session, row, action, *, actor=None, details=None):

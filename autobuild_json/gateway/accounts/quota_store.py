@@ -37,6 +37,38 @@ class QuotaStore:
                                          {"id": operation_id})).mappings().first()
             return storage.result(row) if row else None
 
+    async def replay_reset(self, credential_id, request_id, credits_version, acknowledge):
+        """Read immutable confirmation identity without locking either account."""
+        if not isinstance(credential_id, UUID) or not isinstance(request_id, UUID):
+            raise GatewayError('invalid_request')
+        async with self.db.sessions() as session:
+            row = (await session.execute(text('SELECT * FROM codex_reset_requests WHERE id=:id'),
+                                         {'id': request_id})).mappings().first()
+        valid = type(credits_version) is int and credits_version >= 1 and acknowledge is True
+        if row:
+            digest = hashlib.sha256(f'{credential_id}:{credits_version}'.encode()).digest()
+            if not valid or bytes(row['payload_digest']) != digest:
+                raise GatewayError('payload_mismatch', 409)
+            return storage.result(row)
+        if not valid:
+            raise GatewayError('invalid_request')
+        return None
+
+    async def preflight_reset(self, credential_id, credits_version):
+        """Non-reserving eligibility check before OAuth or proxy allocation."""
+        async with self.db.sessions.begin() as session:
+            await storage.dependencies(session, credential_id, active=True)
+            account = await storage.account_state(session, credential_id, create=False)
+            now = await storage.clock(session)
+            await self._eligible_reset(session, credential_id, account, credits_version, now)
+
+    async def _eligible_reset(self, session, credential_id, account, credits_version, now):
+        if await session.scalar(text("SELECT EXISTS(SELECT 1 FROM codex_reset_requests WHERE credential_id=:id "
+                "AND state IN ('prepared','dispatched','unknown','succeeded_refresh_failed'))"), {'id': credential_id}):
+            raise GatewayError('operation_conflict', 409)
+        await storage.reset_cooldown(session, credential_id, now)
+        storage.consumable(account, credits_version, now)
+
     async def begin_refresh(self, credential_id, deadline):
         async with self.db.sessions.begin() as session:
             stamp = await storage.dependencies(session, credential_id, active=True)
@@ -134,10 +166,7 @@ class QuotaStore:
             stamp = await storage.dependencies(session, credential_id, active=True)
             now = await storage.clock(session)
             storage.valid_deadline(deadline, now)
-            if await session.scalar(text("SELECT EXISTS(SELECT 1 FROM codex_reset_requests WHERE credential_id=:id "
-                "AND state IN ('prepared','dispatched','unknown','succeeded_refresh_failed'))"), {"id": credential_id}):
-                raise GatewayError("operation_conflict", 409)
-            storage.consumable(account, credits_version, now)
+            await self._eligible_reset(session, credential_id, account, credits_version, now)
             row = (await session.execute(text("""INSERT INTO codex_reset_requests
                 (id,credential_id,redeem_request_id,payload_digest,state,actor,requested_at,deadline,credits_version,stamp)
                 VALUES (:id,:credential,:redeem,:digest,'prepared',:actor,:now,:deadline,:version,CAST(:stamp AS jsonb))
@@ -165,6 +194,7 @@ class QuotaStore:
             if row["state"] != "prepared" or row["generation"] != generation or row["deadline"] <= now or row["stamp"] != stamp:
                 return False
             try:
+                await storage.reset_cooldown(session, row['credential_id'], now)
                 storage.consumable(account, row["credits_version"], now)
             except GatewayError:
                 return False
@@ -174,8 +204,10 @@ class QuotaStore:
             await storage.audit(session, row, "dispatched")
             return True
 
-    async def finish_reset(self, operation_id, generation, state, code, status):
+    async def finish_reset(self, operation_id, generation, state, code, status, *, retry_after=None, received_at=None):
         storage.safe_code(code)
+        if retry_after is not None and (type(retry_after) is not int or not 0 <= retry_after <= 86400 or status != 429):
+            raise GatewayError('invalid_request')
         if status is not None and (type(status) is not int or not 100 <= status <= 599):
             raise GatewayError("invalid_request")
         if state not in {"rejected", "unknown", "succeeded_refresh_failed", "succeeded"}:
@@ -183,6 +215,9 @@ class QuotaStore:
         async with self.db.sessions.begin() as session:
             stamp, account, row = await storage.operation_context(session, operation_id, active=True)
             now = await storage.clock(session)
+            if received_at is not None and (not hasattr(received_at, 'tzinfo') or received_at.tzinfo is None
+                    or received_at.utcoffset() is None or received_at > now or received_at < row['dispatched_at']):
+                raise GatewayError('invalid_request')
             if row["generation"] != generation or row["state"] not in {"dispatched", "succeeded_refresh_failed"} \
                     or row["stamp"] != stamp:
                 raise GatewayError("claim_lost", 409)
@@ -204,7 +239,13 @@ class QuotaStore:
                 "result_code=:code,upstream_status=COALESCE(:status,upstream_status),completed_at=:now,"
                 "receipt_at=CASE WHEN :state='succeeded_refresh_failed' THEN :now ELSE receipt_at END WHERE id=:id RETURNING *"),
                 {"state": state, "code": code, "status": status, "now": now, "id": operation_id})).mappings().one()
-            await storage.audit(session, row, state)
+            details = {'state': row['state'], 'version': row['version'], 'status': row['upstream_status']}
+            if status == 429:
+                details['retry_after'] = retry_after
+                until = (received_at or now) + timedelta(seconds=retry_after if retry_after is not None else 60)
+                await session.execute(text('UPDATE credentials SET cooldown_until=GREATEST(cooldown_until,:until) WHERE id=:id'),
+                                      {'until': until, 'id': row['credential_id']})
+            await storage.audit(session, row, state, details=details)
             return storage.result(row)
 
     async def recover_expired(self):

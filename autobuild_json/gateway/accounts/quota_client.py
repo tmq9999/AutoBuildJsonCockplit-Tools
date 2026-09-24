@@ -1,4 +1,6 @@
-"""Guarded account GETs and allowlisted, unknown-preserving parsers."""
+"""Guarded account calls and allowlisted, unknown-preserving parsers."""
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import time
@@ -6,10 +8,18 @@ import time
 from pydantic import ValidationError
 
 from ..errors import GatewayError, UpstreamRejected
+from ..providers.retry import parse_retry_after
 from ..transport.http import OutboundRequest
 from .quota_records import CodexQuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditsSnapshot
 
 ACCOUNT_ROOT = 'https://chatgpt.com/backend-api/wham'
+
+
+@dataclass(frozen=True)
+class ResetReceipt:
+    status: int
+    retry_after: int | None
+    received_at: datetime
 
 
 def _integer(value, maximum=253402300799):
@@ -152,3 +162,21 @@ class QuotaClient:
 
     async def credits(self, route, lease, tokens, account_id, deadline):
         return await self._get('rate-limit-reset-credits', route, lease, tokens, account_id, deadline)
+
+    @asynccontextmanager
+    async def consume(self, route, lease, tokens, account_id, deadline, redeem_request_id):
+        """Yield safe receipt headers before close; never parse a redemption body."""
+        if route.root != ACCOUNT_ROOT:
+            raise GatewayError('egress_denied', 502, 'upstream')
+        try:
+            request = OutboundRequest('POST', 'rate-limit-reset-credits/consume',
+                {'redeem_request_id': str(redeem_request_id)}, kind='codex_account',
+                auth_header=('Authorization', 'Bearer ' + tokens['access_token']),
+                headers=(('chatgpt-account-id', account_id),),
+                deadline=time.monotonic() + max(0, (deadline-datetime.now(timezone.utc)).total_seconds()))
+        except (ValueError, KeyError, TypeError):
+            raise GatewayError('invalid_request') from None
+        async with self.transport.open(route, lease.proxy, request) as response:
+            now = datetime.now(timezone.utc)
+            yield ResetReceipt(response.status,
+                parse_retry_after(response.headers.get('retry-after'), now=now) if response.status == 429 else None, now)

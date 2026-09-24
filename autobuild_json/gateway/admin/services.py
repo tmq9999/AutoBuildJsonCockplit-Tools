@@ -28,6 +28,8 @@ class AdminServices:
         self.quota_store = QuotaStore(db)
         self.codex_quota = CodexQuotaService(db, self.engine.credentials, self.proxies,
                                            self.profiles, self.transport, self.quota_store)
+        from ..accounts.reset_credits import ResetCreditService
+        self.codex_reset = ResetCreditService(self.codex_quota)
         self.catalog_worker = None
         self.sources = self.operations = self.snapshots = self.decisions = None
         self.publisher = self.quotes = self.probe_accounting = None

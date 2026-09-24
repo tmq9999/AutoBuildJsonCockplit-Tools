@@ -9,6 +9,7 @@ from .metering.records import Usage
 from .metering.budgets import BudgetService
 from decimal import Decimal
 from .proxy.pg_leases import PgLeaseStore
+from .accounts.quota_store import QuotaStore
 
 
 def recover_request(state, dispatched):
@@ -27,6 +28,8 @@ class Maintenance:
             return 0
         processed = 0
         try:
+            # Only storage recovery: expired POSTs are never replayed upstream.
+            processed += await QuotaStore(self.db).recover_expired()
             async with self.db.sessions() as session:
                 rows = (await session.execute(text("SELECT id,state FROM requests WHERE "
                     "(state IN ('reserved','dispatched','usage_pending') OR (state='released' AND EXISTS "
