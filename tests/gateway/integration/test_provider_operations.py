@@ -202,3 +202,77 @@ async def test_lost_generation_rejects_all_terminal_paths(pg_db):
         await ops.mark_dispatched(claim, uuid4())
     assert not await ops.heartbeat(claim)
     assert (await ops.get(view.id)).state == "running"
+
+
+async def test_claim_parses_json_uuid_stamp_before_stale_comparison(pg_db):
+    import json
+    from sqlalchemy import text
+    from tests.gateway.catalog_support import source_case
+    from autobuild_json.gateway.catalog.records import OperationRequest
+    from autobuild_json.gateway.catalog.operations import OperationStore
+
+    sources, source = await source_case(pg_db)
+    ops = OperationStore(pg_db, sources)
+    expected = (await sources.context(source.id)).stamp
+    view = await ops.enqueue(OperationRequest(id=uuid4(), source_id=source.id, kind="check", expected=expected), "admin")
+    stored = expected.model_dump(mode="json")
+    stored["proxy_id"], stored["proxy_version"] = str(uuid4()), 1
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("UPDATE provider_operations SET expected=CAST(:expected AS jsonb) WHERE id=:id"),
+                              {"id": view.id, "expected": json.dumps(stored)})
+    assert await ops.claim(view.id, uuid4()) is None
+    assert (await ops.get(view.id)).state == "stale"
+
+
+async def test_result_rejects_provider_response_and_auth_status(pg_db):
+    from tests.gateway.catalog_support import source_case
+    from autobuild_json.gateway.catalog.records import OperationRequest
+    from autobuild_json.gateway.catalog.operations import OperationStore
+    from autobuild_json.gateway.errors import GatewayError
+
+    sources, source = await source_case(pg_db)
+    ops = OperationStore(pg_db, sources)
+    expected = (await sources.context(source.id)).stamp
+    view = await ops.enqueue(OperationRequest(id=uuid4(), source_id=source.id, kind="check", expected=expected), "admin")
+    claim = await ops.claim(view.id, uuid4())
+    for result in ({"provider_response": {"data": "secret"}},
+                   {"status": "Authorization: Bearer SECRET"}):
+        with pytest.raises(GatewayError) as caught:
+            await ops.finish(claim, "succeeded", result=result)
+        assert caught.value.code == "invalid_request"
+
+
+async def test_claim_holds_source_lock_until_running_transition(pg_db):
+    from tests.gateway.catalog_support import source_case
+    from autobuild_json.gateway.catalog.records import OperationRequest
+    from autobuild_json.gateway.catalog.operations import OperationStore
+
+    sources, source = await source_case(pg_db)
+    ops = OperationStore(pg_db, sources)
+    expected = (await sources.context(source.id)).stamp
+    view = await ops.enqueue(OperationRequest(id=uuid4(), source_id=source.id, kind="check", expected=expected), "admin")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = sources.lock_context
+
+    async def interleaved(session, source_id, **kwargs):
+        context = await original(session, source_id, **kwargs)
+        entered.set()
+        await release.wait()
+        return context
+
+    sources.lock_context = interleaved
+    claim_task = asyncio.create_task(ops.claim(view.id, uuid4()))
+    try:
+        await entered.wait()
+        update_task = asyncio.create_task(sources.update(
+            source.id, source.version, source.model_copy(update={"enabled": False}), "admin"))
+        assert not update_task.done()
+        release.set()
+        claim = await claim_task
+        assert claim is not None
+        await update_task
+        assert (await ops.get(view.id)).state == "running"
+    finally:
+        release.set()
+        sources.lock_context = original

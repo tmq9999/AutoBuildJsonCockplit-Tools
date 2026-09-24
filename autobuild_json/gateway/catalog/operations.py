@@ -1,9 +1,9 @@
 """Durable, idempotent provider catalog operations and fenced claims."""
 
 import json
-import math
 import re
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any
 from uuid import UUID
 
@@ -20,51 +20,49 @@ def _json(value: Any) -> str:
 
 
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-_FORBIDDEN_KEY_PARTS = ("raw", "body", "secret", "token", "password", "credential", "header", "url")
+_RESULT_BOOL = frozenset({"reachable", "catalog_readable", "inference_verified", "rejected_before_generation"})
+_RESULT_COUNT = frozenset({"count", "added", "changed", "missing", "unchanged"})
+_RESULT_UUID = frozenset({"run_id", "binding_id"})
+_RESULT_WARNINGS = frozenset({"authentication_unverified", "metadata_incomplete", "catalog_partial"})
 
 
 def _safe_result(value: Any) -> str:
     """Return bounded, secret-free JSON suitable for durable operation results."""
     if not isinstance(value, dict):
         raise GatewayError("invalid_request")
-    count = 0
-
-    def visit(item, depth=0):
-        nonlocal count
-        count += 1
-        if count > 256 or depth > 4:
+    checked = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not _SAFE_KEY.fullmatch(key):
             raise GatewayError("invalid_request")
-        if isinstance(item, dict):
-            if len(item) > 32:
+        if key in _RESULT_BOOL:
+            if type(item) is not bool:
                 raise GatewayError("invalid_request")
-            checked = {}
-            for key, child in item.items():
-                if not isinstance(key, str) or not _SAFE_KEY.fullmatch(key):
-                    raise GatewayError("invalid_request")
-                lowered = key.casefold()
-                if any(part in lowered for part in _FORBIDDEN_KEY_PARTS):
-                    raise GatewayError("invalid_request")
-                checked[key] = visit(child, depth + 1)
-            return checked
-        if isinstance(item, list):
-            if len(item) > 100:
+        elif key in _RESULT_COUNT:
+            if type(item) is not int or not 0 <= item <= 10000:
                 raise GatewayError("invalid_request")
-            return [visit(child, depth + 1) for child in item]
-        if item is None or isinstance(item, bool) or isinstance(item, int):
-            if isinstance(item, int) and abs(item) >= 2**63:
+        elif key == "status_code":
+            if type(item) is not int or not 100 <= item <= 599:
                 raise GatewayError("invalid_request")
-            return item
-        if isinstance(item, float):
-            if not math.isfinite(item):
+        elif key == "duration_ms":
+            if type(item) not in (int, float) or not isfinite(item) or not 0 <= item <= 60000:
                 raise GatewayError("invalid_request")
-            return item
-        if isinstance(item, str):
-            if len(item) > 512 or any(ord(char) < 32 or ord(char) == 127 for char in item):
+        elif key in _RESULT_UUID:
+            if not isinstance(item, str):
                 raise GatewayError("invalid_request")
-            return item
-        raise GatewayError("invalid_request")
-
-    encoded = _json(visit(value))
+            try:
+                UUID(item)
+            except ValueError:
+                raise GatewayError("invalid_request") from None
+        elif key == "authentication":
+            if item != "unverified":
+                raise GatewayError("invalid_request")
+        elif key == "warnings":
+            if not isinstance(item, list) or len(item) > 8 or any(w not in _RESULT_WARNINGS for w in item):
+                raise GatewayError("invalid_request")
+        else:
+            raise GatewayError("invalid_request")
+        checked[key] = item
+    encoded = _json(checked)
     if len(encoded.encode("utf-8")) > 65536:
         raise GatewayError("invalid_request")
     return encoded
@@ -129,12 +127,33 @@ class OperationStore:
                     raise GatewayError("storage_unavailable", 503, "storage")
                 return _view(row)
 
-            context = await self.sources.lock_context(session, request.source_id)
+            try:
+                context = await self.sources.lock_context(session, request.source_id)
+            except GatewayError:
+                replay = await self._claim_for_request(session, request.id, digest)
+                if replay is not None:
+                    return replay
+                raise
             if context is None:
                 raise GatewayError("concurrency_limit", 409)
-            if context.stamp != request.expected:
+            replay = await self._claim_for_request(session, request.id, digest)
+            if replay is not None:
+                return replay
+            if not self._same_source_stamp(context.stamp, request.expected):
                 raise _error("version_conflict")
             return await self.enqueue_in(session, request, actor, context)
+
+    async def _claim_for_request(self, session, client_id: UUID, digest: bytes) -> OperationView | None:
+        claim = (await session.execute(text("SELECT operation_id,payload_digest FROM provider_operation_claims "
+                                           "WHERE client_id=:client"), {"client": client_id})).mappings().first()
+        if claim is None:
+            return None
+        if bytes(claim["payload_digest"]) != digest:
+            raise _error("payload_mismatch")
+        row = await self._row(session, claim["operation_id"])
+        if row is None:
+            raise GatewayError("storage_unavailable", 503, "storage")
+        return _view(row)
 
     async def enqueue_in(self, session, request: OperationRequest, actor,
                          context: SourceContext) -> OperationView:
@@ -188,38 +207,50 @@ class OperationStore:
         # Read the bounded provider timeout before taking the operation lock. The
         # context read is deliberately outside the claim transaction so no source
         # or provider lock is held while the operation row is updated.
-        try:
-            async with self.db.sessions() as lookup:
-                operation = (await lookup.execute(text("SELECT * FROM provider_operations WHERE id=:id"),
-                                                  {"id": operation_id})).mappings().first()
-            if operation is None or operation["state"] != "queued":
-                return None
-            expected = operation["expected"]
-            if operation["queued_expires_at"] <= datetime.now(timezone.utc):
-                await self._stale(operation_id, "operation_expired")
-                return None
-            source_id = operation["source_id"]
-            from .records import ConfigStamp
-            expected_stamp = ConfigStamp.model_validate(expected)
-            context = await self.sources.context(source_id)
-            timeout = context.route.timeout
-            if context.stamp != expected_stamp:
-                await self._stale(operation_id, "version_conflict")
-                return None
-        except GatewayError as exc:
-            await self._stale(operation_id, "invalid_state" if exc.code != "not_found" else "not_found")
+        async with self.db.sessions() as lookup:
+            source_id = await lookup.scalar(text("SELECT source_id FROM provider_operations WHERE id=:id"),
+                                            {"id": operation_id})
+        if source_id is None:
             return None
-        async with self.db.sessions.begin() as session:
-            row = (await session.execute(text("""UPDATE provider_operations SET state='running',owner=:owner,
+        try:
+            async with self.db.sessions.begin() as session:
+                context = await self.sources.lock_context(session, source_id)
+                row = (await session.execute(text("SELECT * FROM provider_operations WHERE id=:id FOR UPDATE"),
+                                             {"id": operation_id})).mappings().first()
+                if row is None or row["state"] != "queued":
+                    return None
+                if row["queued_expires_at"] <= datetime.now(timezone.utc):
+                    await session.execute(text("""UPDATE provider_operations SET state='stale',error_code='operation_expired',
+                        finished_at=clock_timestamp(),version=version+1 WHERE id=:id AND state='queued'"""),
+                                          {"id": operation_id})
+                    return None
+                from .records import ConfigStamp
+                expected_stamp = ConfigStamp.model_validate_json(json.dumps(row["expected"]))
+                if context is None or not self._same_source_stamp(context.stamp, expected_stamp):
+                    await session.execute(text("""UPDATE provider_operations SET state='stale',error_code='version_conflict',
+                        finished_at=clock_timestamp(),version=version+1 WHERE id=:id AND state='queued'"""),
+                                          {"id": operation_id})
+                    return None
+                timeout = context.route.timeout
+                row = (await session.execute(text("""UPDATE provider_operations SET state='running',owner=:owner,
                 generation=generation+1,started_at=clock_timestamp(),heartbeat_at=clock_timestamp(),
                 deadline=clock_timestamp()+make_interval(secs=>LEAST(:timeout,60)),version=version+1
                 WHERE id=:id AND state='queued' AND queued_expires_at>clock_timestamp()
                 RETURNING id,source_id,generation,deadline"""),
                 {"id": operation_id, "owner": owner, "timeout": timeout})).mappings().first()
-            if row is None:
-                return None
-            return Claim(operation_id=row["id"], source_id=row["source_id"], owner=owner,
-                         generation=row["generation"], deadline=row["deadline"])
+                if row is None:
+                    return None
+                return Claim(operation_id=row["id"], source_id=row["source_id"], owner=owner,
+                             generation=row["generation"], deadline=row["deadline"])
+        except GatewayError as exc:
+            await self._stale(operation_id, "invalid_state" if exc.code != "not_found" else "not_found")
+            return None
+
+    @staticmethod
+    def _same_source_stamp(actual, expected) -> bool:
+        fields = ("source_version", "provider_version", "credential_version",
+                  "proxy_id", "proxy_version", "content_digest")
+        return all(getattr(actual, field) == getattr(expected, field) for field in fields)
 
     async def _stale(self, operation_id: UUID, code: str) -> None:
         async with self.db.sessions.begin() as session:

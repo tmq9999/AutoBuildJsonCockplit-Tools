@@ -41,3 +41,19 @@ coverage.
 - Ruff focused check → `All checks passed!`.
 - Warning is the pre-existing third-party `google.genai.types` Python 3.14
   deprecation warning; no dependency edits were made.
+
+## Fix round 2
+
+Claim validation now locks source dependencies and the operation in one ordered
+transaction through the running CAS, preventing configuration changes between
+stamp validation and ownership. Stale repair remains conditional on `state='queued'`.
+The enqueue path rechecks client claims after acquiring source locks. Stored JSON
+stamps are parsed through Pydantic JSON validation so UUID fields remain valid.
+Results use an explicit allowlist of booleans, bounded counters, status/duration,
+safe UUIDs, warnings, and `authentication='unverified'`; arbitrary strings and
+provider or authorization response fields are rejected.
+
+- RED/GREEN focused: initial round2 regressions failed as expected, then
+  `.venv/bin/python -m pytest tests/gateway/integration/test_provider_operations.py -q` → `13 passed`.
+- Full suite: `.venv/bin/python -m pytest -q` → `665 passed, 1 warning`.
+- Ruff focused check → `All checks passed!`.
