@@ -35,17 +35,21 @@ class ResetCreditService:
                 return None
             cleanup = asyncio.create_task(asyncio.wait_for(join(), 5))
             cancelled = isinstance(exc, asyncio.CancelledError)
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    cancelled = True
             try:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        cancelled = True
                 result = await cleanup
             except asyncio.TimeoutError:
                 if cancelled:
                     raise asyncio.CancelledError
                 raise GatewayError('deadline_exceeded', 504, 'quota') from None
+            except Exception:
+                if cancelled:
+                    raise asyncio.CancelledError from None
+                raise GatewayError('storage_unavailable', 503, 'storage') from None
             if cancelled:
                 raise asyncio.CancelledError
             if result is not None:

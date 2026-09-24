@@ -35,15 +35,16 @@ class CodexQuotaService:
             owner.cancel()
             cleanup = asyncio.create_task(asyncio.wait_for(asyncio.gather(owner, return_exceptions=True), 5))
             cancelled = isinstance(exc, asyncio.CancelledError)
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    cancelled = True
-                    continue
             try:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        cancelled = True
                 await cleanup
             except asyncio.TimeoutError:
+                if cancelled:
+                    raise asyncio.CancelledError
                 raise GatewayError('deadline_exceeded', 504, 'quota') from None
             if cancelled:
                 raise asyncio.CancelledError
