@@ -199,3 +199,60 @@ async def test_skip_locked_context_releases_provider_lock_on_credential_conflict
                 row = await observer.scalar(text("SELECT id FROM providers WHERE id=:id FOR UPDATE NOWAIT"),
                                             {"id": source.provider_id})
                 assert row == source.provider_id
+
+
+async def test_source_can_be_disabled_after_credential_is_disabled(pg_db):
+    from autobuild_json.gateway.catalog.records import SourceInput
+    from autobuild_json.gateway.providers.catalog import Catalog
+    from tests.gateway.catalog_support import source_case, synthetic_vault
+
+    sources, source = await source_case(pg_db)
+    await Catalog(pg_db, synthetic_vault()).set_credential_enabled(source.credential_id, False)
+    stopped = await sources.update(
+        source.id, source.version,
+        SourceInput(provider_id=source.provider_id, credential_id=source.credential_id,
+                    mode=source.mode, enabled=False),
+        "test-admin",
+    )
+    assert stopped.enabled is False
+    assert stopped.version == source.version + 1
+    assert stopped.next_run_at is None
+
+
+async def test_source_schedule_can_be_stopped_after_profile_disappears(pg_db):
+    import json
+    from sqlalchemy import text
+    from autobuild_json.gateway.catalog.records import SourceInput
+    from tests.gateway.catalog_support import source_case, synthetic_vault
+
+    sources, source = await source_case(pg_db)
+    profile_id = uuid4()
+    vault = synthetic_vault()
+    cipher = vault.seal("proxy_profile", profile_id, b"http://127.0.0.1:8080").to_dict()
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("INSERT INTO proxy_profiles(id,name,config,encrypted_entries) "
+                                   "VALUES (:id,'synthetic',CAST(:config AS jsonb),CAST(:cipher AS jsonb))"),
+                              {"id": profile_id,
+                               "config": json.dumps({"mode": "fixed", "region": "random",
+                                                     "protocol": "http", "rotate": False}),
+                               "cipher": json.dumps(cipher)})
+        await session.execute(text("UPDATE credentials SET profile_id=:profile WHERE id=:credential"),
+                              {"profile": profile_id, "credential": source.credential_id})
+    scheduled = await sources.update(
+        source.id, source.version,
+        SourceInput(provider_id=source.provider_id, credential_id=source.credential_id,
+                    mode=source.mode, schedule_enabled=True),
+        "test-admin",
+    )
+    assert scheduled.next_run_at is not None
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("DELETE FROM proxy_profiles WHERE id=:id"), {"id": profile_id})
+    stopped = await sources.update(
+        source.id, scheduled.version,
+        SourceInput(provider_id=source.provider_id, credential_id=source.credential_id,
+                    mode=source.mode, schedule_enabled=False),
+        "test-admin",
+    )
+    assert stopped.enabled is True
+    assert stopped.schedule_enabled is False
+    assert stopped.next_run_at is None

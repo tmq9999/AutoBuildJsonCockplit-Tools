@@ -47,7 +47,8 @@ class SourceRepository:
             raise ValueError("invalid_keyring")
         self.db, self.vault, self.pepper = db, vault, pepper
 
-    async def _dependencies(self, session, provider_id: UUID, credential_id: UUID, *, skip_locked=False):
+    async def _dependencies(self, session, provider_id: UUID, credential_id: UUID, *, skip_locked=False,
+                            require_healthy=True, allow_missing_profile=False):
         # Every writer/context consumer follows provider -> credential -> effective
         # proxy. The source lock is acquired only after these rows are stable.
         provider_row = await _locked_row(session, "providers", provider_id, skip_locked=skip_locked)
@@ -60,7 +61,8 @@ class SourceRepository:
             provider = ProviderConfig.model_validate(provider_row["config"])
         except ValidationError:
             raise GatewayError("invalid_state", 409) from None
-        if not provider.enabled or not credential_row["enabled"] or credential_row["health"] != "active":
+        if require_healthy and (not provider.enabled or not credential_row["enabled"]
+                                or credential_row["health"] != "active"):
             raise GatewayError("invalid_state", 409)
         if provider.adapter == "codex_oauth" or provider.auth_mode == "oauth":
             raise GatewayError("unsupported_feature")
@@ -69,7 +71,8 @@ class SourceRepository:
         if proxy_id is not None:
             proxy_row = await _locked_row(session, "proxy_profiles", proxy_id, skip_locked=skip_locked)
             if proxy_row is None:
-                raise GatewayError("invalid_state", 409)
+                if not allow_missing_profile:
+                    raise GatewayError("invalid_state", 409)
         return provider_row, credential_row, provider, proxy_row, proxy_id
 
     @staticmethod
@@ -123,7 +126,11 @@ class SourceRepository:
                 raise GatewayError("not_found", 404)
             if identity["provider_id"] != input.provider_id or identity["credential_id"] != input.credential_id:
                 raise GatewayError("invalid_request")
-            _, _, provider, _, _ = await self._dependencies(session, input.provider_id, input.credential_id)
+            stopping = not input.enabled or not input.schedule_enabled
+            _, _, provider, _, _ = await self._dependencies(
+                session, input.provider_id, input.credential_id,
+                require_healthy=not stopping, allow_missing_profile=stopping,
+            )
             self._mode(provider, input.mode)
             current = (await session.execute(text("SELECT * FROM catalog_sources WHERE id=:id FOR UPDATE"),
                                              {"id": source_id})).mappings().first()
