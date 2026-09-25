@@ -18,6 +18,24 @@ export function remainingPercent(value){
   const decimal=(remaining%scale).toString().padStart(fraction.length,'0').replace(/0+$/,'');
   return (remaining/scale).toString()+(decimal?'.'+decimal:'');
 }
+export function mergePoolMembers(existing,edited,renderedIds){
+  return existing.filter(member=>!renderedIds.has(member.credential_id)).concat(edited);
+}
+export function poolSingleSelection(mode,selectedIndex,accounts,existingId){
+  if(mode!=='single')return {valid:true,credential_id:null};
+  if(selectedIndex!==''){
+    const account=accounts[Number(selectedIndex)];
+    return account?{valid:true,credential_id:account.id}:{valid:false,credential_id:null};
+  }
+  const existingLoaded=accounts.some(account=>account.id===existingId);
+  return existingId&&!existingLoaded?{valid:true,credential_id:existingId}:{valid:false,credential_id:null};
+}
+export const grantFailureDisposition=error=>Number.isInteger(error?.status)&&error.status>=400&&error.status<500?'reload':'retain';
+export async function recoverGrantFailure(error,reload){
+  if(grantFailureDisposition(error)==='retain')return true;
+  await reload();
+  return false;
+}
 export const rateValue=value=>String(value).trim()===''?null:decimalToMicro(value);
 export const quotaAmountMicro=value=>decimalToMicro(value);
 export const formatMicro=value=>microToDecimal(value);

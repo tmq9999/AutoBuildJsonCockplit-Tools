@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {canConsumeReset,quotaLabel,createCodexState,weightedMicro,rateValue,parseOverrides} from '../../autobuild_json/gateway/admin/static/codex-state.js';
+import {canConsumeReset,quotaLabel,createCodexState,weightedMicro,rateValue,parseOverrides,recoverGrantFailure} from '../../autobuild_json/gateway/admin/static/codex-state.js';
 import {createCodexActions} from '../../autobuild_json/gateway/admin/static/codex-actions.js';
 import * as codexState from '../../autobuild_json/gateway/admin/static/codex-state.js';
 
@@ -124,6 +124,40 @@ test('failed grant sends only one POST even for a network error',async()=>{
   const actions=createCodexActions({request:async()=>{posts++;throw Error('network');}},state,()=>{});
   await assert.rejects(actions.grant('key',{version:1,amount:'0',reason:'Audit noop'}),/network/);
   assert.equal(posts,1);
+});
+
+test('pool save preserves an existing member that was not in the rendered editor',()=>{
+  const existing=[{credential_id:'loaded-later',priority:2,weight:3,backup:true},{credential_id:'on-form',priority:0,weight:1,backup:false}];
+  const edited=[{credential_id:'on-form',priority:5,weight:9,backup:false}];
+  assert.deepEqual(codexState.mergePoolMembers(existing,edited,new Set(['on-form'])),[
+    {credential_id:'loaded-later',priority:2,weight:3,backup:true},
+    {credential_id:'on-form',priority:5,weight:9,backup:false}
+  ]);
+});
+test('pool merge allows a new checked member and explicit removal of a rendered member',()=>{
+  assert.deepEqual(codexState.mergePoolMembers([{credential_id:'removed'},{credential_id:'unrendered'}],[{credential_id:'added',weight:2}],new Set(['removed','added'])),[{credential_id:'unrendered'},{credential_id:'added',weight:2}]);
+});
+
+test('single pool mode never turns an empty selection into the first account',()=>{
+  assert.deepEqual(codexState.poolSingleSelection('single','', [{id:'first'}], 'first'),{valid:false,credential_id:null});
+  assert.deepEqual(codexState.poolSingleSelection('single','', [{id:'other'}], 'off-page'),{valid:true,credential_id:'off-page'});
+  assert.deepEqual(codexState.poolSingleSelection('single','0', [{id:'first'}], 'other'),{valid:true,credential_id:'first'});
+});
+
+test('definite grant rejection reloads authoritative state while ambiguous failure stays locked',()=>{
+  assert.equal(codexState.grantFailureDisposition({status:409}),'reload');
+  assert.equal(codexState.grantFailureDisposition({status:422}),'reload');
+  assert.equal(codexState.grantFailureDisposition({status:500}),'retain');
+  assert.equal(codexState.grantFailureDisposition(new Error('network')),'retain');
+});
+
+test('grant 409 reloads authoritative key state and becomes retryable, unlike ambiguity',async()=>{
+  let reloads=0;
+  assert.equal(await recoverGrantFailure({status:409},async()=>{reloads++;}),false);
+  assert.equal(reloads,1);
+  assert.equal(await recoverGrantFailure({status:500},async()=>{reloads++;}),true);
+  assert.equal(await recoverGrantFailure(new Error('network'),async()=>{reloads++;}),true);
+  assert.equal(reloads,1);
 });
 
 test('select fields default to their first choice and preserve explicit values',()=>{

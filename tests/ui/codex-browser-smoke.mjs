@@ -5,7 +5,9 @@ import {mkdtemp,mkdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import net from 'node:net';
+import {execFileSync} from 'node:child_process';
 import {chromium} from 'playwright-core';
+import {codexReviewRegressions} from './codex-review-regressions.mjs';
 const socket=net.createServer();await new Promise(r=>socket.listen(0,'127.0.0.1',r));const port=socket.address().port;await new Promise(r=>socket.close(r));
 const base=`http://127.0.0.1:${port}`,data=await mkdtemp(join(tmpdir(),'codex-ui-'));
 const server=spawn('.venv/bin/python',['-m','tests.gateway_ui_server','--port',String(port),'--codex'],{env:{...process.env,AUTOBUILD_TEST_DATA:data},stdio:['ignore','pipe','pipe']});
@@ -18,8 +20,14 @@ try{
   const errors=[],external=[],commands=[];
   page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(r.method()!=='GET')commands.push({path:new URL(r.url()).pathname,body:r.postDataJSON()});});
   await context.route('**/*',r=>{if(!r.request().url().startsWith(base+'/')){external.push(r.request().url());return r.abort();}return r.continue();});
+  if(process.env.CODEX_REVIEW_BASELINE){
+    const baselineView=execFileSync('git',['show','cb867df:autobuild_json/gateway/admin/static/codex-view.js'],{encoding:'utf8'});
+    await context.route(base+'/service-assets/codex-view.js',async route=>{const response=await route.fetch();await route.fulfill({response,body:baselineView});});
+  }
   await page.goto(base+'/service/');await page.locator('#admin-token').fill('browser-test-admin');await page.locator('#login-form button').click();
   await page.locator('#workspace').waitFor({state:'visible'});
+  await codexReviewRegressions(context,base);
+  if(!process.env.CODEX_REVIEW_BASELINE){
   assert.equal(await page.getByRole('button',{name:'Tài khoản Codex',exact:true}).count(),1,'Admin must expose the approved account workspace');
   await page.getByRole('button',{name:'Tài khoản Codex',exact:true}).click();
   await page.locator('#codex-list').waitFor();
@@ -47,14 +55,16 @@ try{
   await page.waitForFunction(()=>document.querySelector('#codex-reset-state').textContent.includes('succeeded_refresh_failed'));assert(await page.locator('#codex-consume').isDisabled());
   // Pool CAS: another admin updates the real store after this UI loads v0.
   await page.locator('#codex-pool-model').selectOption('vendor/model:v1');await page.waitForFunction(()=>document.querySelector('#codex-pool-form'));
-  await page.evaluate(async()=>{const s=await(await fetch('/api/session')).json();const r=await fetch('/api/service/account-pools/vendor/model:v1',{method:'PUT',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf_token},body:JSON.stringify({version:0,policy:{members:[]}})});if(!r.ok)throw Error('fixture CAS');});
+  await page.locator('#codex-pool-form [name="mode"]').selectOption('single');assert(await page.locator('#codex-pool-save').isDisabled(),'Single mode without an explicit account must not choose the first account');await page.locator('#codex-pool-form [name="mode"]').selectOption('auto');
+  const poolVersion=await page.evaluate(async()=>{const s=await(await fetch('/api/session')).json();const p=await(await fetch('/api/service/account-pools/vendor/model:v1')).json();const r=await fetch('/api/service/account-pools/vendor/model:v1',{method:'PUT',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf_token},body:JSON.stringify({version:p.version,policy:{members:[]}})});if(!r.ok)throw Error('fixture CAS');return (await r.json()).version;});
   await page.locator('#codex-pool-save').click();await page.waitForFunction(()=>document.querySelector('#codex-message').textContent.includes('409'));
   assert.match(await page.locator('#codex-message').textContent(),/Tải lại/);
-  await page.locator('#codex-pool-reload').click();await page.waitForFunction(()=>document.querySelector('#codex-pool-version').textContent.includes('1'));
-  await page.locator('#codex-pool-save').click();await page.waitForFunction(()=>document.querySelector('#codex-pool-version').textContent.includes('2'));
+  await page.locator('#codex-pool-reload').click();await page.waitForFunction(v=>document.querySelector('#codex-pool-version').textContent==='version '+v,poolVersion);
+  await page.locator('#codex-pool-save').click();await page.waitForFunction(v=>document.querySelector('#codex-pool-version').textContent==='version '+v,poolVersion+1);
   // Exact balances and append-only grant from real ledger.
   await page.locator('#codex-key').selectOption({label:'Demo key'});await page.waitForFunction(()=>document.querySelector('#codex-balance').textContent.includes('99998915'));
-  await page.locator('#codex-grant-amount').fill('1085');await page.locator('#codex-grant-reason').fill('Synthetic reconciliation');await page.locator('#codex-grant-ack').check();await page.locator('#codex-grant-submit').click();
+  await page.locator('#codex-grant-amount').fill('1085');await page.locator('#codex-grant-reason').fill('Synthetic reconciliation');
+  await page.locator('#codex-grant-ack').check();await page.locator('#codex-grant-submit').click();
   await page.waitForFunction(()=>document.querySelector('#codex-balance').textContent.includes('100001085'));
   const balance=await page.locator('#codex-balance').textContent();assert.match(balance,/100000000/);assert.match(balance,/1085/);
   assert.match(await page.locator('#codex-reports').textContent(),/1085/);assert.match(await page.locator('#codex-reports').textContent(),/Không rõ/);
@@ -104,5 +114,5 @@ try{
   await page.locator('#logout').click();releaseLogout();await page.locator('#login-panel').waitFor({state:'visible'});assert.equal(await page.locator('#codex-workspace').textContent(),'');
   assert.equal(await page.evaluate(()=>localStorage.length+sessionStorage.length),0);
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.equal(commands.filter(c=>c.path.endsWith('/consume')).length,1);
-  console.log('Codex browser PASS: real PG/session, storage-only reads, reset warning/reload/recovery without resend, CAS, exact grant/audit, cache rates, redaction, keyboard/ARIA, desktop/mobile390, no external network.');
+  console.log('Codex browser PASS: real PG/session, storage-only reads, reset warning/reload/recovery without resend, CAS, exact grant/audit, cache rates, redaction, keyboard/ARIA, desktop/mobile390, no external network.');}
 }finally{await browser?.close();server.kill('SIGTERM');await new Promise(r=>{if(server.exitCode!==null)r();else server.once('exit',r);});}
