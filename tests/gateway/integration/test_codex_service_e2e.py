@@ -103,7 +103,7 @@ async def test_real_codex_service_handoff_composes_customer_and_admin_flows(pg_d
             }
             account_view = await client.get("/api/service/oauth-accounts")
             assert account_view.status_code == 200
-            assert any(row["id"] == str(successful_account) and row["email"] == "s***@e***.com"
+            assert any(row["id"] == str(successful_account) and row["email"] == "synthetic@example.com"
                        for row in account_view.json()["items"])
             path = f"/api/service/oauth-accounts/{successful_account}"
             assert (await client.get(path + "/quota")).json()["snapshot"] is None

@@ -6,6 +6,21 @@ export function decimalToMicro(value) {
   if(result>=10n**38n) throw new Error('Giá trị quá lớn.');
   return result.toString();
 }
+export function parseQuotaInput(value) {
+  const text=String(value).trim().replace(/\s+/g,' ');
+  const match=/^(\d+(?:\.\d{1,6})?)\s*([kmb])?$/i.exec(text);
+  if(!match) throw new Error('Hạn mức phải là số hoặc dùng hậu tố k, m, b.');
+  const [,number,unit]=match;
+  const factor={k:1000n,m:1000000n,b:1000000000n}[unit?.toLowerCase()??'']??1n;
+  const [whole,fraction='']=number.split('.');
+  const scaled=BigInt(whole)*1000000n+BigInt(fraction.padEnd(6,'0'));
+  if(scaled>=10n**38n/factor) throw new Error('Giá trị quá lớn.');
+  const result=scaled*factor;
+  const integer=result/1000000n;
+  const remainder=result%1000000n;
+  const decimals=remainder.toString().padStart(6,'0').replace(/0+$/,'');
+  return integer.toString()+(decimals?'.'+decimals:'');
+}
 export function microToDecimal(value) {
   if(value===null||value===undefined) return '';
   const n=BigInt(value), fraction=(n%1000000n).toString().padStart(6,'0').replace(/0+$/,'');

@@ -5,6 +5,24 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ## [Unreleased] — 2026-09-24
 
+### Codex parity and proxy follow-up — 2026-09-26
+
+- Added private Codex service proxy selector with direct/fixed/list/pool/KiotProxy
+  profiles, CAS-safe provider configuration, encrypted-profile redaction and strict
+  precedence `credential → provider → direct`. Configured proxy failures fail closed;
+  customer responses never contain proxy fingerprints or credentials.
+- Codex Responses normalization now strips unsupported sampling/output-cap hints while
+  retaining certified quota bounds, adds SSE `Accept`, and preserves exact cached/
+  reasoning/output settlement. Native Responses reasoning summaries and opaque
+  encrypted replay survive JSON/SSE; incompatible protocols reject replay or omit
+  unsupported output without leaking raw reasoning.
+- Added persistent loopback development runner `scripts/local_gateway.py`, which
+  initializes a private PostgreSQL/keyring directory and can batch-import the existing
+  local OAuth JSON without re-authenticating accounts. It never prints tokens.
+- Verification: 1,393 gateway Python tests, 43 Node UI tests, gateway browser smoke,
+  Codex browser smoke (real PostgreSQL/session, proxy CAS and 226-row import), Ruff and
+  diff checks passed. Live Codex/Kiot/provider credentials were not used.
+
 ### Final review follow-up — 2026-09-25
 
 - Credit reset bị khóa khi lần refresh credits gần nhất có lỗi; snapshot cũ không

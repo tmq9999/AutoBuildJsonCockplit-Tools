@@ -26,7 +26,23 @@ class CredentialService:
         self.profile_resolver = profile_resolver
         self.refresh_leases = PgLeaseStore(db)
 
-    async def import_record(self, record, profile_id):
+    async def validate_profile(self, profile_id):
+        """Validate an optional profile reference before writing credentials."""
+        if profile_id is None:
+            return
+        async with self.db.sessions() as session:
+            exists = await session.scalar(text("SELECT 1 FROM proxy_profiles WHERE id=:id"), {"id": profile_id})
+        if not exists:
+            raise GatewayError("invalid_request", 422)
+
+    async def import_record_result(self, record, profile_id):
+        """Import one record and return ``(credential_id, created)``.
+
+        The INSERT/ON CONFLICT operation and the follow-up lookup are in the
+        same transaction.  Consequently a concurrent import of the same
+        issuer/account is reported as a duplicate rather than being mistaken
+        for a newly-created row.
+        """
         try:
             parsed = SuccessRecord.model_validate(record)
         except ValidationError:
@@ -40,6 +56,11 @@ class CredentialService:
                                   {"id": CODEX_PROVIDER, "config": config.model_dump_json()})
             await session.execute(text("INSERT INTO config_versions(provider_id,version,config) VALUES (:id,1,CAST(:config AS jsonb)) "
                                        "ON CONFLICT DO NOTHING"), {"id": CODEX_PROVIDER, "config": config.model_dump_json()})
+            # profile_id has no foreign key.  Cooperate with the profile
+            # deletion lock so an import cannot leave a dangling reference.
+            if profile_id is not None and not await session.scalar(text(
+                    "SELECT id FROM proxy_profiles WHERE id=:id FOR KEY SHARE"), {"id": profile_id}):
+                raise GatewayError("invalid_request", 422)
             inserted = await session.scalar(text("""INSERT INTO credentials
                 (id,provider_id,encrypted_secret,health,issuer,account_id,email,profile_id)
                 VALUES (:id,:provider,CAST(:cipher AS jsonb),'unverified',:issuer,:account,:email,:profile)
@@ -47,10 +68,15 @@ class CredentialService:
                 {"id": identity, "provider": CODEX_PROVIDER, "cipher": json.dumps(encrypted), "issuer": ISSUER,
                  "account": parsed.account.id, "email": parsed.email, "profile": profile_id})
             if inserted is None:
-                return await session.scalar(text("SELECT id FROM credentials WHERE issuer=:issuer AND account_id=:account"),
-                                            {"issuer": ISSUER, "account": parsed.account.id})
+                existing = await session.scalar(text("SELECT id FROM credentials WHERE issuer=:issuer AND account_id=:account"),
+                                                {"issuer": ISSUER, "account": parsed.account.id})
+                return existing, False
             await Catalog(self.db, self.vault)._audit(session, "oauth.imported", identity)
-        return identity
+        return identity, True
+
+    async def import_record(self, record, profile_id):
+        credential_id, _created = await self.import_record_result(record, profile_id)
+        return credential_id
 
     async def _record(self, credential_id):
         async with self.db.sessions() as session:

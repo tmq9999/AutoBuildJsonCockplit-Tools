@@ -1,7 +1,7 @@
 import json
 from uuid import uuid4
 
-from ..contracts import InferenceRequest, Message, Text, ToolCall, ToolResult, Tool, GenerationOptions
+from ..contracts import InferenceRequest, Message, Text, ToolCall, ToolResult, Tool, Reasoning, GenerationOptions
 from ..errors import GatewayError
 
 STOP_OUT = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use", "content_filter": "refusal"}
@@ -24,6 +24,7 @@ class AnthropicCodec:
     def __init__(self, response_id=None, model=""):
         self.response_id, self.model = response_id or "msg_"+uuid4().hex, model
         self.indices = {}
+        self.omitted = set()
 
     def decode(self, body, options):
         allowed = {"model", "max_tokens", "system", "messages", "tools", "tool_choice", "temperature", "top_p", "stop_sequences", "stream"}
@@ -75,6 +76,8 @@ class AnthropicCodec:
             raise GatewayError("invalid_request") from None
 
     def upstream_body(self, request, model):
+        from .responses_options import reject_native_options
+        reject_native_options(request, strict_tools=True)
         messages, system = [], []
         if request.instructions:
             system.append(request.instructions)
@@ -104,7 +107,8 @@ class AnthropicCodec:
     def encode_result(self, result):
         usage = result.usage
         return {"id": result.id, "type": "message", "role": "assistant", "model": result.model,
-                "content": [content_block(b) for b in result.blocks], "stop_reason": STOP_OUT[result.finish_reason],
+                # Do not invent Anthropic thinking/signatures from Responses.
+                "content": [content_block(b) for b in result.blocks if not isinstance(b, Reasoning)], "stop_reason": STOP_OUT[result.finish_reason],
                 "stop_sequence": None, "usage": self._usage(usage) if usage else None}
 
     @staticmethod
@@ -122,17 +126,23 @@ class AnthropicCodec:
                 "model": self.model, "content": [], "stop_reason": None, "stop_sequence": None,
                 "usage": {"input_tokens": 0, "output_tokens": 0}})]
         if event.kind == "block_started":
-            self.indices[event.item_id] = event.index
+            if isinstance(event.block, Reasoning):
+                self.omitted.add(event.item_id)
+                return []
+            index = len(self.indices)
+            self.indices[event.item_id] = index
             block = {"type": "tool_use", "id": event.block.call_id, "name": event.block.name, "input": {}} if isinstance(event.block, ToolCall) else content_block(event.block)
-            frames=[self._event("content_block_start", index=event.index, content_block=block)]
+            frames=[self._event("content_block_start", index=index, content_block=block)]
             if isinstance(event.block,ToolCall) and event.block.arguments:
-                frames.append(self._event('content_block_delta',index=event.index,
+                frames.append(self._event('content_block_delta',index=index,
                     delta={'type':'input_json_delta','partial_json':event.block.arguments}))
             return frames
         if event.kind in {"text_delta", "tool_delta"}:
             delta = {"type": "text_delta", "text": event.delta} if event.kind == "text_delta" else {"type": "input_json_delta", "partial_json": event.delta}
             return [self._event("content_block_delta", index=self.indices[event.item_id], delta=delta)]
         if event.kind == "block_finished":
+            if event.item_id in self.omitted:
+                return []
             return [self._event("content_block_stop", index=self.indices[event.item_id])]
         if event.kind == "finished":
             return [self._event("message_delta", delta={"stop_reason": STOP_OUT[event.finish_reason], "stop_sequence": None},

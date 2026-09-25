@@ -1,6 +1,7 @@
 import base64
 import json
 import re
+from html.parser import HTMLParser
 from urllib.parse import unquote, urljoin, urlsplit
 from uuid import UUID
 
@@ -9,6 +10,29 @@ from .errors import FlowError
 from .oauth import ISSUER, is_callback
 from .transport import validate_url
 from .diagnostics import request_details
+
+
+class _WorkspaceInputs(HTMLParser):
+    """Read consent form controls, not lookalike input strings in scripts/comments."""
+
+    def __init__(self):
+        super().__init__()
+        self.ids = set()
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "input" or len({name for name, _ in attrs}) != len(attrs):
+            return
+        attributes = dict(attrs)
+        if (attributes.get("name") != "workspace_id"
+                or (attributes.get("type") or "").lower() not in {"radio", "hidden"}):
+            return
+        value = attributes.get("value")
+        if not value:
+            return
+        try:
+            self.ids.add(str(UUID(value)))
+        except ValueError:
+            pass
 
 
 class OAuthNavigator:
@@ -32,6 +56,10 @@ class OAuthNavigator:
                 ids.add(str(UUID(raw)))
             except ValueError:
                 continue
+        controls = _WorkspaceInputs()
+        controls.feed(html)
+        controls.close()
+        ids.update(controls.ids)
         cookies = getattr(self.transport, "cookies", {})
         value = unquote(str(cookies.get("oai-client-auth-session", "")))
         selected, available = set(), set()

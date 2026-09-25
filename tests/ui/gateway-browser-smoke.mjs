@@ -22,12 +22,12 @@ try {
   await page.getByText('<img src=x onerror=alert(1)> Customer',{exact:true}).waitFor();assert.equal(await page.locator('#rows img').count(),0);
   await page.locator('[data-nav="keys"]').click();await page.locator('#new-item').click();
   await page.locator('[name="name"]').fill('Production key');await page.locator('[name="customer_id"]').selectOption({index:1});
-  await page.locator('[name="total"]').fill('100000000000000.123456');await page.locator('[name="protocol_openai"]').check();
+  await page.locator('[name="total"]').fill('100m');assert.equal(await page.locator('.quota-preview').first().textContent(),'= 100.000.000 token');await page.locator('[name="protocol_openai"]').check();
   await page.locator('[name="model_ids"]').fill('test-model');await page.locator('#editor-form [type="submit"]').click();
-  await page.locator('#one-time-secret').waitFor({state:'visible'});const secret=await page.locator('#secret-value').inputValue();assert(secret.startsWith('abgw_'));
+  await page.locator('#one-time-secret').waitFor({state:'visible'});const secret=await page.locator('#secret-value').inputValue();assert(secret.startsWith('sk-'));
   await page.locator('#hide-secret').click();assert.equal(await page.locator('#secret-value').inputValue(),'');
   await page.getByRole('button',{name:'Production key',exact:true}).click();
-  assert.equal(await page.locator('[name="total"]').inputValue(),'100000000000000.123456');
+  assert.equal(await page.locator('[name="total"]').inputValue(),'100000000');
   await page.locator('[name="name"]').fill('Renamed key');await page.locator('#editor-form [type="submit"]').click();await page.getByRole('button',{name:'Renamed key',exact:true}).waitFor();
   await page.locator('[data-nav="proxies"]').click();await page.locator('#new-item').click();
   await page.locator('[name="name"]').fill('Kiot profile');await page.locator('[name="mode"]').selectOption('kiotproxy');
@@ -39,6 +39,8 @@ try {
   await page.locator('[data-nav="models"]').click();await page.locator('#new-item').click();await page.locator('[name="model_id"]').fill('test-model');await page.locator('[name="identity"]').fill('model-identity');await page.locator('[name="enabled"]').check();await page.locator('#editor-form [type="submit"]').click();await page.getByRole('button',{name:'test-model',exact:true}).waitFor();
   await page.locator('[data-nav="bindings"]').click();await page.locator('#new-item').click();for(const name of ['provider_id','credential_id','public_model_id'])await page.locator(`[name="${name}"]`).selectOption({index:1});await page.locator('[name="upstream_model"]').fill('actual-model');await page.locator('[name="identity"]').fill('model-identity');await page.locator('#editor-form [type="submit"]').click();await page.getByRole('button',{name:'test-model',exact:true}).waitFor();
   await page.locator('[data-nav="playground"]').click();await page.locator('[name="client_key"]').fill(secret);await page.locator('#editor-form [type="submit"]').click();await page.waitForFunction(()=>document.querySelector('#editor pre')||document.querySelector('#notice').classList.contains('error'));assert((await page.locator('#editor').textContent()).includes('Hello'),await page.locator('#notice').textContent());
+  await page.locator('[data-nav="keys"]').click();await page.getByRole('button',{name:'Renamed key',exact:true}).click();page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Xóa API key',exact:true}).click();await page.getByText('Đã xóa API key.',{exact:true}).waitFor();
+  await page.locator('[data-nav="customers"]').click();await page.getByRole('button',{name:'<img src=x onerror=alert(1)> Customer',exact:true}).click();page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Xóa khách hàng',exact:true}).click();await page.getByText('Đã xóa khách hàng.',{exact:true}).waitFor();
   await mkdir('.superpowers/browser-check',{recursive:true});await page.screenshot({path:'.superpowers/browser-check/gateway-desktop.png',fullPage:true});
   await page.setViewportSize({width:390,height:844});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
   await page.screenshot({path:'.superpowers/browser-check/gateway-mobile.png',fullPage:true});

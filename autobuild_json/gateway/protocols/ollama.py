@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import json
 from uuid import uuid4
 
-from ..contracts import InferenceRequest, Message, Text, ToolCall, ToolResult, GenerationOptions
+from ..contracts import InferenceRequest, Message, Text, ToolCall, ToolResult, Reasoning, GenerationOptions
 from ..errors import GatewayError
 from .common import EventCollector
 from .openai_chat import OpenAIChatCodec
@@ -58,6 +58,8 @@ class OllamaCodec:
             raise GatewayError("invalid_request") from None
 
     def upstream_body(self, request, model):
+        from .responses_options import reject_native_options
+        reject_native_options(request, strict_tools=True)
         if request.continuation or request.options.tool_choice != "auto" or request.options.parallel_tool_calls is not None:
             raise GatewayError("unsupported_feature")
         messages = []
@@ -92,7 +94,7 @@ class OllamaCodec:
         if opts:
             body["options"] = opts
         if request.tools:
-            body["tools"] = [{"type": "function", "function": tool.model_dump()} for tool in request.tools]
+            body["tools"] = [{"type": "function", "function": tool.model_dump(exclude_none=True)} for tool in request.tools]
         return body
 
     def _base(self, done=False):
@@ -104,6 +106,9 @@ class OllamaCodec:
         output = self._base(True)
         text, calls = "", []
         for block in result.blocks:
+            if isinstance(block, Reasoning):
+                # Native reasoning replay payloads are Responses-only.
+                continue
             if isinstance(block, Text):
                 text += block.text
             elif isinstance(block, ToolCall) and not self.generate:

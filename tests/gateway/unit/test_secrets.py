@@ -51,11 +51,19 @@ def test_vault_rejects_invalid_keyrings(keys, active):
 def test_client_key_has_256_random_bits_and_scoped_digest():
     from autobuild_json.gateway.secrets import issue_key, key_digest
     prefix, key = issue_key()
+    assert prefix.startswith("sk-")
     assert key.startswith(prefix + ".")
+    assert len(prefix) == len("sk-") + 12
     assert len(base64.urlsafe_b64decode(key.split(".")[1] + "=")) == 32
     assert key_digest(key, b"a" * 32) != key_digest(key, b"b" * 32)
     assert len(key_digest(key, b"a" * 32)) == 32
     assert issue_key()[1] != key
+
+
+def test_legacy_abgw_client_keys_remain_accepted():
+    from autobuild_json.gateway.secrets import key_digest
+    legacy = "abgw_" + "a" * 12 + "." + "A" * 43
+    assert len(key_digest(legacy, b"a" * 32)) == 32
 
 
 def test_catalog_cursor_derivation_is_domain_separated_and_stable():

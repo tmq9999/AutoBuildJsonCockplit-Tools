@@ -2,9 +2,10 @@ import json
 import time
 from uuid import uuid4
 
-from ..contracts import InferenceRequest, Message, Text, Tool, ToolCall, ToolResult, GenerationOptions
+from ..contracts import InferenceRequest, Message, Text, Tool, ToolCall, ToolResult, Reasoning, GenerationOptions
 from ..errors import GatewayError
 from .common import EventCollector
+from .responses_options import TextOptions
 
 
 def response_usage(usage):
@@ -17,6 +18,14 @@ def response_usage(usage):
 
 
 def output_item(block, item_id, status="completed"):
+    if isinstance(block, Reasoning):
+        value = {"id": block.id, "type": "reasoning", "summary": [
+            {"type": "summary_text", "text": part} for part in block.summary]}
+        if block.status is not None:
+            value["status"] = block.status
+        if block.encrypted_content is not None:
+            value["encrypted_content"] = block.encrypted_content
+        return value
     if isinstance(block, Text):
         return {"id": item_id, "type": "message", "status": status, "role": "assistant",
                 "content": [{"type": "output_text", "text": block.text, "annotations": []}]}
@@ -24,6 +33,18 @@ def output_item(block, item_id, status="completed"):
         return {"id": item_id, "type": "function_call", "status": status, "call_id": block.call_id,
                 "name": block.name, "arguments": block.arguments}
     raise GatewayError("unsupported_feature")
+
+
+def reasoning_item(item):
+    """Read only published summaries and opaque replay data, never raw content."""
+    if not isinstance(item, dict) or set(item)-{"type", "id", "summary", "encrypted_content", "status"} or item.get("type") != "reasoning":
+        raise GatewayError("unsupported_feature")
+    summary = item.get("summary", [])
+    if not isinstance(summary, list) or any(not isinstance(part, dict) or set(part) != {"type", "text"}
+        or part["type"] != "summary_text" for part in summary):
+        raise ValueError("invalid_reasoning_summary")
+    return Reasoning(id=item["id"], summary=tuple(part["text"] for part in summary),
+                     encrypted_content=item.get("encrypted_content"), status=item.get("status"))
 
 
 class ResponsesCodec:
@@ -35,7 +56,8 @@ class ResponsesCodec:
 
     def decode(self, body, options):
         allowed = {"model", "input", "instructions", "tools", "tool_choice", "max_output_tokens", "temperature",
-                   "top_p", "stream", "store", "background", "parallel_tool_calls", "previous_response_id"}
+                   "top_p", "stream", "store", "background", "parallel_tool_calls", "previous_response_id",
+                   "reasoning", "include", "text", "prompt_cache_key"}
         if not isinstance(body, dict) or set(body)-allowed or body.get("store", False) is not False or body.get("background", False) is not False:
             raise GatewayError("unsupported_feature")
         try:
@@ -50,6 +72,8 @@ class ResponsesCodec:
                         name=item["name"], arguments=item["arguments"]),)))
                 elif kind == "function_call_output":
                     messages.append(Message(role="tool", blocks=(ToolResult(call_id=item["call_id"], content=item["output"]),)))
+                elif kind == "reasoning":
+                    messages.append(Message(role="assistant", blocks=(reasoning_item(item),)))
                 elif kind == "message":
                     content = item["content"]
                     if isinstance(content, str):
@@ -65,13 +89,22 @@ class ResponsesCodec:
                     raise GatewayError("unsupported_feature")
             tools = []
             for tool in body.get("tools", []):
-                if tool.get("type") != "function" or tool.get("strict") is True:
+                if tool.get("type") != "function":
                     raise GatewayError("unsupported_feature")
-                tools.append(Tool(**{k: v for k, v in tool.items() if k not in {"type", "strict"}}))
+                tools.append(Tool(**{k: v for k, v in tool.items() if k != "type"}))
+            reasoning = body.get("reasoning")
+            if reasoning is not None and (not isinstance(reasoning, dict) or set(reasoning)-{"effort", "summary", "context"}):
+                raise GatewayError("unsupported_feature")
+            include = body.get("include", ())
+            if not isinstance(include, (list, tuple)) or any(not isinstance(item, str) or not item for item in include):
+                raise GatewayError("invalid_request")
             request = InferenceRequest(model=body["model"], messages=messages, instructions=body.get("instructions"),
                 tools=tools, stream=body.get("stream", False), continuation=body.get("previous_response_id"),
                 options=GenerationOptions(max_output_tokens=body.get("max_output_tokens"), temperature=body.get("temperature"),
-                    top_p=body.get("top_p"), tool_choice=body.get("tool_choice", "auto"), parallel_tool_calls=body.get("parallel_tool_calls")))
+                    top_p=body.get("top_p"), tool_choice=body.get("tool_choice", "auto"), parallel_tool_calls=body.get("parallel_tool_calls"),
+                    reasoning=reasoning, include=tuple(include),
+                    text=TextOptions.model_validate(body["text"]).model_dump(exclude_none=True) if body.get("text") is not None else None,
+                    prompt_cache_key=body.get("prompt_cache_key")))
             self.model = request.model
             self.collector = EventCollector(self.response_id, self.model)
             return request
@@ -91,6 +124,10 @@ class ResponsesCodec:
                     items.append({"type": "function_call", "call_id": block.call_id, "name": block.name, "arguments": block.arguments})
                 elif isinstance(block, ToolResult):
                     items.append({"type": "function_call_output", "call_id": block.call_id, "output": block.content})
+                elif isinstance(block, Reasoning):
+                    if message.role != "assistant":
+                        raise GatewayError("unsupported_feature")
+                    items.append(output_item(block, block.id))
                 else:
                     raise GatewayError("unsupported_feature")
             if text_blocks:
@@ -101,8 +138,16 @@ class ResponsesCodec:
         if request.continuation is not None:
             body["previous_response_id"] = request.continuation
         if request.tools:
-            body["tools"] = [dict(type="function", **tool.model_dump()) for tool in request.tools]
+            body["tools"] = [dict(type="function", **tool.model_dump(exclude_none=True)) for tool in request.tools]
             body["tool_choice"] = request.options.tool_choice
+        if request.options.reasoning is not None:
+            body["reasoning"] = request.options.reasoning.model_dump(exclude_none=True)
+        if request.options.include:
+            body["include"] = list(request.options.include)
+        if request.options.text is not None:
+            body["text"] = TextOptions.model_validate(request.options.text).model_dump(exclude_none=True)
+        if request.options.prompt_cache_key is not None:
+            body["prompt_cache_key"] = request.options.prompt_cache_key
         for name in ("max_output_tokens", "temperature", "top_p", "parallel_tool_calls"):
             value = getattr(request.options, name)
             if value is not None:
@@ -138,8 +183,13 @@ class ResponsesCodec:
             return [self._event("response.created", response=self._base("in_progress")),
                     self._event("response.in_progress", response=self._base("in_progress"))]
         if event.kind == "block_started":
-            frames = [self._event("response.output_item.added", output_index=event.index,
-                                  item=output_item(event.block, event.item_id, "in_progress"))]
+            item = output_item(event.block, event.item_id, "in_progress")
+            if isinstance(event.block, Reasoning):
+                # Summary text arrives through summary-part events; item-added
+                # must be an empty shell (never duplicate the first delta).
+                item["summary"] = []
+                item.pop("encrypted_content", None)
+            frames = [self._event("response.output_item.added", output_index=event.index, item=item)]
             if isinstance(event.block, Text):
                 frames.append(self._event("response.content_part.added", item_id=event.item_id, output_index=event.index,
                                           content_index=0, part={"type": "output_text", "text": "", "annotations": []}))
@@ -150,6 +200,20 @@ class ResponsesCodec:
             if event.kind == "text_delta":
                 values["content_index"] = 0
             return [self._event("response.output_text.delta" if event.kind == "text_delta" else "response.function_call_arguments.delta", **values)]
+        if event.kind in {"reasoning_summary_started", "reasoning_summary_delta", "reasoning_summary_finished"}:
+            index, block = self.collector.blocks[event.item_id]
+            values = {"item_id": event.item_id, "output_index": index, "summary_index": event.summary_index}
+            part = {"type": "summary_text", "text": block.summary[event.summary_index]}
+            if event.kind == "reasoning_summary_started":
+                frames = [self._event("response.reasoning_summary_part.added", **values,
+                                     part={"type": "summary_text", "text": ""})]
+                if event.delta:
+                    frames.append(self._event("response.reasoning_summary_text.delta", **values, delta=event.delta))
+                return frames
+            if event.kind == "reasoning_summary_delta":
+                return [self._event("response.reasoning_summary_text.delta", **values, delta=event.delta)]
+            return [self._event("response.reasoning_summary_text.done", **values, text=part["text"]),
+                    self._event("response.reasoning_summary_part.done", **values, part=part)]
         if event.kind == "block_finished":
             index, block = self.collector.blocks[event.item_id]
             frames = []
@@ -157,7 +221,7 @@ class ResponsesCodec:
                 frames.append(self._event("response.output_text.done", item_id=event.item_id, output_index=index, content_index=0, text=block.text))
                 frames.append(self._event("response.content_part.done", item_id=event.item_id, output_index=index, content_index=0,
                                           part={"type": "output_text", "text": block.text, "annotations": []}))
-            else:
+            elif isinstance(block, ToolCall):
                 frames.append(self._event("response.function_call_arguments.done", item_id=event.item_id,
                                           output_index=index, arguments=block.arguments))
             frames.append(self._event("response.output_item.done", output_index=index, item=output_item(block, event.item_id)))

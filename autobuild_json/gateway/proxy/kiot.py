@@ -78,23 +78,39 @@ class KiotClient:
             try:
                 if response.status_code == 429:
                     raise GatewayError("proxy_not_ready", 503, "proxy")
-                if response.status_code != 200:
+                # Kiot uses HTTP 400 for recognized business errors (including
+                # no current allocation). Other statuses must not authorize /new.
+                if response.status_code not in {200, 400}:
                     raise GatewayError("kiot_unavailable", 503, "proxy")
                 data = bytearray()
                 async for chunk in response.aiter_bytes():
                     if len(data)+len(chunk) > 65536:
                         raise GatewayError("kiot_unavailable", 503, "proxy")
                     data.extend(chunk)
-                return json.loads(data)
+                try:
+                    payload = json.loads(data)
+                except (ValueError, UnicodeError):
+                    raise GatewayError("kiot_unavailable", 503, "proxy") from None
+                if not isinstance(payload, dict):
+                    raise GatewayError("kiot_unavailable", 503, "proxy")
+                return response.status_code, payload
             finally:
                 await response.aclose()
         try:
             remaining = deadline-time.monotonic()
             if remaining <= 0:
                 raise asyncio.TimeoutError()
-            payload = await asyncio.wait_for(exchange(), min(10, remaining))
-            if not isinstance(payload, dict):
-                raise ValueError()
+            status, payload = await asyncio.wait_for(exchange(), min(10, remaining))
+            if status == 400:
+                if payload.get("success") is not False:
+                    raise GatewayError("kiot_unavailable", 503, "proxy")
+                if payload.get("error") == "PROXY_NOT_FOUND_BY_KEY" and operation == "current":
+                    return None
+                if payload.get("error") == "KEY_NOT_FOUND":
+                    raise GatewayError("kiot_key_invalid", 400, "proxy")
+                raise GatewayError("kiot_unavailable", 503, "proxy")
+            if status != 200:
+                raise GatewayError("kiot_unavailable", 503, "proxy")
             if payload.get("success") is not True:
                 if payload.get("error") == "PROXY_NOT_FOUND_BY_KEY" and operation == "current":
                     return None

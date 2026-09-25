@@ -11,9 +11,16 @@ from .responses_events import responses_events
 
 
 def codex_body(request, model):
-    if request.options.max_output_tokens is not None or request.options.temperature is not None or request.options.top_p is not None:
-        raise GatewayError("unsupported_feature")
     body = ResponsesCodec().upstream_body(request, model)
+    # The Codex Responses endpoint does not accept these generation controls.
+    # They are compatibility hints, not enforced caps: Engine reserves the full
+    # certified binding bound even when the client supplies a smaller limit.
+    for name in ("max_output_tokens", "temperature", "top_p"):
+        body.pop(name, None)
+    include = list(body.get("include", []))
+    if "reasoning.encrypted_content" not in include:
+        include.append("reasoning.encrypted_content")
+    body["include"] = include
     body.setdefault("instructions", "")
     return body
 
@@ -30,7 +37,9 @@ class CodexAdapter:
         account_id, tokens = await self.token_resolver(route)
         remaining = min(route.timeout, (lease.deadline-datetime.now(timezone.utc)).total_seconds())
         call = OutboundRequest("POST", "responses", body, auth_header=("Authorization", "Bearer "+tokens["access_token"]),
-            headers=(("chatgpt-account-id", account_id),), deadline=time.monotonic()+remaining)
+            # Keep the name lowercase so Transport's default JSON Accept is
+            # replaced instead of becoming a duplicate case-insensitive pair.
+            headers=(("chatgpt-account-id", account_id), ("accept", "text/event-stream")), deadline=time.monotonic()+remaining)
         async with self.transport.open(route, lease.proxy, call) as response:
             if response.status in {400, 401, 403, 404, 422, 429}:
                 rejected = UpstreamRejected(response.status, parse_retry_after(response.headers.get("retry-after")))

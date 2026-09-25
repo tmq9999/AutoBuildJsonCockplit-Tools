@@ -19,10 +19,11 @@ before claiming that support.
 
 ## Current limits
 
-- Text and basic function/tool calls are the implemented core. Vision, structured
-  outputs, signed thinking blocks, prompt cache controls and provider-specific tool
-  features are rejected when not representable. No silent parameter dropping is
-  intended; unsupported combinations require an explicit error and regression test.
+- Text and basic function/tool calls are the implemented core. Native Responses
+  reasoning summaries and opaque encrypted replay are preserved only on Responses;
+  raw chain-of-thought is never exposed or translated to another protocol. Vision,
+  provider-specific tool features and unsupported combinations fail closed with a
+  regression test rather than being silently translated.
 - Responses background/store=true/compact/retrieval/WebSocket are unsupported.
   Continuation handles are tenant/key/model/route/credential scoped, encrypted and
   enabled only for a native route with that capability. Chat-backed Responses
@@ -31,10 +32,12 @@ before claiming that support.
   a trustworthy counter return unsupported. Counts share the key's RPM/concurrency
   gate and do not charge generation quota. Hard money-budget counting routes require
   a separate counter cost policy and currently fail closed.
-- Codex OAuth does not accept an explicit unsupported max_output_tokens cap. The
-  route uses a finite operator-configured model bound for reservation. Clients that
-  always require this parameter cannot use that Codex route. No live Codex inference
-  contract has been verified by this gateway implementation.
+- Codex OAuth strips `max_output_tokens`, `temperature`, and `top_p` before its
+  upstream Responses call, matching Cockpit's compatibility normalization. These
+  are accepted client hints, not enforced generation caps; admission and retry
+  reservation still use the full finite operator-configured model bound. Codex
+  requests add `Accept: text/event-stream`; no `originator` spoofing is used. No
+  live Codex inference contract has been verified by this gateway implementation.
 - Model discovery via public APIs is filtered by client policy. Private provider
   discovery supports native model-list shapes and stages entries for admin review.
 - Public gateway requires a client key for every protocol, including Ollama. No key

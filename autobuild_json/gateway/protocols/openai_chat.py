@@ -2,7 +2,7 @@ import json
 import time
 from uuid import uuid4
 
-from ..contracts import InferenceRequest, Message, Text, ToolCall, ToolResult, Tool, GenerationOptions
+from ..contracts import InferenceRequest, Message, Text, ToolCall, ToolResult, Tool, Reasoning, GenerationOptions
 from ..errors import GatewayError
 
 
@@ -85,6 +85,8 @@ class OpenAIChatCodec:
             raise GatewayError("invalid_request") from None
 
     def upstream_body(self, request, model):
+        from .responses_options import reject_native_options
+        reject_native_options(request)
         messages = []
         if request.continuation:
             raise GatewayError("unsupported_feature")
@@ -112,7 +114,7 @@ class OpenAIChatCodec:
             messages.append(result)
         body = {"model": model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}}
         if request.tools:
-            body["tools"] = [{"type": "function", "function": tool.model_dump()} for tool in request.tools]
+            body["tools"] = [{"type": "function", "function": tool.model_dump(exclude_none=True)} for tool in request.tools]
             body["tool_choice"] = request.options.tool_choice
         option_map = {"max_output_tokens": "max_completion_tokens", "temperature": "temperature", "top_p": "top_p",
                       "parallel_tool_calls": "parallel_tool_calls"}
@@ -128,6 +130,9 @@ class OpenAIChatCodec:
         message = {"role": "assistant", "content": None}
         text, calls = [], []
         for block in result.blocks:
+            if isinstance(block, Reasoning):
+                # Responses summaries/signatures are not Chat message content.
+                continue
             if isinstance(block, Text):
                 text.append(block.text)
             elif isinstance(block, ToolCall):

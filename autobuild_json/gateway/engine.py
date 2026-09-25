@@ -146,8 +146,8 @@ class Engine:
             fallback = next((r for r in routes[1:] if r.provider_id == route.provider_id
                              and r.credential_id != route.credential_id and r.adapter == "codex_oauth"), None)
             routes = (route, fallback) if fallback and not selection_state.pinned and selection_state.retry_limit else (route,)
-        if codex and request.options.max_output_tokens is not None:
-            raise GatewayError("unsupported_feature")
+        # Codex strips client output-limit hints; they cannot lower admission
+        # or retry reservations below the binding's certified output bound.
         max_output = route.bounds.output_tokens if codex else request.options.max_output_tokens or min(4096, route.bounds.output_tokens)
         if max_output > route.bounds.output_tokens:
             raise GatewayError("invalid_request")

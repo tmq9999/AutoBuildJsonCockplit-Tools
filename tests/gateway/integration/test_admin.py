@@ -88,6 +88,27 @@ async def test_admin_names_and_versioned_model_proxy_updates(pg_db):
         assert (await client.put(f"/api/service/proxies/{profile}/1", json={"name": "Old", "mode": "direct"})).status_code == 409
 
 
+async def test_admin_can_archive_keys_and_customers_without_erasing_history(pg_db):
+    async with admin_env(pg_db) as (client, services):
+        client.headers.update({"x-test-session":"synthetic-session","x-csrf-token":"synthetic-csrf"})
+        customer = (await client.post('/api/service/customers', json={'name':'Archive me'})).json()['id']
+        created = await client.post('/api/service/keys', json={'customer_id':customer,'name':'Archive key','policy':{}})
+        key_id, secret = created.json()['key_id'], created.json()['secret']
+
+        deleted_key = await client.request('DELETE', f'/api/service/keys/{key_id}', json={'version':1})
+        assert deleted_key.status_code == 200, deleted_key.text
+        assert deleted_key.json() == {'id':key_id,'deleted':True}
+        stored_key = next(row for row in (await client.get('/api/service/keys')).json() if row['key_id'] == key_id)
+        assert stored_key['revoked_at'] is not None
+        with pytest.raises(Exception):
+            await services.identity.authenticate(secret, 'openai')
+
+        deleted_customer = await client.request('DELETE', f'/api/service/customers/{customer}', json={'version':1})
+        assert deleted_customer.status_code == 200, deleted_customer.text
+        stored_customer = next(row for row in (await client.get('/api/service/customers')).json() if row['id'] == customer)
+        assert stored_customer['enabled'] is False
+
+
 async def test_admin_can_disable_provider_and_credential_without_erasing_records(pg_db):
     async with admin_env(pg_db) as (client, services):
         client.headers.update({"x-test-session": "synthetic-session", "x-csrf-token": "synthetic-csrf"})

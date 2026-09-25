@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import json
+import re
 from uuid import uuid4
 from uuid import UUID
 
@@ -12,7 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ..errors import GatewayError
 from ..routing.records import ProviderConfig, ModelConfig, BindingConfig
-from .schemas import CustomerInput, KeyInput, KeyUpdate, VersionInput, EnabledInput, CredentialInput, ProxyInput, AdjustmentInput, OAuthImportInput, PlaygroundInput
+from .schemas import CustomerInput, KeyInput, KeyUpdate, VersionInput, EnabledInput, CredentialInput, ProxyInput, AdjustmentInput, OAuthImportInput, OAuthImportBatchInput, PlaygroundInput
 from .usage import UsageReports
 from .serialization import ExactJSONResponse, exact_input
 from .schemas import CredentialRotateInput
@@ -32,7 +33,7 @@ class SafeAdminRoute(APIRoute):
                 headers = {"Retry-After": str(exc.retry_after)} if type(exc.retry_after) is int and 0 <= exc.retry_after <= 86400 else None
                 catalog = (request.url.path.startswith(("/api/service/catalog/", "/api/service/provider-operations/"))
                            or request.url.path.endswith("/discover"))
-                codex = request.url.path.startswith(("/api/service/oauth-accounts", "/api/service/account-pools/",
+                codex = request.url.path.startswith(("/api/service/oauth-accounts", "/api/service/account-pools/", "/api/service/codex-service/",
                     "/api/service/reset-requests/", "/api/service/usage/accounts", "/api/service/usage/requests")) or request.url.path.endswith("/quota-adjust")
                 status = 422 if (catalog or codex) and exc.status == 400 else exc.status
                 response = JSONResponse(exc.to_dict(), status_code=status, headers=headers)
@@ -64,6 +65,11 @@ def create_admin_router(services, authorized):
         await services.identity.set_customer_enabled(identity, payload.enabled, version=payload.version, name=payload.name)
         return {"id": identity}
 
+    @router.delete("/customers/{identity}")
+    async def delete_customer(identity: UUID, payload: VersionInput):
+        await services.identity.set_customer_enabled(identity, False, version=payload.version)
+        return {"id": identity, "deleted": True}
+
     @router.get("/keys")
     async def keys():
         return await services.identity.admin_key_balances()
@@ -75,6 +81,11 @@ def create_admin_router(services, authorized):
     @router.patch("/keys/{identity}")
     async def update_key(identity: UUID, payload: KeyUpdate):
         return await services.identity.update_policy(identity, payload.version, payload.policy, name=payload.name)
+
+    @router.delete("/keys/{identity}")
+    async def delete_key(identity: UUID, payload: VersionInput):
+        await services.identity.revoke(identity, payload.version)
+        return {"id": identity, "deleted": True}
 
     @router.post("/keys/{identity}/rotate")
     async def rotate_key(identity: UUID, payload: VersionInput):
@@ -209,7 +220,56 @@ def create_admin_router(services, authorized):
 
     @router.post("/oauth/import", status_code=201)
     async def import_oauth(payload: OAuthImportInput):
+        await services.engine.credentials.validate_profile(payload.proxy_profile_id)
         return {"id": await services.engine.credentials.import_record(payload.record, payload.proxy_profile_id)}
+
+    @router.post("/oauth/import-batch")
+    async def import_oauth_batch(payload: OAuthImportBatchInput):
+        # Check this before entering the per-record loop.  A bad reference
+        # must never leave a partially-imported batch behind.
+        await services.engine.credentials.validate_profile(payload.proxy_profile_id)
+        results = []
+        imported = duplicate = failed = 0
+
+        def safe_email(value):
+            # Emails are informational only.  Keep malformed or suspicious
+            # values out of the response (and never echo tokens/raw records).
+            if not isinstance(value, str) or len(value) > 320:
+                return None
+            local, sep, domain = value.rpartition("@")
+            if (not sep or len(local) > 64 or len(domain) > 255
+                    or not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+", local)
+                    or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", domain)
+                    or "." not in domain or ".." in domain):
+                return None
+            return value
+
+        for index, record in enumerate(payload.records, 1):
+            item = {"index": index}
+            email = safe_email(record.get("email")) if isinstance(record, dict) else None
+            if email is not None:
+                item["email"] = email
+            try:
+                identity, created = await services.engine.credentials.import_record_result(record, payload.proxy_profile_id)
+                item.update({"status": "imported" if created else "duplicate", "id": identity})
+                if created:
+                    imported += 1
+                else:
+                    duplicate += 1
+            except GatewayError as exc:
+                item.update({"status": "error", "code": exc.code})
+                failed += 1
+            except SQLAlchemyError:
+                item.update({"status": "error", "code": "storage_unavailable"})
+                failed += 1
+            except Exception:
+                # Do not expose storage/validation details from one malformed
+                # record, and continue so successful records remain committed.
+                item.update({"status": "error", "code": "internal_error"})
+                failed += 1
+            results.append(item)
+        return {"total": len(payload.records), "imported": imported, "duplicate": duplicate,
+                "failed": failed, "results": results}
 
     @router.post("/oauth/{identity}/refresh")
     async def refresh_oauth(identity: UUID):

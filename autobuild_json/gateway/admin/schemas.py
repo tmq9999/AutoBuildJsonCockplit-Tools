@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
@@ -64,6 +64,11 @@ class AdjustmentInput(StrictInput):
 
 class OAuthImportInput(StrictInput):
     record: dict = Field(repr=False)
+    proxy_profile_id: UUID | None = None
+
+
+class OAuthImportBatchInput(StrictInput):
+    records: list[Any] = Field(min_length=1, max_length=1000, repr=False)
     proxy_profile_id: UUID | None = None
 
 

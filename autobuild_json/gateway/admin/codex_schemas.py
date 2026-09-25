@@ -14,6 +14,12 @@ class AccountUpdate(VersionInput):
     proxy_profile_id: UUID | None
 
 
+class CodexProxyInput(VersionInput):
+    """Service-wide Codex egress profile override."""
+
+    proxy_profile_id: UUID | None
+
+
 class RefreshInput(StrictInput):
     pass
 

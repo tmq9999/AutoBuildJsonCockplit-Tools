@@ -1,6 +1,6 @@
 import json
 
-from ..contracts import InferenceResult, Text, ToolCall
+from ..contracts import InferenceResult, Text, ToolCall, Reasoning, REASONING_BYTE_LIMIT, REASONING_PART_LIMIT
 
 
 class EventCollector:
@@ -15,6 +15,10 @@ class EventCollector:
         self.tool_bytes = 0
         self.tool_count = 0
         self.failed = False
+        self.reasoning_parts = {}
+        self.reasoning_bytes = 0
+        self.reasoning_encrypted_bytes = 0
+        self.reasoning_part_count = 0
 
     def feed(self, event):
         if self.terminal:
@@ -34,6 +38,37 @@ class EventCollector:
             if isinstance(event.block, ToolCall):
                 self.tool_count += 1
                 self.tool_bytes += len(event.block.arguments.encode())
+            if isinstance(event.block, Reasoning):
+                if event.block.id != event.item_id:
+                    raise ValueError("invalid_reasoning_id")
+                self.reasoning_parts[event.item_id] = {i for i in range(len(event.block.summary))}
+                self.reasoning_bytes += sum(len(part.encode()) for part in event.block.summary)
+                self.reasoning_part_count += len(event.block.summary)
+                self.reasoning_encrypted_bytes += len((event.block.encrypted_content or "").encode())
+        elif event.kind in {"reasoning_summary_started", "reasoning_summary_delta", "reasoning_summary_finished"}:
+            if event.item_id not in self.blocks or event.item_id in self.closed:
+                raise ValueError("invalid_block")
+            index, block = self.blocks[event.item_id]
+            if not isinstance(block, Reasoning):
+                raise ValueError("invalid_reasoning_event")
+            parts, finished = list(block.summary), self.reasoning_parts[event.item_id]
+            part = event.summary_index
+            if event.kind == "reasoning_summary_started":
+                if part != len(parts) or len(parts) >= REASONING_PART_LIMIT or len(finished) != len(parts):
+                    raise ValueError("invalid_reasoning_part")
+                parts.append(event.delta)
+                self.reasoning_bytes += len(event.delta.encode())
+                self.reasoning_part_count += 1
+            elif part >= len(parts) or part in finished:
+                raise ValueError("invalid_reasoning_part")
+            elif event.kind == "reasoning_summary_delta":
+                parts[part] += event.delta
+                self.reasoning_bytes += len(event.delta.encode())
+            else:
+                if parts[part] != event.delta:
+                    raise ValueError("reasoning_summary_mismatch")
+                finished.add(part)
+            self.blocks[event.item_id] = (index, block.model_copy(update={"summary": tuple(parts)}))
         elif event.kind in {"text_delta", "tool_delta", "block_finished"}:
             if event.item_id not in self.blocks or event.item_id in self.closed:
                 raise ValueError("invalid_block")
@@ -46,6 +81,19 @@ class EventCollector:
             elif event.kind == "block_finished":
                 if isinstance(block, ToolCall) and not isinstance(json.loads(block.arguments), dict):
                     raise ValueError("invalid_tool_arguments")
+                if isinstance(block, Reasoning):
+                    if len(self.reasoning_parts[event.item_id]) != len(block.summary):
+                        raise ValueError("incomplete_reasoning_summary")
+                    if event.block is not None:
+                        final = event.block
+                        if not isinstance(final, Reasoning) or final.id != block.id:
+                            raise ValueError("invalid_reasoning_id")
+                        if block.summary and final.summary != block.summary:
+                            raise ValueError("reasoning_summary_mismatch")
+                        self.reasoning_bytes += sum(len(part.encode()) for part in final.summary) - sum(len(part.encode()) for part in block.summary)
+                        self.reasoning_part_count += len(final.summary) - len(block.summary)
+                        self.reasoning_encrypted_bytes += len((final.encrypted_content or "").encode()) - len((block.encrypted_content or "").encode())
+                        block = final
                 self.closed.add(event.item_id)
             else:
                 raise ValueError("invalid_delta")
@@ -65,6 +113,9 @@ class EventCollector:
             self.terminal = self.failed = True
         if self.tool_bytes > 1_048_576 or self.tool_count > 128:
             raise ValueError("tool_limit_exceeded")
+        if (self.reasoning_bytes > REASONING_BYTE_LIMIT or self.reasoning_encrypted_bytes > REASONING_BYTE_LIMIT
+                or self.reasoning_part_count > REASONING_PART_LIMIT):
+            raise ValueError("reasoning_limit_exceeded")
 
     def result(self):
         if not self.terminal or self.failed:

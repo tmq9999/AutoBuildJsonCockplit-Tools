@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .metering.records import Usage
 
@@ -34,13 +34,53 @@ class ToolResult(StrictRecord):
     is_error: bool = False
 
 
+REASONING_PART_LIMIT = 128
+REASONING_BYTE_LIMIT = 1_048_576
+
+
+class Reasoning(StrictRecord):
+    """Provider-published summaries plus an opaque Responses replay payload.
+
+    Never holds or requests private reasoning text; encrypted_content is not
+    decoded and must not be mapped into another protocol's text fields.
+    """
+
+    type: Literal["reasoning"] = "reasoning"
+    id: str = Field(min_length=1, max_length=512)
+    summary: tuple[str, ...] = Field(default=(), max_length=REASONING_PART_LIMIT, repr=False)
+    encrypted_content: str | None = Field(default=None, max_length=REASONING_BYTE_LIMIT, repr=False)
+    status: Literal["in_progress", "completed", "incomplete"] | None = None
+
+    @model_validator(mode="after")
+    def bounded_payload(self):
+        if sum(len(part.encode()) for part in self.summary) > REASONING_BYTE_LIMIT:
+            raise ValueError("reasoning_limit_exceeded")
+        if self.encrypted_content is not None and len(self.encrypted_content.encode()) > REASONING_BYTE_LIMIT:
+            raise ValueError("reasoning_limit_exceeded")
+        return self
+
+
+class ReasoningOptions(StrictRecord):
+    """Portable Responses reasoning controls.
+
+    Codex accepts these controls but not the generic sampling/output caps.
+    Keeping a typed subset prevents arbitrary upstream fields from becoming a
+    header/body injection surface while allowing the official effort and
+    summary/context modes.
+    """
+
+    effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] | None = None
+    summary: Literal["auto", "concise", "detailed"] | None = None
+    context: Literal["current_turn", "all_turns"] | None = None
+
+
 class Opaque(StrictRecord):
     type: Literal["opaque"] = "opaque"
     provider: str
     payload: dict = Field(repr=False)
 
 
-Block = Annotated[Text | Image | ToolCall | ToolResult | Opaque, Field(discriminator="type")]
+Block = Annotated[Text | Image | ToolCall | ToolResult | Reasoning | Opaque, Field(discriminator="type")]
 
 
 class Message(StrictRecord):
@@ -52,6 +92,7 @@ class Tool(StrictRecord):
     name: str = Field(min_length=1, max_length=128)
     description: str = Field(default="", repr=False)
     parameters: dict = Field(default_factory=dict, repr=False)
+    strict: bool | None = Field(default=None, strict=True)
 
 
 class GenerationOptions(StrictRecord):
@@ -61,6 +102,10 @@ class GenerationOptions(StrictRecord):
     stop: tuple[str, ...] = ()
     tool_choice: Literal["auto", "none", "required"] = "auto"
     parallel_tool_calls: bool | None = None
+    reasoning: ReasoningOptions | None = None
+    include: tuple[Literal["reasoning.encrypted_content"], ...] = Field(default=(), max_length=1)
+    text: dict | None = Field(default=None, repr=False)
+    prompt_cache_key: str | None = Field(default=None, min_length=1, max_length=512, repr=False)
 
 
 class InferenceRequest(StrictRecord):
@@ -96,9 +141,11 @@ FinishReason = Literal["stop", "length", "tool_calls", "content_filter"]
 
 
 class InferenceEvent(StrictRecord):
-    kind: Literal["started", "block_started", "text_delta", "tool_delta", "block_finished", "usage", "finished", "error"]
+    kind: Literal["started", "block_started", "text_delta", "tool_delta", "reasoning_summary_started",
+                  "reasoning_summary_delta", "reasoning_summary_finished", "block_finished", "usage", "finished", "error"]
     item_id: str | None = None
     index: int = Field(default=0, ge=0)
+    summary_index: int = Field(default=0, strict=True, ge=0, lt=REASONING_PART_LIMIT)
     delta: str = Field(default="", repr=False)
     block: Block | None = Field(default=None, repr=False)
     finish_reason: FinishReason | None = None

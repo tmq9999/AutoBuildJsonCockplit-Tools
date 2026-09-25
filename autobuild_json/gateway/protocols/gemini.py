@@ -1,7 +1,7 @@
 import json
 from uuid import uuid4
 
-from ..contracts import InferenceRequest, Message, Text, ToolCall, ToolResult, Tool, GenerationOptions
+from ..contracts import InferenceRequest, Message, Text, ToolCall, ToolResult, Tool, Reasoning, GenerationOptions
 from ..errors import GatewayError
 from .common import EventCollector
 
@@ -76,6 +76,8 @@ class GeminiCodec:
             raise GatewayError("invalid_request") from None
 
     def upstream_body(self, request, model):
+        from .responses_options import reject_native_options
+        reject_native_options(request, strict_tools=True)
         names, contents, system = {}, [], []
         if request.instructions:
             system.append(request.instructions)
@@ -109,7 +111,7 @@ class GeminiCodec:
         if system:
             body["systemInstruction"] = {"parts": [{"text": "\n".join(system)}]}
         if request.tools:
-            body["tools"] = [{"functionDeclarations": [tool.model_dump() for tool in request.tools]}]
+            body["tools"] = [{"functionDeclarations": [tool.model_dump(exclude_none=True) for tool in request.tools]}]
         config = {}
         for source, target in (("max_output_tokens", "maxOutputTokens"), ("temperature", "temperature"), ("top_p", "topP")):
             if getattr(request.options, source) is not None:
@@ -125,6 +127,9 @@ class GeminiCodec:
     def encode_result(self, result):
         parts = []
         for block in result.blocks:
+            if isinstance(block, Reasoning):
+                # No compatible signature/summary representation is supported.
+                continue
             if isinstance(block, Text):
                 parts.append({"text": block.text})
             elif isinstance(block, ToolCall):

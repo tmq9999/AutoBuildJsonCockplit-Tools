@@ -16,7 +16,8 @@ def test_static_payload_remains_accepted_and_conflicts_are_rejected():
         JobInput(accounts_text="x", proxy_mode="kiotproxy")
 
 
-def test_runner_resolves_kiot_slot_and_preserves_legacy_result(tmp_path):
+@pytest.mark.parametrize("missing_current", [False, True])
+def test_runner_resolves_kiot_slot_and_preserves_legacy_result(tmp_path, missing_current):
     from autobuild_json.gateway.proxy.legacy import LegacyProxySource
     from autobuild_json.gateway.proxy.manager import ProxyManager
     from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
@@ -27,8 +28,14 @@ def test_runner_resolves_kiot_slot_and_preserves_legacy_result(tmp_path):
     from autobuild_json.input_parser import parse_accounts
     from tests.fakes import success_result
     from .test_kiot import success
+    calls = []
+    def respond(request):
+        calls.append(request.url.path.rsplit("/", 1)[-1])
+        if missing_current and calls == ["current"]:
+            return httpx.Response(400, json={"success": False, "error": "PROXY_NOT_FOUND_BY_KEY"})
+        return httpx.Response(200, json=success())
     source = LegacyProxySource(ProxySelection("kiotproxy", runtime_entries=tuple(parse_kiot_keys("synthetic", pepper=b"p"*32))),
-        ProxyManager(MemoryLeaseStore(), KiotClient(adapter=httpx.MockTransport(lambda r: httpx.Response(200, json=success())))))
+        ProxyManager(MemoryLeaseStore(), KiotClient(adapter=httpx.MockTransport(respond))))
     used = []
     def processor(account, proxy, context):
         used.append(proxy.server)
@@ -39,6 +46,7 @@ def test_runner_resolves_kiot_slot_and_preserves_legacy_result(tmp_path):
     job = runner.start(report, [], "parallel", 2, 10, proxy_source=source)
     runner.wait(job, 10)
     assert used == ["http://93.184.216.34:39008"] * 2
+    assert calls == (["current", "new", "current"] if missing_current else ["current", "current"])
     assert runner.get(job)["status"] == "completed"
     runner.close()
 

@@ -16,8 +16,9 @@ from ..engine import Engine
 
 
 class AdminServices:
-    def __init__(self, db, vault, pepper, *, egress=None, transport=None):
+    def __init__(self, db, vault, pepper, *, egress=None, transport=None, service_settings=None):
         self.db, self.vault, self.pepper = db, vault, pepper
+        self.service_settings = service_settings
         self.identity, self.catalog = IdentityService(db, pepper), Catalog(db, vault)
         self.ledger, self.budgets = Ledger(db), BudgetService(db)
         from ..metering.adjustments import QuotaAdjustments

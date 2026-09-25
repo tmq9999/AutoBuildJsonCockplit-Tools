@@ -1,4 +1,5 @@
 """Private account views and explicit commands. GETs never contact providers."""
+import json
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -6,20 +7,144 @@ from fastapi import Query, Response
 from sqlalchemy import text
 
 from ...oauth import ISSUER
+from ..accounts.imports import CODEX_PROVIDER
 from ..accounts import quota_storage as storage
 from ..errors import GatewayError
 from ..providers.codex_capabilities import codex_capabilities
 from ..routing.records import ProviderConfig
-from .codex_schemas import AccountUpdate, PoolInput, QuotaAdjustInput, RefreshInput, ResetConsumeInput, ResetResolveInput
+from ..settings import ServiceSettings
+from .codex_schemas import AccountUpdate, CodexProxyInput, PoolInput, QuotaAdjustInput, RefreshInput, ResetConsumeInput, ResetResolveInput
 from .usage import UsageReports, report_window
 
 
-def masked_email(value):
-    if not value or "@" not in value:
-        return None
-    local, domain = value.rsplit("@", 1)
-    suffix = "." + domain.rsplit(".", 1)[1] if "." in domain else ""
-    return local[:1] + "***@" + domain[:1] + "***" + suffix
+class ServiceStatus:
+    """Stored configuration/accounting, deliberately not a liveness probe."""
+
+    def __init__(self, services):
+        self.services = services
+
+    async def read(self):
+        status, base_url = "configured", None
+        try:
+            settings = self.services.service_settings or ServiceSettings()
+            # A public proxy's external TLS origin cannot be inferred from a
+            # bind address. Only advertise an unambiguous local endpoint.
+            host = {"127.0.0.1": "127.0.0.1", "localhost": "localhost", "::1": "[::1]",
+                    "0.0.0.0": "127.0.0.1", "::": "[::1]"}.get(settings.host)
+            if host is not None:
+                base_url = f"http://{host}:{settings.port}/v1"
+            else:
+                status = "unavailable"
+        except ValueError:
+            status = "unavailable"
+
+        async with self.services.db.sessions.begin() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            accounts = dict((await session.execute(text("""SELECT count(*) AS total,
+                count(*) FILTER (WHERE c.enabled AND c.health='active') AS active,
+                count(*) FILTER (WHERE c.enabled AND c.health='reauth_required') AS reauth_required,
+                count(*) FILTER (WHERE c.enabled AND c.health='refresh_uncertain') AS refresh_uncertain,
+                count(*) FILTER (WHERE c.enabled AND c.health='unverified') AS unverified,
+                count(*) FILTER (WHERE NOT c.enabled) AS disabled
+                FROM credentials c JOIN providers p ON p.id=c.provider_id
+                WHERE c.issuer=:issuer AND c.account_id IS NOT NULL AND c.account_id<>''
+                AND p.config->>'adapter'='codex_oauth' AND p.config->>'auth_mode'='oauth'"""),
+                {"issuer": ISSUER})).mappings().one())
+            keys = dict((await session.execute(text("""SELECT count(*) AS total,
+                count(*) FILTER (WHERE k.enabled AND k.revoked_at IS NULL AND c.enabled
+                    AND (k.expires_at IS NULL OR k.expires_at>now())) AS enabled
+                FROM api_keys k JOIN customers c ON c.id=k.customer_id"""))).mappings().one())
+            usage = dict((await session.execute(text("""SELECT count(*) AS requests,
+                count(*) FILTER (WHERE state='completed') AS completed,
+                count(*) FILTER (WHERE state='released') AS failed,
+                count(*) FILTER (WHERE state IN ('reserved','dispatched','usage_pending')) AS pending
+                FROM requests"""))).mappings().one())
+            counters = ("input_tokens", "cached_read", "cached_write", "output_tokens")
+            # A completed request must have one serving attempt AND an
+            # immutable settlement. Rejected/retried/pending attempts cannot
+            # contribute. Missing legacy fields remain unknown, not zero.
+            sums = ",".join(f"CASE WHEN count(*)=0 THEN 0 WHEN count(usage->>'{name}')=count(*) "
+                            f"THEN sum((usage->>'{name}')::numeric) ELSE NULL END AS {name}" for name in counters)
+            totals = (await session.execute(text("""WITH settled AS (
+                SELECT CASE WHEN a.completed_count=1 AND l.id IS NOT NULL THEN a.usage ELSE NULL END AS usage,
+                    CASE WHEN a.completed_count=1 THEN l.amount_micro ELSE NULL END AS charged_micro
+                FROM requests r
+                LEFT JOIN LATERAL (SELECT x.usage,count(*) OVER () AS completed_count
+                    FROM attempts x WHERE x.request_id=r.id AND x.status='completed'
+                    ORDER BY x.started_at DESC,x.id DESC LIMIT 1) a ON true
+                LEFT JOIN usage_ledger l ON l.request_id=r.id AND l.entry_kind='settlement'
+                WHERE r.state='completed'
+            ) SELECT """ + sums + """,CASE WHEN count(*)=0 THEN 0
+                WHEN count(charged_micro)=count(*) THEN sum(charged_micro) ELSE NULL END AS charged_micro
+                FROM settled"""))).mappings().one()
+            usage.update({name: str(value) if value is not None else None for name, value in totals.items()})
+        return {"status": status, "base_url": base_url, "accounts": accounts, "keys": keys,
+                "usage": usage, "version": codex_capabilities()["version"]}
+
+
+class CodexProxy:
+    """Private projection for the default Codex egress profile.
+
+    Only profile identity and non-sensitive mode/name are exposed.  Individual
+    credential overrides continue to take precedence in route selection.
+    """
+
+    def __init__(self, services):
+        self.services = services
+
+    async def read(self):
+        async with self.services.db.sessions() as session:
+            row = (await session.execute(text("""SELECT p.config,p.version,
+                    x.id AS profile_id,x.name AS profile_name,x.config AS profile_config
+                    FROM providers p LEFT JOIN proxy_profiles x
+                      ON x.id::text=p.config->>'proxy_profile_id'
+                    WHERE p.id=:id"""), {"id": CODEX_PROVIDER})).mappings().first()
+        if row is None:
+            raise GatewayError("not_found", 404)
+        provider = ProviderConfig.model_validate(row["config"])
+        if provider.adapter != "codex_oauth" or provider.auth_mode != "oauth":
+            raise GatewayError("not_found", 404)
+        profile = None
+        if row["profile_id"] is not None:
+            profile = {"id": row["profile_id"], "name": row["profile_name"],
+                       "mode": (row["profile_config"] or {}).get("mode", "unknown")}
+        return {"provider_id": CODEX_PROVIDER, "version": row["version"],
+                "proxy_profile_id": provider.proxy_profile_id, "profile": profile,
+                "source": "provider" if provider.proxy_profile_id else "direct"}
+
+    async def update(self, payload):
+        async with self.services.db.sessions.begin() as session:
+            # Lock provider -> new profile, matching account updates and the
+            # profile-deletion reference check. Never lock the old profile.
+            row = (await session.execute(text("SELECT config,version FROM providers WHERE id=:id FOR UPDATE"),
+                                        {"id": CODEX_PROVIDER})).mappings().first()
+            if row is None:
+                raise GatewayError("not_found", 404)
+            provider = ProviderConfig.model_validate(row["config"])
+            if provider.adapter != "codex_oauth" or provider.auth_mode != "oauth":
+                raise GatewayError("not_found", 404)
+            if row["version"] != payload.version:
+                raise GatewayError("version_conflict", 409)
+            if payload.proxy_profile_id is not None and not await session.scalar(
+                    text("SELECT id FROM proxy_profiles WHERE id=:id FOR KEY SHARE"),
+                    {"id": payload.proxy_profile_id}):
+                raise GatewayError("invalid_request", 422)
+            # This endpoint owns exactly one field. Re-serializing the parsed
+            # model would fill defaults/normalize unrelated stored settings.
+            updated = dict(row["config"], proxy_profile_id=(
+                str(payload.proxy_profile_id) if payload.proxy_profile_id else None))
+            config = json.dumps(updated)
+            next_version = row["version"] + 1
+            await session.execute(text("UPDATE providers SET config=CAST(:config AS jsonb),version=:version WHERE id=:id"),
+                                  {"id": CODEX_PROVIDER, "config": config, "version": next_version})
+            await session.execute(text("INSERT INTO config_versions(provider_id,version,config) "
+                                       "VALUES (:id,:version,CAST(:config AS jsonb))"),
+                                  {"id": CODEX_PROVIDER, "version": next_version, "config": config})
+            await self.services.identity._audit(session, "codex.service_proxy.updated", CODEX_PROVIDER,
+                {"version": next_version, "proxy_profile_id": updated["proxy_profile_id"]})
+        return {"provider_id": CODEX_PROVIDER, "version": next_version,
+                "proxy_profile_id": payload.proxy_profile_id,
+                "source": "provider" if payload.proxy_profile_id else "direct"}
 
 
 class AccountViews:
@@ -37,7 +162,9 @@ class AccountViews:
                 AND upstream.config->>'adapter'='codex_oauth' AND upstream.config->>'auth_mode'='oauth'
                 AND (CAST(:after AS uuid) IS NULL OR c.id>CAST(:after AS uuid)) ORDER BY c.id LIMIT :limit"""),
                 {"issuer": ISSUER, "after": after, "limit": limit + 1})).mappings().all()
-        return {"items": [{"id": r["id"], "email": masked_email(r["email"]), "enabled": r["enabled"],
+        # Full email is an operator-visible identity on this private,
+        # authenticated projection; tokens and provider account IDs stay out.
+        return {"items": [{"id": r["id"], "email": r["email"], "enabled": r["enabled"],
                            "status": r["health"], "version": r["version"],
                            "plan_type": (r["usage_snapshot"] or {}).get("plan_type"),
                            "proxy_profile_id": r["profile_id"], "proxy_profile_name": r["proxy_profile_name"]}
@@ -107,6 +234,18 @@ class AccountViews:
 
 def mount_codex_routes(router, services):
     views, reports = AccountViews(services), UsageReports(services.db)
+
+    @router.get("/codex-service/status")
+    async def service_status():
+        return await ServiceStatus(services).read()
+
+    @router.get("/codex-service/proxy")
+    async def service_proxy():
+        return await CodexProxy(services).read()
+
+    @router.put("/codex-service/proxy")
+    async def update_service_proxy(payload: CodexProxyInput):
+        return await CodexProxy(services).update(payload)
 
     @router.get("/oauth-accounts")
     async def accounts(limit: int = Query(100, ge=1, le=200), after: UUID | None = None):

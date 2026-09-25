@@ -14,12 +14,12 @@ from uuid import UUID
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-KEY_FORMAT = re.compile(r"abgw_[a-f0-9]{12}\.[A-Za-z0-9_-]{43}\Z")
+KEY_FORMAT = re.compile(r"(?:sk-|abgw_)[a-f0-9]{12}\.[A-Za-z0-9_-]{43}\Z")
 KEY_ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 
 def issue_key() -> tuple[str, str]:
-    prefix = "abgw_" + secrets.token_hex(6)
+    prefix = "sk-" + secrets.token_hex(6)
     return prefix, prefix + "." + secrets.token_urlsafe(32)
 
 

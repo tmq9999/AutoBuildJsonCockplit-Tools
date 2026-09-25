@@ -122,3 +122,58 @@ def test_same_workspace_uuid_case_does_not_make_two_choices(context):
     transport.cookies = {"oai-client-auth-session":base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")}
     OAuthNavigator(transport,context).complete("https://auth.openai.com/consent")
     assert transport.requests[1][2]["json"] == {"workspace_id":workspace.lower()}
+
+
+def test_html_workspace_radio_value_is_selected(context):
+    workspace = "33333333-3333-4333-8333-333333333333"
+    html = ('<fieldset role="radiogroup">'
+            f'<input type="radio" disabled name="workspace_id" value="{workspace}" />'
+            f'<input type="hidden" name="workspace_id" value="{workspace}" />'
+            '<span>Personal account</span></fieldset>')
+    transport = FakeTransport(Response(text=html),
+        Response({"continue_url":"http://localhost:1455/auth/callback?code=c&state=s"}))
+    OAuthNavigator(transport, context).complete("https://auth.openai.com/sign-in-with-chatgpt/codex/consent")
+    assert transport.requests[1][2]["json"] == {"workspace_id":workspace}
+
+
+@pytest.mark.parametrize("markup", [
+    '<input type="text" name="workspace_id" value="{id}">',
+    '<input type="radio" data-name="workspace_id" value="{id}">',
+    '<input type="radio" name="account_id" value="{id}">',
+    '<input type="radio" name="workspace_id" name="other" value="{id}">',
+    '<input type="radio" name=other name="workspace_id" value="{id}">',
+    '<input type="radio" name="workspace_id" value value="{id}">',
+    '<input type="radio" name="workspace_id" value="bad" value="{id}">',
+    '<input type="radio" name="workspace_id" value="invalid">',
+    '<input type="radio" name="workspace_id">',
+    '<input type="radio" name="workspace_id" value="{id}\'>',
+    '<!-- <input type="radio" name="workspace_id" value="{id}"> -->',
+    '<script>const example = \'<input type="radio" name="workspace_id" value="{id}">\';</script>',
+])
+def test_html_workspace_parser_rejects_unrelated_or_malformed_input(context, markup):
+    html = markup.format(id="44444444-4444-4444-8444-444444444444")
+    transport = FakeTransport(Response(text=html))
+    with pytest.raises(FlowError) as err:
+        OAuthNavigator(transport, context).complete("https://auth.openai.com/consent")
+    assert err.value.code == "OAUTH_PARSE_ERROR"
+    assert len(transport.requests) == 1
+
+
+def test_html_workspace_parser_preserves_multiple_choices(context):
+    html = ('<input type="radio" name="workspace_id" value="11111111-1111-4111-8111-111111111111">'
+            '<input type="radio" name="workspace_id" value="22222222-2222-4222-8222-222222222222">')
+    transport = FakeTransport(Response(text=html))
+    with pytest.raises(FlowError) as err:
+        OAuthNavigator(transport, context).complete("https://auth.openai.com/consent")
+    assert err.value.code == "WORKSPACE_SELECTION_REQUIRED"
+    assert err.value.details["candidate_count"] == 2
+    assert len(transport.requests) == 1
+
+
+def test_html_workspace_parser_handles_attribute_order_and_entities(context):
+    html = ("<INPUT VALUE='abcdefab-1234-4123-8123-123456789abc' "
+            "NAME='workspace&#95;id' TYPE='HIDDEN'>")
+    transport = FakeTransport(Response(text=html),
+        Response({"continue_url":"http://localhost:1455/auth/callback?code=c&state=s"}))
+    OAuthNavigator(transport, context).complete("https://auth.openai.com/consent")
+    assert transport.requests[1][2]["json"] == {"workspace_id":"abcdefab-1234-4123-8123-123456789abc"}

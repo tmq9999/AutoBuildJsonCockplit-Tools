@@ -103,6 +103,19 @@ Ba terminal/process cần cùng biến môi trường ở trên:
 .venv/bin/python -m autobuild_json.gateway maintenance
 ```
 
+Để thử cục bộ với PostgreSQL đã giải nén/cài sẵn (không dùng database production):
+
+```bash
+.venv/bin/python scripts/local_gateway.py --postgres-bin /absolute/path/to/postgres/bin
+```
+
+Runner giữ database, keyring và admin config trong `data/local-gateway/` (private,
+không commit), chỉ mở loopback 55433/8787/8788 và không tạo model/key khách giả.
+Có thể thêm `--import-json /absolute/path/to/oauth-export.json` để nhập mảng JSON
+OAuth đã có, tối đa 1000 records/32 MiB; không tự login hoặc refresh token. Dừng
+bằng Ctrl+C sẽ dừng đúng các process do runner tạo, giữ nguyên dữ liệu cho lần chạy sau.
+Nếu dùng bộ PostgreSQL riêng cần thiết lập thư viện của bộ đó trước khi chạy.
+
 Mở `http://127.0.0.1:8787/service/`. Admin token nằm trong
 `data/local-config.json`; lấy trực tiếp trên máy, không gửi lên GitHub. Đây không
 phải client API key hay token OpenAI.
@@ -155,7 +168,10 @@ làm tròn. Usage thực và chi phí mua vào được lưu riêng.
 
 Codex OAuth hiện được hỗ trợ trong một HTTP subset đã kiểm thử qua
 `/v1/chat/completions` và `/v1/responses`, gồm text, function tools và SSE streaming.
-Private admin service (`/api/service`) cung cấp masked account views, storage-only
+Native Responses reasoning summary được giữ cùng encrypted replay payload dạng opaque;
+không lộ chain-of-thought và không chuyển reasoning sang giao thức không hỗ trợ.
+Private admin service (`/api/service`) cung cấp account views với email đầy đủ trong
+admin private, storage-only
 usage/credit snapshots, explicit refresh, UUID-idempotent reset credits, pool/CAS,
 usage reports, key grants và capabilities. Đây là API nội bộ reference-observed,
 không phải cam kết tương thích đầy đủ Codex CLI hay OpenAI Platform.
@@ -170,6 +186,19 @@ Thứ tự proxy của account là credential override, kế đến provider pro
 fixed/list/KiotProxy chỉ được dùng khi profile tương ứng được cấu hình, không tự
 fallback direct. Proxy pool/list khác với account pool auto/random/single/priority/weight;
 account selection và session affinity đều chịu policy và account health.
+
+Responses native hỗ trợ `reasoning` (effort/summary/context),
+`include: ["reasoning.encrypted_content"]`, `text` (verbosity/format),
+`prompt_cache_key` và function tool `strict`. Các option native không biểu diễn được
+trên wire API khác bị từ chối trước dispatch. Codex bỏ `max_output_tokens`,
+`temperature`, `top_p` theo cách chuẩn hóa của Cockpit: các giá trị này **không phải
+giới hạn generation được đảm bảo**; quota vẫn giữ trước theo output bound đã cấu hình.
+
+Overview Codex cho phép đặt proxy mặc định cho provider (direct/fixed/list/pool/KiotProxy);
+thay đổi dùng optimistic version và không tự ghi lại khi gặp 409. `GET/PUT
+/api/service/codex-service/proxy` chỉ là private control-plane, không trả endpoint,
+API key proxy hoặc metadata proxy trong response của khách hàng. Credential override
+luôn được ưu tiên hơn cấu hình mặc định.
 
 Reset phải được xác nhận tường minh bằng request UUID, credits version và acknowledgement.
 Replay cùng payload chỉ đọc receipt đã lưu và không POST upstream lần hai. `unknown`
@@ -187,7 +216,7 @@ timeout/cancel/5xx vẫn fail-closed, không tự gửi lại. Credit phải fre
 không cooldown/active reset. Khi upstream/provider thật chưa được
 cấp phép, chỉ dùng synthetic HTTP và disposable PostgreSQL fixtures.
 
-UI quản trị Codex Accounts hiện theo visual draft v6 đã được duyệt: masked accounts,
+UI quản trị Codex Accounts hiện theo visual draft v6 đã được duyệt: full private emails,
 exact decimal meters, actual window durations, explicit reset/grant confirmation và
 evidence resolution. Provider Catalog UI vẫn là work riêng đang pending, không được coi
 là hoàn tất.

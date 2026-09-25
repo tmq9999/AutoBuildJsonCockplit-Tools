@@ -32,7 +32,8 @@ async def test_kiot_reuses_current_and_keeps_it_for_whole_operation():
 
 
 @pytest.mark.asyncio
-async def test_kiot_allocation_timeout_reconciles_current_without_second_new():
+@pytest.mark.parametrize("missing_status", [200, 400])
+async def test_kiot_allocation_timeout_reconciles_current_without_second_new(missing_status):
     from autobuild_json.gateway.proxy.manager import ProxyManager
     from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
     from autobuild_json.gateway.proxy.config import ProxySelection, parse_kiot_keys
@@ -41,7 +42,7 @@ async def test_kiot_allocation_timeout_reconciles_current_without_second_new():
     def respond(request):
         calls.append(request.url.path.rsplit("/", 1)[-1])
         if calls == ["current"]:
-            return httpx.Response(200, json={"success": False, "error": "PROXY_NOT_FOUND_BY_KEY"})
+            return httpx.Response(missing_status, json={"success": False, "error": "PROXY_NOT_FOUND_BY_KEY"})
         if calls[-1] == "new":
             raise httpx.ReadTimeout("contains-key", request=request)
         return httpx.Response(200, json=success())

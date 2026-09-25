@@ -1,9 +1,11 @@
 import json
 
-from ..contracts import InferenceEvent, Text, ToolCall
+from ..contracts import InferenceEvent, Text, ToolCall, Reasoning
 from ..errors import GatewayError
 from ..metering.usage import normalize_provider_usage
+from ..protocols.common import EventCollector
 from ..protocols.frames import SSEDecoder
+from ..protocols.openai_responses import reasoning_item
 
 
 def normalize_responses_usage(payload):
@@ -13,59 +15,126 @@ def normalize_responses_usage(payload):
         raise GatewayError("invalid_usage", 502, "upstream") from None
 
 
+class ResponsesEvents:
+    """Validate provider item/summary lifecycles before publishing events."""
+
+    def __init__(self):
+        self.collector = EventCollector("", "")
+        self.calls = False
+        self.summary_text_done = set()
+
+    def _item(self, value, item_id=None):
+        identity = item_id if item_id is not None else value["item_id"]
+        if identity not in self.collector.blocks or identity in self.collector.closed:
+            raise ValueError("invalid_block")
+        index, block = self.collector.blocks[identity]
+        if "output_index" in value and (type(value["output_index"]) is not int or value["output_index"] != index):
+            raise ValueError("invalid_output_index")
+        return identity, block
+
+    def feed(self, value):
+        kind = value["type"]
+        if self.collector.terminal:
+            raise ValueError("event_after_terminal")
+        events = []
+        if kind == "response.created":
+            events.append(InferenceEvent(kind="started", response_id=value["response"]["id"]))
+        elif not self.collector.started:
+            raise ValueError("missing_start")
+        elif kind == "response.output_item.added":
+            item = value["item"]
+            if type(value["output_index"]) is not int:
+                raise ValueError("invalid_output_index")
+            if item["type"] == "message":
+                block = Text(text="")
+            elif item["type"] == "function_call":
+                block = ToolCall(call_id=item["call_id"], name=item["name"], arguments=item.get("arguments", ""))
+                self.calls = True
+            elif item["type"] == "reasoning":
+                block = reasoning_item(item)
+            else:
+                raise GatewayError("unsupported_feature", 502, "stream")
+            events.append(InferenceEvent(kind="block_started", item_id=item["id"], index=value["output_index"], block=block))
+        elif kind in {"response.output_text.delta", "response.function_call_arguments.delta"}:
+            identity, _ = self._item(value)
+            events.append(InferenceEvent(kind="text_delta" if kind == "response.output_text.delta" else "tool_delta",
+                                         item_id=identity, delta=value["delta"]))
+        elif kind in {"response.reasoning_summary_part.added", "response.reasoning_summary_text.delta",
+                      "response.reasoning_summary_text.done", "response.reasoning_summary_part.done"}:
+            identity, block = self._item(value)
+            part_index = value["summary_index"]
+            if not isinstance(block, Reasoning) or type(part_index) is not int or not 0 <= part_index < 128:
+                raise ValueError("invalid_reasoning_event")
+            key = (identity, part_index)
+            if kind == "response.reasoning_summary_part.added":
+                part = value["part"]
+                if not isinstance(part, dict) or set(part) != {"type", "text"} or part["type"] != "summary_text":
+                    raise ValueError("invalid_reasoning_part")
+                events.append(InferenceEvent(kind="reasoning_summary_started", item_id=identity,
+                                             summary_index=part_index, delta=part["text"]))
+            elif kind == "response.reasoning_summary_text.delta":
+                if key in self.summary_text_done:
+                    raise ValueError("delta_after_done")
+                events.append(InferenceEvent(kind="reasoning_summary_delta", item_id=identity,
+                                             summary_index=part_index, delta=value["delta"]))
+            elif kind == "response.reasoning_summary_text.done":
+                if (key in self.summary_text_done or part_index >= len(block.summary)
+                        or part_index in self.collector.reasoning_parts[identity] or value["text"] != block.summary[part_index]):
+                    raise ValueError("invalid_reasoning_done")
+                self.summary_text_done.add(key)
+            else:
+                part = value["part"]
+                if key not in self.summary_text_done or not isinstance(part, dict) or set(part) != {"type", "text"} or part["type"] != "summary_text":
+                    raise ValueError("invalid_reasoning_part")
+                events.append(InferenceEvent(kind="reasoning_summary_finished", item_id=identity,
+                                             summary_index=part_index, delta=part["text"]))
+        elif kind == "response.output_item.done":
+            item = value["item"]
+            identity, block = self._item(value, item["id"])
+            expected = "reasoning" if isinstance(block, Reasoning) else "function_call" if isinstance(block, ToolCall) else "message"
+            if item.get("type") != expected:
+                raise ValueError("invalid_item_type")
+            final = reasoning_item(item) if isinstance(block, Reasoning) else None
+            events.append(InferenceEvent(kind="block_finished", item_id=identity, block=final))
+        elif kind in {"response.completed", "response.incomplete"}:
+            payload = value["response"]
+            if "output" in payload:
+                output = payload["output"]
+                ordered = sorted(self.collector.blocks, key=lambda identity: self.collector.blocks[identity][0])
+                if not isinstance(output, list) or [item["id"] for item in output] != ordered:
+                    raise ValueError("invalid_terminal_output")
+                for item in output:
+                    block = self.collector.blocks[item["id"]][1]
+                    if isinstance(block, Reasoning) and reasoning_item(item) != block:
+                        raise ValueError("reasoning_terminal_mismatch")
+            usage = normalize_responses_usage(payload["usage"]) if payload.get("usage") is not None else None
+            if usage:
+                events.append(InferenceEvent(kind="usage", usage=usage))
+            events.append(InferenceEvent(kind="finished", finish_reason="length" if kind == "response.incomplete"
+                                         else "tool_calls" if self.calls else "stop", usage=usage))
+        elif kind in {"response.failed", "error"}:
+            raise GatewayError("upstream_error", 502, "stream")
+        elif kind in {"response.content_part.added", "response.content_part.done", "response.output_text.done",
+                      "response.function_call_arguments.done"}:
+            _, block = self._item(value)
+            if isinstance(block, Reasoning):
+                raise ValueError("invalid_reasoning_event")
+        elif kind != "response.in_progress":
+            raise GatewayError("unsupported_feature", 502, "stream")
+        for event in events:
+            self.collector.feed(event)
+        return events
+
+
 async def responses_events(response):
-    decoder = SSEDecoder()
-    started, terminal, calls = False, False, False
-    opened, closed = {}, set()
+    decoder, parser = SSEDecoder(), ResponsesEvents()
     try:
         async for chunk in response.chunks():
             for _, data in decoder.feed(chunk):
-                value = json.loads(data)
-                kind = value["type"]
-                if terminal:
-                    raise ValueError()
-                if kind == "response.created":
-                    if started:
-                        raise ValueError()
-                    started = True
-                    yield InferenceEvent(kind="started", response_id=value["response"]["id"])
-                elif kind == "response.output_item.added":
-                    if not started:
-                        raise ValueError()
-                    item = value["item"]
-                    if item["type"] == "message":
-                        block = Text(text="")
-                    elif item["type"] == "function_call":
-                        block = ToolCall(call_id=item["call_id"], name=item["name"], arguments=item.get("arguments", ""))
-                        calls = True
-                    else:
-                        raise GatewayError("unsupported_feature", 502, "stream")
-                    opened[item["id"]] = value["output_index"]
-                    yield InferenceEvent(kind="block_started", item_id=item["id"], index=value["output_index"], block=block)
-                elif kind in {"response.output_text.delta", "response.function_call_arguments.delta"}:
-                    yield InferenceEvent(kind="text_delta" if kind == "response.output_text.delta" else "tool_delta",
-                                         item_id=value["item_id"], delta=value["delta"])
-                elif kind == "response.output_item.done":
-                    item_id = value["item"]["id"]
-                    closed.add(item_id)
-                    yield InferenceEvent(kind="block_finished", item_id=item_id)
-                elif kind in {"response.completed", "response.incomplete"}:
-                    if not started or closed != set(opened):
-                        raise ValueError()
-                    terminal = True
-                    payload = value["response"]
-                    usage = normalize_responses_usage(payload["usage"]) if payload.get("usage") is not None else None
-                    if usage:
-                        yield InferenceEvent(kind="usage", usage=usage)
-                    yield InferenceEvent(kind="finished", finish_reason="length" if kind == "response.incomplete" else "tool_calls" if calls else "stop",
-                                         usage=usage)
-                elif kind in {"response.failed", "error"}:
-                    raise GatewayError("upstream_error", 502, "stream")
-                elif kind not in {"response.in_progress", "response.content_part.added", "response.content_part.done",
-                                  "response.output_text.done", "response.function_call_arguments.done"}:
-                    raise GatewayError("unsupported_feature", 502, "stream")
+                for event in parser.feed(json.loads(data)):
+                    yield event
         decoder.finish()
-        if not terminal:
-            raise ValueError()
+        if not parser.collector.terminal:
+            raise ValueError("incomplete_output")
     except (ValueError, KeyError, TypeError, AttributeError):
         raise GatewayError("upstream_error", 502, "stream") from None

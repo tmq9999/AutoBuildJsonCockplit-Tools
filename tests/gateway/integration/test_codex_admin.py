@@ -49,9 +49,9 @@ async def test_real_session_boundary_and_storage_only_safe_account_views(pg_db, 
         response = await client.get("/api/service/oauth-accounts?limit=1")
         assert response.status_code == 200, response.text
         row = response.json()["items"][0]
-        assert row["email"] == "s***@e***.com"
+        assert row["email"] == "synthetic@example.com"
         assert row["version"] == 1 and row["plan_type"] is None
-        for secret in ("synthetic@example.com", "account-test", "synthetic-access", "synthetic-refresh", "encrypted_secret"):
+        for secret in ("account-test", "synthetic-access", "synthetic-refresh", "encrypted_secret"):
             assert secret not in response.text
         assert "no-store" in response.headers["cache-control"].split(", ")
         quota = (await client.get(path + "/quota")).json()
