@@ -7,6 +7,13 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ### Codex API Service handoff — 2026-09-25
 
+- Hoàn tất reset recovery: HTTP 4xx từ chối consume chỉ bỏ khóa UI sau khi đọc lại
+  credits/operation thành công, không tự gửi lại. Explicit admin refresh về sau có
+  đủ usage + credits fresh sau receipt có thể hoàn tất `succeeded_refresh_failed`
+  qua fence generation/status/stamp sẵn có. Partial/stale refresh vẫn khóa;
+  `unknown` vẫn cần evidence resolution. UI nhận terminal evidence của server,
+  không suy ra thành công từ phần trăm hoặc `active_reset=null`.
+
 - Thêm e2e synthetic composition của identity, customer ledger, PostgreSQL, proxy
   manager, Codex pool/engine và fake HTTP: key 100m → 429 → SSE cached usage →
   per-account reports → admin quota refresh/reset; unknown reset không tự retry.

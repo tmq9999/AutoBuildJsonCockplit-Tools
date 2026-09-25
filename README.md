@@ -170,10 +170,14 @@ fallback direct. Proxy pool/list khác với account pool auto/random/single/pri
 account selection và session affinity đều chịu policy và account health.
 
 Reset phải được xác nhận tường minh bằng request UUID, credits version và acknowledgement.
-Replay cùng payload chỉ đọc receipt đã lưu và không POST upstream lần hai. `unknown` hoặc
-`succeeded_refresh_failed` không được coi là thành công và không tự reset/clear lock;
-refresh chỉ sửa snapshots; chỉ explicit evidence resolution mới giải quyết operation
-đang khóa. Credit phải fresh (120 giây), có count > 0, đúng version, account active,
+Replay cùng payload chỉ đọc receipt đã lưu và không POST upstream lần hai. `unknown`
+vẫn khóa sau refresh và chỉ được giải quyết bằng explicit evidence resolution.
+`succeeded_refresh_failed` đã có receipt upstream thành công: explicit admin refresh
+đủ cả usage + credits fresh, không lỗi có thể hoàn tất `succeeded` qua fence generation,
+stamp và snapshot sau receipt; partial/stale refresh vẫn khóa. UI chỉ mở khóa từ
+bằng chứng operation của server, không suy ra từ phần trăm hay `active_reset=null`.
+HTTP 4xx từ chối consume chỉ gỡ khóa lạc quan sau khi đọc lại trạng thái xác thực thành công;
+timeout/cancel/5xx vẫn fail-closed, không tự gửi lại. Credit phải fresh (120 giây), có count > 0, đúng version, account active,
 không cooldown/active reset. Khi upstream/provider thật chưa được
 cấp phép, chỉ dùng synthetic HTTP và disposable PostgreSQL fixtures.
 

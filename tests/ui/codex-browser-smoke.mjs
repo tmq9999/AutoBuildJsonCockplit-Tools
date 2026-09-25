@@ -40,19 +40,26 @@ try{
   await page.locator('#codex-refresh-quota').click();await page.waitForFunction(()=>document.querySelector('#codex-detail').textContent.includes('42%'));
   assert.equal(await page.locator('#codex-detail meter').count(),2);assert.equal(await page.locator('#codex-detail meter').first().getAttribute('value'),'42');
   assert.match(await page.locator('#codex-detail').textContent(),/5 giờ/);assert.match(await page.locator('#codex-detail').textContent(),/7 ngày/);assert.match(await page.locator('#codex-detail').textContent(),/58% còn lại/);
+  // Make the cached credit version stale through a real explicit admin refresh.
+  await page.evaluate(async()=>{const s=await(await fetch('/api/session')).json();const accounts=await(await fetch('/api/service/oauth-accounts')).json();const row=accounts.items.find(a=>a.email==='a***@e***.invalid');const r=await fetch(`/api/service/oauth-accounts/${row.id}/quota/refresh`,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf_token},body:'{}'});if(!r.ok)throw Error('fixture refresh failed');});
+  const rejected=page.waitForResponse(r=>r.url().endsWith('/consume')&&r.request().method()==='POST');const creditsReload=page.waitForResponse(r=>r.url().endsWith('/reset-credits')&&r.request().method()==='GET');
+  await page.locator('#codex-ack').check();await page.locator('#codex-consume').click();assert.equal((await rejected).status(),409);await creditsReload;
+  await page.waitForFunction(()=>!document.querySelector('#codex-ack').disabled);
+  assert.equal(commands.filter(c=>c.path.endsWith('/consume')).length,1);assert(await page.locator('#codex-consume').isDisabled());assert(!await page.locator('#codex-ack').isChecked());
   await page.locator('#codex-ack').check();assert(await page.locator('#codex-consume').isEnabled());
   await page.locator('#codex-consume').click();await page.waitForFunction(()=>document.querySelector('#codex-reset-state').textContent.includes('succeeded_refresh_failed'));
   assert(await page.locator('#codex-consume').isDisabled());
   const recovery=page.waitForResponse(r=>r.url().endsWith('/quota/refresh')&&r.request().method()==='POST');
   await page.locator('#codex-refresh-quota').click();assert.equal((await recovery).status(),200);await page.waitForFunction(()=>document.querySelector('#codex-credit-freshness').textContent==='fresh'&&!document.querySelector('#codex-refresh-quota').disabled);
-  assert.equal(commands.filter(c=>c.path.endsWith('/consume')).length,1);assert(await page.locator('#codex-consume').isDisabled());
-  assert.match(await page.locator('#codex-reset-state').textContent(),/succeeded_refresh_failed/,'Server operation remains authoritative after snapshot recovery');
+  assert.equal(commands.filter(c=>c.path.endsWith('/consume')).length,2);assert(await page.locator('#codex-consume').isDisabled());
+  assert.equal(await page.locator('#codex-reset-state').textContent(),'succeeded','Server finalizes confirmed success after complete explicit refresh');
   let releaseOverview,overviewEntered;const overviewGate=new Promise(r=>releaseOverview=r),overviewStarted=new Promise(r=>overviewEntered=r);
   await page.route(base+'/api/service/overview',async route=>{const response=await route.fetch();overviewEntered();await overviewGate;await route.fulfill({response});});
   await page.reload();await overviewStarted;await page.getByRole('button',{name:'Tài khoản Codex',exact:true}).click();await page.getByRole('button',{name:'a***@e***.invalid',exact:true}).waitFor();
   releaseOverview();await page.waitForResponse(r=>r.url()===base+'/api/service/overview');await page.unroute(base+'/api/service/overview');
   await page.getByRole('button',{name:'a***@e***.invalid',exact:true}).click();
-  await page.waitForFunction(()=>document.querySelector('#codex-reset-state').textContent.includes('succeeded_refresh_failed'));assert(await page.locator('#codex-consume').isDisabled());
+  await page.waitForFunction(()=>document.querySelector('#codex-reset-state').textContent==='succeeded');assert(await page.locator('#codex-consume').isDisabled());
+  await page.locator('#codex-ack').check();assert(await page.locator('#codex-consume').isEnabled());await page.locator('#codex-ack').uncheck();
   // Pool CAS: another admin updates the real store after this UI loads v0.
   await page.locator('#codex-pool-model').selectOption('vendor/model:v1');await page.waitForFunction(()=>document.querySelector('#codex-pool-form'));
   await page.locator('#codex-pool-form [name="mode"]').selectOption('single');assert(await page.locator('#codex-pool-save').isDisabled(),'Single mode without an explicit account must not choose the first account');await page.locator('#codex-pool-form [name="mode"]').selectOption('auto');
@@ -73,12 +80,9 @@ try{
   // Quota and freshness columns use only storage projections, never refresh POST.
   assert.match(await page.locator('#codex-list').textContent(),/Quota OpenAI/);
   assert.match(await page.locator('#codex-list').textContent(),/Freshness/);assert.match(await page.locator('#codex-list').textContent(),/42%/);
-  // Evidence resolution is explicit, audited, and uses the returned operation version.
-  await page.locator('#codex-evidence [name="reason"]').fill('Synthetic administrator receipt verified');
-  await page.locator('#codex-evidence button').click();
-  await page.waitForFunction(()=>document.querySelector('#codex-reset-state').textContent==='succeeded');
-  assert(await page.locator('#codex-consume').isDisabled(),'Resolution invalidates credit freshness');
-  assert.equal(commands.filter(c=>c.path.endsWith('/resolve')).length,1);
+  // Confirmed-success recovery needs no evidence mutation or extra consume.
+  assert(await page.locator('#codex-evidence button').isDisabled());
+  assert.equal(commands.filter(c=>c.path.endsWith('/resolve')).length,0);
   // Settings select profile references without emitting them in DOM values.
   await page.locator('#codex-detail [name="profile"]').selectOption({label:'direct · direct demo'});
   await page.getByRole('button',{name:'Lưu tài khoản',exact:true}).click();
@@ -113,6 +117,7 @@ try{
   await page.getByRole('button',{name:'Tải lại dữ liệu đã lưu',exact:true}).click();await logoutStarted;
   await page.locator('#logout').click();releaseLogout();await page.locator('#login-panel').waitFor({state:'visible'});assert.equal(await page.locator('#codex-workspace').textContent(),'');
   assert.equal(await page.evaluate(()=>localStorage.length+sessionStorage.length),0);
-  assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.equal(commands.filter(c=>c.path.endsWith('/consume')).length,1);
+  assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.equal(commands.filter(c=>c.path.endsWith('/consume')).length,2);
+  const bodies=commands.filter(c=>c.path.endsWith('/consume')).map(c=>c.body);assert.notEqual(bodies[0].request_id,bodies[1].request_id);
   console.log('Codex browser PASS: real PG/session, storage-only reads, reset warning/reload/recovery without resend, CAS, exact grant/audit, cache rates, redaction, keyboard/ARIA, desktop/mobile390, no external network.');}
 }finally{await browser?.close();server.kill('SIGTERM');await new Promise(r=>{if(server.exitCode!==null)r();else server.once('exit',r);});}

@@ -68,6 +68,9 @@ class AccountViews:
                     "AND state IN ('prepared','dispatched','unknown','succeeded_refresh_failed')"),
                     {"id": identity})).mappings().first()
                 result["active_reset"] = storage.result(active).model_dump(mode="json") if active else None
+                last = (await session.execute(text("SELECT * FROM codex_reset_requests WHERE credential_id=:id "
+                    "ORDER BY requested_at DESC,id DESC LIMIT 1"), {"id": identity})).mappings().first()
+                result["last_reset"] = storage.result(last).model_dump(mode="json") if last else None
             return result
 
     async def update(self, identity, payload):
@@ -123,6 +126,7 @@ def mount_codex_routes(router, services):
 
     @router.post("/oauth-accounts/{identity}/quota/refresh")
     async def refresh(identity: UUID, payload: RefreshInput):
+        pending = await services.quota_store.pending_refresh_reset(identity)
         try:
             await services.codex_quota.refresh(identity, datetime.now(timezone.utc) + timedelta(seconds=30))
         except GatewayError as exc:
@@ -131,6 +135,16 @@ def mount_codex_routes(router, services):
             if exc.code != "codex_usage_unavailable":
                 raise
         usage, credits = await views.projection(identity, "usage"), await views.projection(identity, "credits")
+        if pending and all(p["snapshot"] is not None and not p["stale"] and not p["last_error"] for p in (usage, credits)):
+            try:
+                operation_id, generation, status = pending
+                await services.quota_store.finish_reset(operation_id, generation, "succeeded", None, status)
+            except GatewayError as exc:
+                # Another refresh/resolution or changed stamp won the fence.
+                # Never weaken it, retry a consume, or resolve an unknown here.
+                if exc.code not in {"claim_lost", "invalid_state"}:
+                    raise
+            credits = await views.projection(identity, "credits")
         return {"usage_status": "failed" if usage["last_error"] else "updated",
                 "credits_status": "failed" if credits["last_error"] else "updated",
                 "usage": usage, "credits": credits}

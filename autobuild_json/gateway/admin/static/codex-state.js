@@ -62,6 +62,7 @@ export function createCodexState(){
       if('credits'in values){this.credits=values.credits;const op=values.credits?.active_reset;
         // Null storage projection does not prove an ambiguous POST never arrived.
         if(op)this.operation=op;
+        else if(values.credits?.last_reset&&(!this.operation||this.operation.operation_id===values.credits.last_reset.operation_id))this.operation=values.credits.last_reset;
       }
       if(values.operation)this.operation=values.operation;return true;
     }

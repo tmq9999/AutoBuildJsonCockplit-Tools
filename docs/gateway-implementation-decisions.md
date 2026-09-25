@@ -180,9 +180,13 @@ the 1,085 spent and restoring 100,000,000 available. Blank cache rates inherit
 the effective input rate; explicit zero is intentionally free.
 
 Reset states are `prepared`, `dispatched`, `unknown`, `rejected`,
-`succeeded_refresh_failed`, `succeeded`. Accepted-but-unverified reset must warn
-and remain locked, not show a generic success or permit another consume.
-Snapshot refresh and manual evidence resolution are distinct actions.
+`succeeded_refresh_failed`, `succeeded`. Accepted-but-unverified reset warns and remains
+locked until a complete explicit admin refresh supplies fresh post-receipt usage/credits
+and the existing finish_reset generation/status/stamp fence finalizes succeeded.
+Unknown still requires manual evidence resolution; partial/stale refresh never unlocks it.
+The admin-only recovery hook is not called inside consume's internal refresh.
+Credits adds safe `last_reset` (existing ResetResult shape); UI uses matched terminal
+evidence, never percentage changes or a null active_reset, to clear a success lock.
 
 Operational limits: backend endpoints are reference-observed, not a stable
 public OpenAI contract. Tests used synthetic HTTP and disposable PostgreSQL;
@@ -208,7 +212,7 @@ unchanged by account admin operations. This is not live provider validation.
 | Account admin | Private session, same-origin/CSRF mutations; public listener404; GET snapshots storage-only |
 | Quota tiers | Customer weighted-token ledger, upstream percentage windows, upstream reset credits distinct; monetary costs separate |
 | Proxy | Credential override → provider profile → direct; direct/fixed/pool-list/Kiot are explicit modes, no failure fallback to direct |
-| Reset recovery | Fresh positive credits/version/ack required; unknown/succeeded_refresh_failed locked; refresh is not resolution or consume |
+| Reset recovery | Fresh positive credits/version/ack required; unknown evidence-blocked; explicit complete refresh may finalize confirmed-success through existing fences, never another consume. Definite 4xx releases only local optimistic state after authoritative reload; timeout/cancel/5xx retain lock |
 | Grant/report | Grant only raises total; preserve spent/held/day/month; fixed returned report time bounds reused on paging |
 | UI | Approved v6 Codex Accounts implemented; Provider Catalog UI still pending separately |
 

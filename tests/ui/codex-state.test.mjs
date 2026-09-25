@@ -42,10 +42,43 @@ test('same confirmed UUID survives ambiguous failure and cannot create a new res
   assert.equal(state.operation.state,'unknown');assert.throws(()=>actions.confirm());
   await assert.rejects(actions.consume());assert.equal(calls,1);
 });
+
+function creditsProjection(active_reset=null,last_reset=null){return {snapshot:{credential_id:'a',version:8,available_count:2,credits:[],fetched_at:'2026-09-25T00:00:00Z'},stale:false,last_error:null,fetched_at:'2026-09-25T00:00:00Z',last_attempt_at:'2026-09-25T00:00:00Z',version:8,active_reset,last_reset};}
+test('definite reset 409 clears optimistic lock only after credits reload and needs a new explicit confirmation',async()=>{
+  const s=createCodexState();s.select('a');s.credits=creditsProjection();let posts=0,gets=0,release;const gate=new Promise(r=>release=r);
+  const actions=createCodexActions({request:async(path,{method='GET'}={})=>{if(method==='POST'){posts++;if(posts===1)throw Object.assign(Error('codex_credits_stale'),{status:409});return {operation_id:'new-id',credential_id:'a',version:2,state:'rejected',result_code:'upstream_error',upstream_status:400};}gets++;await gate;return creditsProjection();}},s,()=>{},()=>posts?'new-id':'first-id');
+  actions.confirm();const result=assert.rejects(actions.consume(),/codex_credits_stale/);await Promise.resolve();assert.equal(s.operation.state,'unknown');assert.throws(()=>actions.confirm());release();await result;
+  assert.equal(gets,1);assert.equal(posts,1);assert.equal(s.operation,null);assert.equal(s.confirmed,null);
+  await assert.rejects(actions.consume());assert.equal(posts,1);assert.equal(actions.confirm().request_id,'new-id');await actions.consume();assert.equal(posts,2);
+});
+test('definite reset rejection cannot erase a durable active operation',async()=>{
+  const s=createCodexState();s.select('a');s.credits=creditsProjection();const operation={operation_id:'durable',credential_id:'a',version:3,state:'unknown',result_code:'codex_reset_uncertain',upstream_status:null};
+  const actions=createCodexActions({request:async(path,{method='GET'}={})=>{if(method==='POST')throw Object.assign(Error('conflict'),{status:409});return creditsProjection(operation);}},s,()=>{});
+  actions.confirm();await assert.rejects(actions.consume());assert.deepEqual(s.operation,operation);assert.throws(()=>actions.confirm());
+});
+test('reset rejection with failed authoritative reload stays fail-closed',async()=>{
+  const s=createCodexState();s.select('a');s.credits=creditsProjection();let posts=0;
+  const actions=createCodexActions({request:async(path,{method='GET'}={})=>{if(method==='POST'){posts++;throw Object.assign(Error('no credits'),{status:409});}throw Error('reload failed');}},s,()=>{},()=> 'retained');
+  actions.confirm();await assert.rejects(actions.consume());assert.equal(s.operation.state,'unknown');assert.equal(s.confirmed.request_id,'retained');assert.throws(()=>actions.confirm());assert.equal(posts,1);
+});
+test('ambiguous reset failures never reload away uncertainty or resend',async()=>{
+  for(const error of [Object.assign(Error('timeout'),{status:408}),Object.assign(Error('upstream'),{status:503}),Object.assign(Error('cancelled'),{name:'AbortError'}),Error('network')]){
+    const s=createCodexState();s.select('a');s.credits=creditsProjection();let posts=0,gets=0;
+    const actions=createCodexActions({request:async(path,{method='GET'}={})=>{if(method==='POST'){posts++;throw error;}gets++;return creditsProjection();}},s,()=>{},()=> 'retained');
+    actions.confirm();await assert.rejects(actions.consume());assert.equal(s.operation.state,'unknown');assert.equal(s.confirmed.request_id,'retained');assert.throws(()=>actions.confirm());assert.equal(posts,1);assert.equal(gets,0);
+  }
+});
 test('storage GET cannot silently clear locally ambiguous reset',()=>{
   const s=createCodexState();s.select('a');s.operation={state:'unknown'};s.confirmed={request_id:'same'};
   s.accept(s.ticket(),{credits:{snapshot:{version:8,available_count:2},stale:false,active_reset:null}});
   assert.equal(s.operation.state,'unknown');assert.equal(s.confirmed.request_id,'same');
+});
+test('terminal storage receipt clears matching refresh-failed lock, never an unrelated unknown',()=>{
+  const s=createCodexState();s.select('a');s.operation={operation_id:'confirmed-success',state:'succeeded_refresh_failed',version:3};
+  const terminal={operation_id:'confirmed-success',credential_id:'a',state:'succeeded',version:4,result_code:null,upstream_status:204};
+  s.accept(s.ticket(),{credits:creditsProjection(null,terminal)});assert.deepEqual(s.operation,terminal);
+  s.operation={operation_id:'new-ambiguous',state:'unknown',version:null};s.accept(s.ticket(),{credits:creditsProjection(null,terminal)});assert.equal(s.operation.state,'unknown');
+  const reloaded=createCodexState();reloaded.select('a');reloaded.accept(reloaded.ticket(),{credits:creditsProjection(null,terminal)});assert.deepEqual(reloaded.operation,terminal);
 });
 test('server authoritative refresh-failed then succeeded updates state without second consume',async()=>{
   const s=createCodexState();s.select('a');s.credits={snapshot:{version:7,available_count:2},stale:false};let posts=0;

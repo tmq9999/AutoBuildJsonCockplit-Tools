@@ -37,6 +37,18 @@ class QuotaStore:
                                          {"id": operation_id})).mappings().first()
             return storage.result(row) if row else None
 
+    async def pending_refresh_reset(self, credential_id):
+        """Capture a confirmed-success candidate before explicit admin HTTP.
+
+        Original generation/status remain internal; finish_reset revalidates
+        dependencies, stamp and complete post-receipt snapshots under its locks.
+        """
+        async with self.db.sessions() as session:
+            row = (await session.execute(text("SELECT id,generation,upstream_status FROM codex_reset_requests "
+                "WHERE credential_id=:id AND state='succeeded_refresh_failed'"),
+                {"id": credential_id})).first()
+            return tuple(row) if row else None
+
     async def replay_reset(self, credential_id, request_id, credits_version, acknowledge):
         """Read immutable confirmation identity without locking either account."""
         if not isinstance(credential_id, UUID) or not isinstance(request_id, UUID):

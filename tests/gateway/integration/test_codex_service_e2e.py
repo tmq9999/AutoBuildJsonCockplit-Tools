@@ -186,6 +186,87 @@ async def test_unknown_reset_never_silently_retries_or_clears(pg_db, settings):
         assert await ledger_totals(pg_db) == (0, 0)
 
 
+async def test_explicit_admin_refresh_finishes_confirmed_success_only_after_complete_snapshots(pg_db, settings):
+    post_calls, failed = 0, set()
+
+    def reply(request):
+        nonlocal post_calls, failed
+        if request.method == 'POST':
+            post_calls += 1
+            failed = {'usage', 'credits'}
+            return httpx.Response(204)
+        kind = 'usage' if request.url.path.endswith('/usage') else 'credits'
+        if kind in failed:
+            return httpx.Response(500)
+        return httpx.Response(200, json={'plan_type':'plus'} if kind == 'usage' else {'available_count':2-post_calls})
+
+    async with private_env(pg_db, settings, reply) as (client, services):
+        identity = await account(services)
+        path = f'/api/service/oauth-accounts/{identity}'
+        initial = (await client.post(path+'/quota/refresh', json={})).json()
+        request_id = uuid4()
+        command = {'request_id':str(request_id), 'credits_version':initial['credits']['version'], 'acknowledge':True}
+        response = await client.post(path+'/reset-credits/consume', json=command)
+        assert response.status_code == 200 and response.json()['state'] == 'succeeded_refresh_failed'
+        original = await services.quota_store.get_reset(request_id)
+        for failures in ({'usage','credits'}, {'usage'}, {'credits'}):
+            failed = failures
+            refreshed = await client.post(path+'/quota/refresh', json={})
+            assert refreshed.status_code == 200
+            assert refreshed.json()['credits']['active_reset']['state'] == 'succeeded_refresh_failed'
+            assert (await services.quota_store.get_reset(request_id)).state == 'succeeded_refresh_failed'
+        failed = set()
+        refreshed = await client.post(path+'/quota/refresh', json={})
+        assert refreshed.status_code == 200
+        assert refreshed.json()['usage_status'] == refreshed.json()['credits_status'] == 'updated'
+        terminal = await services.quota_store.get_reset(request_id)
+        assert terminal.state == 'succeeded'
+        assert terminal.operation_id == original.operation_id and terminal.upstream_status == 204
+        assert terminal.version == original.version+1
+        assert refreshed.json()['credits']['active_reset'] is None
+        assert refreshed.json()['credits']['last_reset']['state'] == 'succeeded'
+        assert (await client.get(path+'/reset-credits')).json()['last_reset']['operation_id'] == str(request_id)
+        assert post_calls == 1
+        assert await ledger_totals(pg_db) == (0, 0)
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT count(*) FROM audit_events WHERE action='codex.reset.succeeded'")) == 1
+
+
+@pytest.mark.parametrize('fence', ['generation', 'stamp'])
+async def test_explicit_refresh_cannot_finish_a_stale_reset_candidate(pg_db, settings, fence):
+    posts, failing, invalidate = 0, False, False
+
+    async def reply(request):
+        nonlocal posts, failing, invalidate
+        if request.method == 'POST':
+            posts += 1
+            failing = True
+            return httpx.Response(204)
+        if failing:
+            return httpx.Response(500)
+        if invalidate:
+            invalidate = False
+            async with pg_db.sessions.begin() as session:
+                change = "generation=generation+1" if fence == 'generation' else "stamp='{}'::jsonb"
+                await session.execute(text('UPDATE codex_reset_requests SET '+change))
+        return httpx.Response(200, json={'plan_type':'plus'} if request.url.path.endswith('/usage') else {'available_count':1})
+
+    async with private_env(pg_db, settings, reply) as (client, services):
+        identity = await account(services)
+        path = f'/api/service/oauth-accounts/{identity}'
+        fresh = (await client.post(path+'/quota/refresh', json={})).json()
+        consumed = await client.post(path+'/reset-credits/consume', json={'request_id':str(uuid4()), 'credits_version':fresh['credits']['version'], 'acknowledge':True})
+        assert consumed.json()['state'] == 'succeeded_refresh_failed'
+        failing, invalidate = False, True
+        refreshed = await client.post(path+'/quota/refresh', json={})
+        assert refreshed.status_code == 200
+        assert refreshed.json()['usage']['stale'] is refreshed.json()['credits']['stale'] is False
+        assert refreshed.json()['credits']['active_reset'] == consumed.json()
+        assert posts == 1
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT count(*) FROM audit_events WHERE action='codex.reset.succeeded'")) == 0
+
+
 @pytest.mark.parametrize("query", [
     {"to": "0001-01-01T00:00:00Z"},
     {"to": "0001-01-01T00:00:00+01:00"},

@@ -37,15 +37,19 @@ only upstream HTTP is synthetic. No real credential, provider/reset call or user
 
 Codex Accounts follows approved draft v6 (Task11, including pool/grant follow-up fixes).
 The smoke covers storage-only account reads; actual window durations/used and remaining
-meters; one consume with durable succeeded_refresh_failed warning, reload, snapshot
-recovery and separate evidence resolution; pool CAS409/reload; paginated member preservation;
+meters; real stale-credit consume409, authoritative reload and new explicit confirmation;
+one upstream consume with durable succeeded_refresh_failed warning, complete explicit refresh
+to server-confirmed succeeded, reload and no second upstream consume; pool CAS409/reload; paginated member preservation;
 empty/off-page single selection; exact 100m grant/audit; definite grant rejection/reload
 versus lost successful receipt/no resend; cache zero/null, prefix/exclusions; DOM redaction;
 keyboard/ARIA; desktop/mobile390; stale account/logout reads; no external browser network.
 
 Customer weighted-token quota, upstream percentage windows and reset credits are separate.
-Refreshing snapshots does not clear unknown/succeeded_refresh_failed operations or infer
-success from percentages. Private `/api/service` routes are not public gateway routes.
+Refreshing snapshots never clears unknown or infers success from percentages. An explicit
+admin refresh may finalize succeeded_refresh_failed only with complete fresh post-receipt
+usage/credits and the original operation generation/status/stamp fence. Partial refresh or
+stale operation fences remain locked. The additive credits `last_reset` is safe server
+evidence; null active_reset alone is not evidence of success. Private `/api/service` routes are not public gateway routes.
 HTTP text/tools/SSE is a tested subset, not full Codex CLI/Platform parity: compact, images,
 WebSocket and profile takeover are absent. Provider Catalog UI is separate pending work.
 These checks are synthetic acceptance, not live provider or deployment approval.

@@ -16,7 +16,16 @@ export function createCodexActions(api,state,changed,uuid=()=>crypto.randomUUID(
     },
     async consume(){if(!state.confirmed||resetLocked(state.operation))throw new Error('Không gửi lại reset chưa rõ kết quả');
       return run(async t=>{const body={...state.confirmed};state.operation={operation_id:body.request_id,state:'unknown',version:null};changed();
-        const operation=await api.request(path(t.id)+'/reset-credits/consume',{method:'POST',body});state.accept(t,{operation});
+        try{const operation=await api.request(path(t.id)+'/reset-credits/consume',{method:'POST',body});state.accept(t,{operation});}
+        catch(error){
+          // A timeout/cancellation may have dispatched; only a definite HTTP
+          // rejection plus an authoritative reload can release the local lock.
+          if(error.name!=='AbortError'&&error.status>=400&&error.status<500&&error.status!==408&&state.current(t)){
+            const credits=await api.request(path(t.id)+'/reset-credits');
+            if(state.accept(t,{credits})&&credits.active_reset===null){state.operation=null;state.confirmed=null;}
+          }
+          throw error;
+        }
         // No automatic retry, nor clearing uncertainty using an optimistic toast.
       });
     },
