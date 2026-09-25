@@ -31,11 +31,12 @@ def candidate_diagnostic(policy: AccountPoolPolicy, candidate: AccountCandidate,
     quota = candidate.quota
     if quota is not None and quota.credential_id != candidate.route.credential_id:
         return "pool_quota_mismatch"
+    remaining = (_remaining(quota.primary), _remaining(quota.secondary)) if quota is not None else (None, None)
+    # Expiry and refresh failures do not clear the last known exhaustion.
+    if quota is not None and (quota.limit_reached is True or any(value == 0 for value in remaining)):
+        return "pool_quota_exhausted"
     if not _fresh(policy, candidate, now):
         return "pool_reserve_unknown" if policy.reserve_enabled else None
-    remaining = (_remaining(quota.primary), _remaining(quota.secondary))
-    if quota.limit_reached or any(value == 0 for value in remaining):
-        return "pool_quota_exhausted"
     if policy.reserve_enabled:
         for value, threshold in zip(remaining, (policy.min_primary_remaining, policy.min_secondary_remaining)):
             if threshold > 0 and value is None:

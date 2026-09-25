@@ -225,3 +225,31 @@ passed. `.venv/bin/python -m build` is **blocked** by missing Python3.14 ensurep
 `.venv/bin/python -m build --no-isolation` built sdist/wheel using installed dependencies.
 No package installation or claim of successful isolated build. Controller owns independent
 task/whole-branch review and integration choice; this task does not approve deployment.
+
+### Final review follow-up — 2026-09-25
+
+The current checkout is `main` at `e280946`, with Codex UI and Task12 already
+integrated locally and additional uncommitted user changes. The previous linked
+worktree and its Python3.10 environment are absent. Resume uses this checkout;
+unrelated edits are retained and excluded from the review-fix commit.
+
+Independent review reproduced two P2 issues: failed credits refresh did not prevent
+using a recent retained positive snapshot, and snapshot expiry allowed an exhausted
+account into a pool with reserve disabled. The shared reset guard now checks
+`credits_error` at preflight, prepare and dispatch. Pool selection checks saved
+exhaustion before freshness. Tests cover recovery after a successful refresh,
+all pool modes, reserve settings, primary/secondary exhaustion and explicit limits.
+Focused verification: 185 passed. Independent scoped re-review found both issues
+addressed and no new actionable finding. See [review report](codex-final-review.md)
+for final full-suite evidence.
+
+The exact reset stamp fence is retained: a token-generation/configuration change
+after the upstream receipt prevents automatic finalization of the old operation,
+even if a subsequent snapshot refresh succeeds. Admin evidence resolution remains
+the recovery path; no second consume is sent. This is a conservative limitation,
+not a guarantee that every successful refresh clears `succeeded_refresh_failed`.
+
+Local verification uses a disposable PostgreSQL18 cluster with the existing
+extracted binaries and their `LD_LIBRARY_PATH`; no running service database is
+used. The build backend is supplied from the existing setuptools cache using
+`PYTHONPATH` and `build --no-isolation`; no dependencies were installed.

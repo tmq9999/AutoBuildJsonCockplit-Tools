@@ -101,6 +101,76 @@ async def test_ineligible_confirmation_never_refreshes_tokens_or_allocates(pg_db
     assert not env.calls and not env.kiot_calls and not env.refresh_routes
 
 
+async def failed_credits_refresh(env, db):
+    env.payloads['rate-limit-reset-credits'] = 500
+    usage = await env.service.refresh(env.identity, deadline())
+    assert usage.primary.used_percent == 25 and usage.last_error is None
+    # A partial refresh retains the recent, positive snapshot and its old version.
+    assert await env.service.get_credits(env.identity) == env.credits
+    assert env.credits.available_count == 2
+    async with db.sessions() as session:
+        row = (await session.execute(text('SELECT credits_error,credits_fetched_at,version, '
+            "credits_fetched_at BETWEEN clock_timestamp()-interval '120 seconds' AND clock_timestamp() AS recent "
+            'FROM codex_account_state WHERE credential_id=:id'), {'id': env.identity})).mappings().one()
+    assert row['credits_error'] == 'codex_credits_unavailable'
+    assert row['credits_fetched_at'] == env.credits.fetched_at and row['recent']
+    assert row['version'] > env.credits.version
+
+
+async def test_failed_credits_refresh_rejects_old_confirmation_before_any_io(pg_db):
+    env = await setup(pg_db, 'kiotproxy')
+    await failed_credits_refresh(env, pg_db)
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("UPDATE credentials SET token_expires_at=now()-interval '1 second'"))
+    before = (len(env.calls), len(env.kiot_calls), len(env.refresh_routes))
+    with pytest.raises(GatewayError, match='codex_credits_stale') as caught:
+        await consume(env, version=env.credits.version)
+    assert caught.value.status == 409
+    assert (len(env.calls), len(env.kiot_calls), len(env.refresh_routes)) == before
+    assert not posts(env)
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text('SELECT count(*) FROM codex_reset_requests')) == 0
+    await no_leases(pg_db)
+
+
+async def test_failed_credits_refresh_after_preflight_is_rechecked_at_prepare(pg_db, monkeypatch):
+    env = await setup(pg_db, 'kiotproxy')
+    preflight = env.service.store.preflight_reset
+    before = []
+    async def refresh_after_preflight(*args):
+        await preflight(*args)
+        await failed_credits_refresh(env, pg_db)
+        before.append((len(env.calls), len(env.kiot_calls), len(env.refresh_routes)))
+    monkeypatch.setattr(env.service.store, 'preflight_reset', refresh_after_preflight)
+    with pytest.raises(GatewayError, match='codex_credits_stale') as caught:
+        await consume(env, version=env.credits.version)
+    assert caught.value.status == 409
+    assert before == [(len(env.calls), len(env.kiot_calls), len(env.refresh_routes))]
+    assert not posts(env)
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text('SELECT count(*) FROM codex_reset_requests')) == 0
+    await no_leases(pg_db)
+
+
+async def test_failed_credits_refresh_is_rechecked_at_dispatch_and_success_recovers(pg_db):
+    env = await setup(pg_db, 'kiotproxy')
+    claim = await env.service.store.prepare_reset(env.identity, uuid4(), env.credits.version, 'admin', deadline=deadline())
+    env.payloads['rate-limit-reset-credits'] = 500
+    await env.service.refresh(env.identity, deadline())
+    assert not await env.service.store.mark_dispatched(claim.result.operation_id, claim.generation)
+    assert not [request for request in env.calls if request.url.path.endswith('/consume')]
+
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("UPDATE codex_reset_requests SET requested_at=clock_timestamp()-interval '2 minutes', "
+                                   "deadline=clock_timestamp()-interval '1 second'"))
+    assert await env.service.store.recover_expired() == 1
+    env.payloads['rate-limit-reset-credits'] = {'available_count': 2}
+    await env.service.refresh(env.identity, deadline())
+    env.credits = await env.service.get_credits(env.identity)
+    await env.service.store.preflight_reset(env.identity, env.credits.version)
+    await no_leases(pg_db)
+
+
 @pytest.mark.parametrize('status,state', [(400, 'rejected'), (401, 'rejected'), (403, 'rejected'),
     (404, 'rejected'), (409, 'rejected'), (422, 'rejected'), (429, 'rejected'),
     (301, 'unknown'), (408, 'unknown'), (500, 'unknown'), (503, 'unknown')])

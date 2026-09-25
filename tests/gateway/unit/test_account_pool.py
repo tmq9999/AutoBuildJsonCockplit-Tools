@@ -120,13 +120,44 @@ def test_reserve_is_opt_in_and_fails_closed_on_missing_stale_failed_or_low_quota
                           min_secondary_remaining=Decimal("20")), (item,)) == []
 
 
-def test_elapsed_reset_does_not_fabricate_fresh_quota_and_stale_is_unknown():
+def test_elapsed_reset_and_expired_snapshot_do_not_restore_exhausted_quota():
     stale = candidate(1, "100")
-    stale = stale.model_copy(update={"quota": stale.quota.model_copy(update={"fetched_at": NOW - timedelta(days=1)})})
+    stale = stale.model_copy(update={"quota": stale.quota.model_copy(update={
+        "fetched_at": NOW - timedelta(days=1),
+        "primary": QuotaWindow(used_percent=Decimal("100"), reset_at=NOW - timedelta(seconds=1))})})
     known = candidate(2, "99")
-    assert ordered(policy(stale, known), (stale, known)) == [2, 1]
+    assert ordered(policy(stale, known), (stale, known)) == [2]
     assert ordered(policy(stale, reserve_enabled=True), (stale,)) == []
     assert ordered(policy(candidate(3), reserve_enabled=True), (candidate(3),)) == []
+
+
+@pytest.mark.parametrize("mode", ["auto", "random", "single", "priority", "weight"])
+@pytest.mark.parametrize("reserve", [False, True])
+@pytest.mark.parametrize("evidence", ["limit", "primary", "secondary"])
+@pytest.mark.parametrize("state", ["expired", "failed_refresh", "expired_failed_refresh"])
+def test_saved_exhaustion_requires_fresh_recovery_in_every_mode(mode, reserve, evidence, state):
+    from autobuild_json.gateway.routing.account_pool import candidate_diagnostic
+    item = candidate(1, "20")
+    quota = {"secondary": QuotaWindow(used_percent=Decimal("20")),
+             "fetched_at": NOW - timedelta(seconds=121) if "expired" in state else NOW,
+             "last_error": "codex_usage_unavailable" if "failed_refresh" in state else None}
+    if evidence == "limit":
+        quota["limit_reached"] = True
+    else:
+        quota[evidence] = QuotaWindow(used_percent=Decimal("100"), reset_at=NOW - timedelta(seconds=1))
+    item = item.model_copy(update={"quota": item.quota.model_copy(update=quota)})
+    config = policy(item, mode=mode, reserve_enabled=reserve, min_primary_remaining=Decimal("10"),
+                    min_secondary_remaining=Decimal("10"),
+                    single_credential_id=item.route.credential_id if mode == "single" else None)
+    assert candidate_diagnostic(config, item, NOW) == "pool_quota_exhausted"
+    assert ordered(config, (item,)) == []
+
+    recovered = item.model_copy(update={"quota": item.quota.model_copy(update={
+        "version": item.quota.version + 1, "fetched_at": NOW, "last_error": None, "limit_reached": False,
+        "primary": QuotaWindow(used_percent=Decimal("20")),
+        "secondary": QuotaWindow(used_percent=Decimal("20"))})})
+    assert candidate_diagnostic(config, recovered, NOW) is None
+    assert ordered(config, (recovered,)) == [1]
 
 
 def test_duplicate_authorized_bindings_do_not_duplicate_account_weight():

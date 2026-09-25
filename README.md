@@ -125,7 +125,9 @@ Khi đó UI ở `http://127.0.0.1:8789/service/`, token ở
 3. Thêm **Model** public và **Model mapping** tới upstream model/credential;
    khai báo input/output bound đúng thực tế, không tùy ý đặt thấp.
 4. Thêm **Khách hàng**, tạo **API key**, cấp model/giao thức/quota.
-   Key mới mặc định không có quota/model để gọi.
+   Kiểm tra model/giao thức đã chọn và nhập `100000000` để cấp 100 triệu token quy đổi.
+   Quota để trống là không giới hạn; `0` là hết quota. API tạo key với policy trống
+   mặc định quota bằng 0 và chưa cấp model/giao thức.
 5. Dùng **Chạy thử API** với client key; request chịu đúng quyền và quota.
    OAuth import cần refresh/kiểm chứng trước khi đưa vào tuyến hoạt động.
 
@@ -176,6 +178,10 @@ vẫn khóa sau refresh và chỉ được giải quyết bằng explicit eviden
 đủ cả usage + credits fresh, không lỗi có thể hoàn tất `succeeded` qua fence generation,
 stamp và snapshot sau receipt; partial/stale refresh vẫn khóa. UI chỉ mở khóa từ
 bằng chứng operation của server, không suy ra từ phần trăm hay `active_reset=null`.
+Nếu token generation hoặc cấu hình account/proxy đã thay đổi sau receipt, refresh
+không tự bỏ khóa cũ; admin dùng đối soát bằng bằng chứng với version hiện tại.
+Account đã biết hết quota vẫn bị loại khỏi pool khi snapshot quá hạn hoặc refresh
+lỗi, đến khi có snapshot mới xác nhận còn quota.
 HTTP 4xx từ chối consume chỉ gỡ khóa lạc quan sau khi đọc lại trạng thái xác thực thành công;
 timeout/cancel/5xx vẫn fail-closed, không tự gửi lại. Credit phải fresh (120 giây), có count > 0, đúng version, account active,
 không cooldown/active reset. Khi upstream/provider thật chưa được
@@ -292,9 +298,11 @@ Task12 phải được đánh giá bằng output
 của các lệnh chạy trên snapshot hiện tại. Codex verification dùng synthetic upstream/
 PG test schemas, không dùng credential thật, provider/reset thật, production migration,
 restart, deploy, push hay merge.
-Task12 fresh check: 1312 tests trên mỗi Python3.10/3.14, 34 Node tests, ba browser
-smokes, Ruff cả hai, compileall/diff-check qua. Isolated build bị chặn do thiếu
-ensurepip3.14; `build --no-isolation` qua với dependency có sẵn. Xem chi tiết ở
+Task12 handoff checkpoint: 1312 tests trên mỗi Python3.10/3.14, 34 Node tests,
+ba browser smokes, Ruff cả hai, compileall/diff-check qua. Final review tìm hai
+lỗi về credit refresh thất bại và snapshot account hết quota quá hạn; xem kết quả
+sửa và kiểm thử mới nhất trong [review cuối](docs/codex-final-review.md).
+Số liệu checkpoint không thay thế kết quả chạy trên mã nguồn hiện tại. Xem chi tiết ở
 [quyết định kỹ thuật](docs/gateway-implementation-decisions.md#task12-handoff--2026-09-25).
 Xem [compatibility](docs/gateway-compatibility.md) và
 [review resolution](docs/gateway-review-resolution.md). CI kiểm tra Python 3.10/3.14;

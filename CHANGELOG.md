@@ -5,6 +5,16 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ## [Unreleased] — 2026-09-24
 
+### Final review follow-up — 2026-09-25
+
+- Credit reset bị khóa khi lần refresh credits gần nhất có lỗi; snapshot cũ không
+  được dùng để gửi POST consume. Bổ sung kiểm thử preflight, prepare và dispatch.
+- Account đã biết hết quota không tự quay lại pool chỉ vì snapshot quá hạn hoặc
+  refresh lỗi; chỉ quan sát upstream mới, hợp lệ mới xóa trạng thái exhausted.
+- Review độc lập xác nhận cả hai lỗi đã được sửa; 185 test tập trung qua.
+  Full Python3.14 trên bản sửa: 1445 passed, hai warning dependency. Chi tiết tại
+  `docs/codex-final-review.md`; Python3.10 hiện không có trong checkout này.
+
 ### Codex API Service handoff — 2026-09-25
 
 - Hoàn tất reset recovery: HTTP 4xx từ chối consume chỉ bỏ khóa UI sau khi đọc lại

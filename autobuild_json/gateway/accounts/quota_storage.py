@@ -116,6 +116,7 @@ def snapshot(row, kind):
 def consumable(account, version, now):
     credits = snapshot(account, "credits")
     if (credits is None or account["credits_fetched_at"] is None
+            or account["credits_error"] is not None
             or not now - timedelta(seconds=120) <= account["credits_fetched_at"] <= now):
         raise GatewayError("codex_credits_stale", 409)
     if credits.version != version:
