@@ -2,15 +2,17 @@ import {createApi,maskedSecret,microToDecimal} from './api.js';
 import {node,action,value} from './dom.js';
 import {keyForm,keyPayload} from './keys.js';
 import {configForm,configPayload} from './forms.js';
+import {createCodexWorkspace} from './codex-view.js';
 const $=id=>document.getElementById(id),api=createApi();
+const codex=createCodexWorkspace($('codex-workspace'),api,()=>{api.clear();hideAll();});
 const titles={keys:'API key',customers:'Khách hàng',providers:'Provider',credentials:'Credential',models:'Model',bindings:'Model mapping',proxies:'Proxy',oauth:'OAuth / Import',usage:'Usage',audit:'Audit',overview:'Tổng quan',playground:'Chạy thử API'};
 Object.assign(titles,{aliases:'Alias',budgets:'Budget upstream'});
 let data={},view='keys',selected=null,authenticated=false,busy=false,loadEpoch=0;
 const endpoints=['customers','keys','providers','credentials','models','bindings','proxies','usage','audit','overview','aliases','budgets','key-balances'];
 function notice(text,error=false){$('notice').textContent=text;$('notice').className='notice'+(error?' error':'');$('notice').hidden=!text;}
 function clearSecret(){$('secret-value').value='';$('one-time-secret').close();}
-function hideAll(){authenticated=false;loadEpoch++;data={};selected=null;clearSecret();$('editor').replaceChildren();$('rows').replaceChildren();$('workspace').hidden=true;$('login-panel').hidden=false;$('admin-token').value='';}
-function controls(){for(const b of document.querySelectorAll('#workspace button'))b.disabled=busy;$('new-item').hidden=['overview','audit','usage'].includes(view);}
+function hideAll(){authenticated=false;loadEpoch++;data={};selected=null;codex.clear();view='keys';$('split-workspace').hidden=false;clearSecret();$('editor').replaceChildren();$('rows').replaceChildren();$('workspace').hidden=true;$('login-panel').hidden=false;$('admin-token').value='';}
+function controls(){for(const b of document.querySelectorAll('#workspace button'))if(!b.closest('#codex-workspace'))b.disabled=busy;$('new-item').hidden=['overview','audit','usage','codex-accounts'].includes(view);$('refresh').hidden=view==='codex-accounts';}
 async function guard(fn){if(busy)return;busy=true;controls();try{await fn();}catch(e){if(e.message==='STALE_SESSION'||e.name==='AbortError')return;if(e.status===401){api.clear();hideAll();}else notice(e.message,true);}finally{busy=false;controls();}}
 async function load(){const token=++loadEpoch;const values=await Promise.all(endpoints.map(k=>api.request('/api/service/'+k)));if(!authenticated||token!==loadEpoch)return;data=Object.fromEntries(endpoints.map((k,i)=>[k,values[i]]));$('pending-notice').hidden=!data.overview.pending;render();}
 function dataset(){if(view==='oauth')return data.credentials?.filter(r=>r.account_id)||[];if(view==='overview')return Object.entries(data.overview??{}).map(([name,count])=>({name,count}));if(view==='playground')return[];return data[view]??[];}
@@ -31,6 +33,8 @@ function rowValues(row){
 const headers={keys:['Key / Tên','Khách hàng','Quota tổng (quy đổi)','Giao thức','Trạng thái'],customers:['Tên','Trạng thái','Phiên bản'],providers:['Tên','Chuẩn','Base URL','Trạng thái'],models:['Public ID','Identity','Hệ số in / out','Trạng thái'],proxies:['Tên','Loại','Vùng','Phiên bản'],credentials:['Credential','Health','Trạng thái','Loại'],oauth:['Tài khoản','Health','Trạng thái','Account ID'],bindings:['Public model','Upstream','Identity','Ưu tiên','Trạng thái'],usage:['Request','Model','Trạng thái','Token thực in / out','Giữ trước'],audit:['Hành động','Actor','Thời gian'],overview:['Chỉ số','Giá trị'],playground:['Kết quả thử']};
 Object.assign(headers,{aliases:['Alias','Public model'],budgets:['Budget ID','Tiền tệ','Hạn mức','Đã dùng','Giữ trước']});
 function render(){
+  $('split-workspace').hidden=view==='codex-accounts';
+  if(view==='codex-accounts'){$('page-title').textContent='Tài khoản Codex';controls();return;}
   $('page-title').textContent=view==='keys'?'Quản lý API key':titles[view];$('list-title').textContent=titles[view];$('new-item').textContent='＋ '+(view==='playground'?'Chạy thử':'Thêm '+titles[view]);
   for(const b of document.querySelectorAll('[data-nav]'))b.classList.toggle('active',b.dataset.nav===view);
   const head=node('tr');for(const title of headers[view])head.append(node('th',title));$('columns').replaceChildren(head);
@@ -68,7 +72,7 @@ function edit(row=null){
   if(view==='models'&&row)action($('editor'),'Ẩn / ngừng model',()=>guard(async()=>{await api.request(`/api/service/models/${encodeURIComponent(row.model_id)}`,{method:'DELETE',body:{version:row.version}});await load();edit(data.models.find(m=>m.model_id===row.model_id));}),'danger');
   if(view==='proxies'&&row){action($('editor'),'Xóa profile không còn dùng',()=>guard(async()=>{if(!confirm('Xóa cấu hình proxy này? Không gọi /out.'))return;await api.request(`/api/service/proxies/${row.id}`,{method:'DELETE',body:{version:row.version}});await load();$('editor').replaceChildren();}),'danger');if(row.config.mode==='kiotproxy')action($('editor'),'Giải phóng Kiot key…',()=>guard(async()=>{const index=prompt('Số thứ tự key (bắt đầu từ 1). Chỉ giải phóng khi không có request sử dụng.');if(index===null)return;await api.request(`/api/service/proxies/${row.id}/release`,{method:'POST',body:{key_index:Number(index)-1}});notice('Đã giải phóng key được chọn.');}));}
 }
-for(const button of document.querySelectorAll('[data-nav]'))button.addEventListener('click',()=>{if(busy)return;view=button.dataset.nav;selected=null;$('search').value='';$('editor').replaceChildren(node('p','Chọn bản ghi hoặc thêm mới.',{class:'muted'}));render();if(view==='playground')edit();});
+for(const button of document.querySelectorAll('[data-nav]'))button.addEventListener('click',()=>{if(busy)return;const wasCodex=view==='codex-accounts';view=button.dataset.nav;selected=null;$('search').value='';if(view==='codex-accounts'){codex.open();$('codex-workspace').hidden=false;render();for(const other of document.querySelectorAll('[data-nav]'))other.classList.toggle('active',other===button);return;}codex.leave();$('editor').replaceChildren(node('p','Chọn bản ghi hoặc thêm mới.',{class:'muted'}));render();if(wasCodex)guard(load);if(view==='playground')edit();});
 $('new-item').addEventListener('click',()=>edit());$('search').addEventListener('input',render);$('refresh').addEventListener('click',()=>guard(load));
 $('hide-secret').addEventListener('click',clearSecret);$('one-time-secret').addEventListener('cancel',clearSecret);$('copy-secret').addEventListener('click',()=>navigator.clipboard.writeText($('secret-value').value));
 $('logout').addEventListener('click',()=>guard(async()=>{try{await api.request('/api/session',{method:'DELETE'});}finally{api.clear();hideAll();}}));

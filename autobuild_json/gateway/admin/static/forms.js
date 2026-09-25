@@ -1,5 +1,6 @@
 import {field,value,checked,lines,node} from './dom.js';
 import {decimalToMicro,microToDecimal} from './api.js';
+import {rateValue} from './codex-state.js';
 export function configForm(form,view,row,data){
   const r=row?.config??row??{},profiles=[['','Direct / mặc định'],...data.proxies.map(p=>[p.id,p.name])];
   if(view==='customers'){field(form,'name','Tên khách hàng',{value:r.name??'',required:true});field(form,'enabled','Hoạt động',{type:'checkbox',value:r.enabled??true});}
@@ -15,6 +16,10 @@ export function configForm(form,view,row,data){
   }
   if(view==='credentials'){field(form,'provider_id','Provider',{choices:[['','Chọn provider'],...data.providers.map(p=>[p.id,p.config.name])],value:r.provider_id??'',required:true});field(form,'secret','API key upstream mới',{type:'password',required:true,help:'Không hiển thị lại key đã lưu.'});}
   if(view==='models'){field(form,'model_id','Public model ID',{value:r.model_id??'',required:true}).disabled=Boolean(row);field(form,'identity','Model identity thực',{value:r.identity??'',required:true});field(form,'input','Hệ số input',{value:microToDecimal(r.input_micro??'1000000')});field(form,'output','Hệ số output',{value:microToDecimal(r.output_micro??'1000000')});field(form,'enabled','Hiển thị model',{type:'checkbox',value:r.enabled??false});field(form,'router_model','Alias chủ động cho nhiều model khác nhau',{type:'checkbox',value:r.router_model??false});}
+  if(view==='models'){
+    field(form,'cache_read','Hệ số cache read',{value:microToDecimal(r.cache_read_micro),help:'Trống kế thừa input; 0 = miễn phí có chủ ý.'});
+    field(form,'cache_write','Hệ số cache write',{value:microToDecimal(r.cache_write_micro),help:'Trống kế thừa input; 0 = miễn phí có chủ ý.'});
+  }
   if(view==='bindings'){
     for(const[n,label,choices]of [['provider_id','Provider',data.providers.map(p=>[p.id,p.config.name])],['credential_id','Credential',data.credentials.map(c=>[c.id,c.id.slice(0,8)+' · '+c.health])],['public_model_id','Public model',data.models.map(m=>[m.model_id,m.model_id])]])field(form,n,label,{choices:[['','Chọn…'],...choices],value:r[n]??'',required:true});
     field(form,'upstream_model','Upstream model ID',{value:r.upstream_model??'',required:true});field(form,'identity','Model identity thực',{value:r.identity??'',required:true});field(form,'input_bound','Input bound đã xác minh',{type:'number',value:r.input_bound??4096});field(form,'output_bound','Output bound đã xác minh',{type:'number',value:r.output_bound??1024});field(form,'capabilities','Capabilities (dấu phẩy)',{value:(r.capabilities??['text','tools']).join(',')});field(form,'priority','Ưu tiên (nhỏ trước)',{type:'number',value:r.priority??0});field(form,'enabled','Hoạt động',{type:'checkbox',value:r.enabled??true});
@@ -31,7 +36,7 @@ export function configPayload(form,view,row){
   if(view==='customers')return row?{name:v('name'),enabled:checked(form,'enabled'),version:row.version}:{name:v('name')};
   if(view==='providers')return{name:v('name'),adapter:v('adapter'),root:v('root'),wire_api:v('wire_api'),auth_mode:v('auth_mode'),proxy_profile_id:v('proxy_profile_id')||null,budget_id:v('budget_id')||null,cost_schedule:v('cost_schedule').trim()?JSON.parse(v('cost_schedule')):null,timeout:Number(v('timeout')),rpm_limit:Number(v('rpm_limit')),concurrency_limit:Number(v('concurrency_limit')),enabled:checked(form,'enabled')};
   if(view==='credentials')return{secret:v('secret'),...(row?{version:row.version}:{})};
-  if(view==='models')return{model_id:r.model_id??v('model_id'),identity:v('identity'),input_micro:decimalToMicro(v('input')),output_micro:decimalToMicro(v('output')),enabled:checked(form,'enabled'),router_model:checked(form,'router_model')};
+  if(view==='models')return{model_id:r.model_id??v('model_id'),identity:v('identity'),input_micro:decimalToMicro(v('input')),output_micro:decimalToMicro(v('output')),cache_read_micro:rateValue(v('cache_read')),cache_write_micro:rateValue(v('cache_write')),enabled:checked(form,'enabled'),router_model:checked(form,'router_model')};
   if(view==='bindings')return{id:r.id??crypto.randomUUID(),provider_id:v('provider_id'),credential_id:v('credential_id'),public_model_id:v('public_model_id'),upstream_model:v('upstream_model'),identity:v('identity'),input_bound:Number(v('input_bound')),output_bound:Number(v('output_bound')),capabilities:lines(v('capabilities')),priority:Number(v('priority')),enabled:checked(form,'enabled')};
   if(view==='proxies')return{name:v('name'),mode:v('mode'),entries_text:v('entries_text'),region:v('region'),protocol:v('protocol'),rotate:checked(form,'rotate')};
   if(view==='oauth')return{record:JSON.parse(v('record')),proxy_profile_id:v('proxy_profile_id')||null};
