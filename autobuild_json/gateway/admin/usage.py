@@ -10,8 +10,11 @@ def report_window(start=None, end=None):
     for value in (start, end):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise GatewayError("invalid_request", 422)
-    end = (end or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    start = start.astimezone(timezone.utc) if start else end - timedelta(hours=24)
+    try:
+        end = (end or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        start = start.astimezone(timezone.utc) if start else end - timedelta(hours=24)
+    except (OverflowError, ValueError):
+        raise GatewayError("invalid_request", 422) from None
     if start > end or end - start > timedelta(days=31):
         raise GatewayError("invalid_request", 422)
     return start, end

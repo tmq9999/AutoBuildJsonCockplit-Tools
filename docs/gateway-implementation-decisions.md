@@ -121,17 +121,20 @@ on Python 3.10 and 3.14. Earlier full run interrupted after 87 passes; verbose
 rerun passed, but the transient stall's root cause was not established. Final
 whole-branch verification/review remains Task 12.
 
-Task 9 review deferred one minor boundary bug to final triage: extreme year-0001
-report timestamps can overflow default-window arithmetic/UTC conversion and
-return 500 rather than 422. It is not treated as fixed by a passing suite.
+Task 9's deferred report-window boundary bug is fixed in Task12: authenticated
+year-0001 default subtraction, positive-offset underflow and max-year UTC overflow
+regressions reproduced unhandled OverflowError. A narrow catch translates invalid
+normalization/arithmetic to the existing safe 422, without changing valid windows.
 
-### Draft prepared, approval pending
+### Draft v6 approved; implemented account workspace
 
 Superdesign draft `9da57406-2110-462f-a8ee-0f293bc9c332` is now version **6**, titled
 **Codex Accounts | Dịch vụ API**. Version 5 was the single incremental generation;
 version 6 applies deterministic corrections: no wildcard prefix, reset/grant
 buttons disabled pending confirmation, fixed affinity TTL, truthful unsupported
-capabilities and evidence-resolution copy. No user approval of v6 is recorded yet.
+capabilities and evidence-resolution copy. The progress ledger records the user's
+2026-09-25 “triển khai đi” approval. Task11 implemented the workspace and its follow-up
+pool/grant safety fixes through `61b4daa`. No new draft generation or deployment is claimed.
 
 - Preview: https://p.superdesign.dev/draft/9da57406-2110-462f-a8ee-0f293bc9c332
 - Canvas: https://superdesign.dev/teams/52a8e2c5-cbc2-465a-a07c-e51229258be3/projects/7d62e963-3633-45cd-ae16-6445cd1b4738
@@ -141,17 +144,17 @@ capabilities and evidence-resolution copy. No user approval of v6 is recorded ye
   These are static mockups, not evidence of production UI functionality.
 - Existing catalog v4 remains in draft version history and its backend/UI work
   is separate. The account draft references that workspace rather than claiming
-  it is newly implemented. OAuth Workbench and production admin files unchanged.
+  it is newly implemented. At the Task10 design checkpoint product files were unchanged;
+  Task11 subsequently implemented the account workspace. Provider Catalog UI remains pending.
 - Only seven deliberately selected, path-validated UI source files were sent:
   `.superdesign/design-system.md` and gateway admin `index.html`, `style.css`,
   `app.js`, `forms.js`, `keys.js`, `dom.js`. No account/config/test/secret files.
 
 ### Task 10 account UI gate and endpoint mapping
 
-No production UI code is changed at this checkpoint. The existing Superdesign
-project/draft is extended incrementally; explicit approval of the resulting
-account/reset screens is required before Task 11 implementation. All example
-identities, metrics and profile names in the draft are synthetic.
+This was the Task10 design gate; approval is now recorded and Task11 implements
+these account/reset screens in local assets/native controls. All example identities,
+metrics and profile names are synthetic. Provider Catalog UI remains separate pending work.
 
 | UI surface | Private API under `/api/service` | Required state semantics |
 |---|---|---|
@@ -187,3 +190,34 @@ no real account/reset, production migration, restart, merge, push or deployment
 was performed. Thread-backed OAuth cancellation remains cooperative; a
 noncooperative native call can exceed the nominal cleanup budget. No raw
 credentials or live account data were uploaded as design context.
+
+## Task12 handoff — 2026-09-25
+
+The new composed e2e uses existing synthetic identity/pool/ledger/PG/proxy/private-session
+fixtures: 100m key, one same-provider account429, native upstream SSE with cached usage,
+account reports, explicit admin refresh/reset, newer snapshot and storage-only UUID replay.
+A dropped reset response remains unknown even after snapshot refresh; customer ledger is
+unchanged by account admin operations. This is not live provider validation.
+
+| Surface | Verified contract / limit |
+|---|---|
+| Chat/Responses HTTP | Text/function tools, JSON/SSE; exact `/backend-api/codex/responses` alias; no wildcard backend proxy |
+| Codex options | Explicit output cap, temperature/top_p and unrepresented options rejected; certified bounds used for reservation |
+| Compact/images | Authenticated HTTP unsupported_feature400; multipart rejected415, no generation reservation |
+| WebSocket/profile takeover | WebSocket closes1008 before accept; no auth-cache/profile takeover |
+| Account admin | Private session, same-origin/CSRF mutations; public listener404; GET snapshots storage-only |
+| Quota tiers | Customer weighted-token ledger, upstream percentage windows, upstream reset credits distinct; monetary costs separate |
+| Proxy | Credential override → provider profile → direct; direct/fixed/pool-list/Kiot are explicit modes, no failure fallback to direct |
+| Reset recovery | Fresh positive credits/version/ack required; unknown/succeeded_refresh_failed locked; refresh is not resolution or consume |
+| Grant/report | Grant only raises total; preserve spent/held/day/month; fixed returned report time bounds reused on paging |
+| UI | Approved v6 Codex Accounts implemented; Provider Catalog UI still pending separately |
+
+Fresh final checks: `.venv/bin/python -m pytest -q` **1312 passed**, one existing Google
+GenAI warning (322.54s); `.deps/venv310/bin/python -m pytest -q` **1312 passed** (383.78s).
+Both `.venv/bin/ruff check .` and `.deps/venv310/bin/ruff check .` passed.
+`npm run test:ui` **34 passed**; `npm run test:browser`, `npm run test:gateway-browser`
+and `node tests/ui/codex-browser-smoke.mjs` passed sequentially. Compileall and diff-check
+passed. `.venv/bin/python -m build` is **blocked** by missing Python3.14 ensurepip;
+`.venv/bin/python -m build --no-isolation` built sdist/wheel using installed dependencies.
+No package installation or claim of successful isolated build. Controller owns independent
+task/whole-branch review and integration choice; this task does not approve deployment.

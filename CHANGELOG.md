@@ -5,6 +5,26 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ## [Unreleased] — 2026-09-24
 
+### Codex API Service handoff — 2026-09-25
+
+- Thêm e2e synthetic composition của identity, customer ledger, PostgreSQL, proxy
+  manager, Codex pool/engine và fake HTTP: key 100m → 429 → SSE cached usage →
+  per-account reports → admin quota refresh/reset; unknown reset không tự retry.
+- Codex Accounts UI v6 đã được duyệt và hiện diện trong admin: masked account state,
+  exact decimal quota/grant, actual window duration, explicit reset/evidence resolution.
+  Provider Catalog UI vẫn pending, không nằm trong handoff này.
+- Ghi rõ ba quota tiers độc lập (customer weighted-token, upstream windows, reset
+  credits), proxy precedence credential → provider → direct và private routes.
+  compact/images/WebSocket/profile takeover chưa được hỗ trợ; không hứa full CLI parity.
+- Sửa `admin/usage.py`: year-0001/default-window và UTC offset overflow trả safe 422
+  thay vì 500, có authenticated regressions.
+
+Các số liệu checkpoint bên dưới là lịch sử, không thay thế final verification Task12.
+Task12: 1312 Python tests trên mỗi runtime3.10/3.14 (một Google GenAI warning3.14),
+34 Node tests, ba browser smokes, Ruff cả hai, compileall/diff-check qua. Isolated
+build bị chặn vì thiếu ensurepip3.14; no-isolation sdist/wheel qua. Không live provider,
+deployment hay independent whole-branch approval trong task này.
+
 ### Added
 
 - Gateway FastAPI riêng cho OpenAI Chat/Responses, Anthropic Messages, Gemini

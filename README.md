@@ -132,10 +132,13 @@ Khi đó UI ở `http://127.0.0.1:8789/service/`, token ở
 ## Quota và chi phí
 
 ```text
-Token quy đổi = input_tokens × hệ số input + output_tokens × hệ số output
+uncached_input = input_tokens - cached_read - cached_write
+Token quy đổi = uncached_input × hệ số input + cached_read × hệ số cache_read
+             + cached_write × hệ số cache_write + output_tokens × hệ số output
 ```
 
-1.000 input × 1 + 500 output × 3 = **2.500 token quy đổi**.
+Không có cache: 1.000 input × 1 + 500 output × 3 = **2.500 token quy đổi**.
+Reasoning đã nằm trong output, không cộng lần hai.
 UI dùng token; private admin API dùng micro-unit:
 `1 token quy đổi = 1.000.000 micro-unit`, truyền bằng chuỗi thập phân để tránh JS
 làm tròn. Usage thực và chi phí mua vào được lưu riêng.
@@ -146,6 +149,68 @@ làm tròn. Usage thực và chi phí mua vào được lưu riêng.
 - Cửa sổ ngày/tháng theo UTC lúc nhận request; `null` = không giới hạn, `0` = hết.
 - Không tự replay generation không rõ kết quả hoặc khi đã bắt đầu stream.
 
+### Codex API Service
+
+Codex OAuth hiện được hỗ trợ trong một HTTP subset đã kiểm thử qua
+`/v1/chat/completions` và `/v1/responses`, gồm text, function tools và SSE streaming.
+Private admin service (`/api/service`) cung cấp masked account views, storage-only
+usage/credit snapshots, explicit refresh, UUID-idempotent reset credits, pool/CAS,
+usage reports, key grants và capabilities. Đây là API nội bộ reference-observed,
+không phải cam kết tương thích đầy đủ Codex CLI hay OpenAI Platform.
+
+Quota có ba lớp tách biệt: weighted-token quota của customer key, quota window phần
+trăm do Codex account cấp, và reset credits do upstream cấp. Không dùng phần trăm/credit
+upstream để tự động thay đổi customer ledger; key grant chỉ tăng total limit và giữ
+nguyên spent/held. Rate cache đọc/cache ghi kế thừa input khi để trống, còn giá trị
+zero là miễn phí rõ ràng.
+
+Thứ tự proxy của account là credential override, kế đến provider profile, rồi direct;
+fixed/list/KiotProxy chỉ được dùng khi profile tương ứng được cấu hình, không tự
+fallback direct. Proxy pool/list khác với account pool auto/random/single/priority/weight;
+account selection và session affinity đều chịu policy và account health.
+
+Reset phải được xác nhận tường minh bằng request UUID, credits version và acknowledgement.
+Replay cùng payload chỉ đọc receipt đã lưu và không POST upstream lần hai. `unknown` hoặc
+`succeeded_refresh_failed` không được coi là thành công và không tự reset/clear lock;
+refresh chỉ sửa snapshots; chỉ explicit evidence resolution mới giải quyết operation
+đang khóa. Credit phải fresh (120 giây), có count > 0, đúng version, account active,
+không cooldown/active reset. Khi upstream/provider thật chưa được
+cấp phép, chỉ dùng synthetic HTTP và disposable PostgreSQL fixtures.
+
+UI quản trị Codex Accounts hiện theo visual draft v6 đã được duyệt: masked accounts,
+exact decimal meters, actual window durations, explicit reset/grant confirmation và
+evidence resolution. Provider Catalog UI vẫn là work riêng đang pending, không được coi
+là hoàn tất.
+
+Ví dụ request (model phải được publish và cấp cho client key; không chạy các ví dụ
+bằng credential thật trong kiểm thử):
+
+```http
+POST /v1/responses
+Authorization: Bearer <CLIENT_KEY>
+Content-Type: application/json
+
+{"model":"codex-public","input":"Hello","stream":true}
+```
+
+Private admin mutations dùng cookie session, đúng Origin và `X-CSRF-Token`, không dùng
+client key; public listener trả 404 cho `/api/service`. Ví dụ body sau khi đọc snapshot:
+
+```text
+POST /api/service/oauth-accounts/<UUID>/quota/refresh
+{}
+POST /api/service/oauth-accounts/<UUID>/reset-credits/consume
+{"request_id":"<NEW_CONFIRMATION_UUID>","credits_version":7,"acknowledge":true}
+POST /api/service/reset-requests/<CONFIRMATION_UUID>/resolve
+{"version":3,"outcome":"confirmed_not_applied","reason":"Provider evidence reviewed"}
+POST /api/service/keys/<KEY_UUID>/quota-adjust
+{"request_id":"<NEW_GRANT_UUID>","version":2,"amount_micro":"1085000000","reason":"Restore consumed allocation"}
+```
+
+Versions là ví dụ, phải đọc lại server; giữ nguyên UUID/body khi reconcile receipt,
+không tự retry POST. Grant 1.085 token sau 1.085 spent nâng total 100m thành 100.001.085,
+giữ spent/held và khôi phục available 100m; không reset quota upstream hay day/month.
+
 ### Rate limit và cooldown
 
 - Upstream từ chối bằng HTTP 429 → gateway trả **429**, không gộp thành lỗi 502.
@@ -153,7 +218,7 @@ làm tròn. Usage thực và chi phí mua vào được lưu riêng.
   body lỗi vẫn theo chuẩn API của client, không lộ nội dung/header bí mật upstream.
 - `Retry-After` nhận số giây hoặc HTTP-date, làm tròn lên và giới hạn 24 giờ.
   Giá trị `0` được giữ; header thiếu/sai không được giả thành thời gian upstream hứa.
-- Chỉ thử tối đa một provider dự phòng sau 429 trước generation. Khi mọi provider
+- External adapters chỉ thử tối đa một provider dự phòng sau 429 trước generation. Khi mọi provider
   ứng viên đều bị giới hạn và đều có thời gian chờ hợp lệ, trả thời điểm sớm nhất
   có thể thử lại. Nếu còn provider chưa thử hoặc có hint không rõ, bỏ header đó.
 - Cooldown dùng PostgreSQL, không bị worker khác rút ngắn; kiểm tra lại trước
@@ -162,7 +227,9 @@ làm tròn. Usage thực và chi phí mua vào được lưu riêng.
 - Tính thời gian chờ từ lúc nhận rejection, không bắt đầu lại sau cleanup.
   Hint cuối xét cả tuyến đã cooldown trước đó và cooldown dài hơn từ worker khác.
   Responses continuation kiểm tra handle và giữ đúng cooldown của binding gốc.
-- Giữ cooldown toàn provider, không xoay credential/IP để né giới hạn. Thiếu hint
+- External adapters giữ cooldown toàn provider. Codex đánh cooldown account bị 429 và
+  chỉ thử tối đa một account khác cùng provider khi fresh/unpinned và policy cho phép;
+  session/continuation pin không fallback. Không xoay IP để né giới hạn. Thiếu hint
   dùng cooldown cục bộ 60 giây; timeout, 5xx không rõ kết quả và stream đã mở không
   tự replay. Request bị từ chối rõ ràng được trả phần quota/budget đã giữ.
 
@@ -207,6 +274,7 @@ npm ci
 npm run test:ui
 npm run test:browser
 npm run test:gateway-browser
+node tests/ui/codex-browser-smoke.mjs
 ```
 
 Test binaries cần `initdb`/`pg_ctl`; tests tạo cluster tạm có password. Python
@@ -215,7 +283,15 @@ loopback, port tường minh, tên `abgw_test_<32 ký tự hex>`, role được 
 Không dùng database thật. Chrome dùng `/usr/bin/google-chrome` hoặc `CHROME_PATH`.
 Test không gọi account/model thật; provider I/O dùng dữ liệu tổng hợp.
 
-Checkpoint local: **549 Python tests trên cả 3.10/3.14, 12 Node tests, hai Chrome E2E**, lint/build qua.
+Checkpoint historical: 549 Python tests trên 3.10/3.14, 12 Node tests, hai Chrome E2E.
+Task12 phải được đánh giá bằng output
+của các lệnh chạy trên snapshot hiện tại. Codex verification dùng synthetic upstream/
+PG test schemas, không dùng credential thật, provider/reset thật, production migration,
+restart, deploy, push hay merge.
+Task12 fresh check: 1312 tests trên mỗi Python3.10/3.14, 34 Node tests, ba browser
+smokes, Ruff cả hai, compileall/diff-check qua. Isolated build bị chặn do thiếu
+ensurepip3.14; `build --no-isolation` qua với dependency có sẵn. Xem chi tiết ở
+[quyết định kỹ thuật](docs/gateway-implementation-decisions.md#task12-handoff--2026-09-25).
 Xem [compatibility](docs/gateway-compatibility.md) và
 [review resolution](docs/gateway-review-resolution.md). CI kiểm tra Python 3.10/3.14;
 test local không thay thế trạng thái CI hiện tại.
@@ -234,8 +310,10 @@ test local không thay thế trạng thái CI hiện tại.
   deployment đã xác minh. Cài tool không tự public port.
 
 Bản đầu hỗ trợ text/basic tools và streaming theo capability đã kiểm thử; không
-hứa đầy đủ mọi beta feature hay phiên bản Codex CLI/Claude Code. Chưa có payment,
-embeddings, tạo ảnh/audio/video, realtime/WebSocket hoặc chạy shell/tool thay khách.
+hứa đầy đủ mọi beta feature hay phiên bản Codex CLI/Claude Code. Codex subset hiện
+không hỗ trợ compact, images, realtime/WebSocket, profile takeover, shell/tool chạy
+thay khách, hay toàn bộ tham số Platform API. Chưa có payment, embeddings, tạo
+ảnh/audio/video.
 Codex OAuth không nhận mọi tham số Platform API; đọc matrix trước khi dùng.
 
 Resale phải phù hợp điều khoản của từng provider. Repo chưa cấp giấy phép phân
