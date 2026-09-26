@@ -32,7 +32,10 @@ class Maintenance:
             processed += await QuotaStore(self.db).recover_expired()
             async with self.db.sessions() as session:
                 rows = (await session.execute(text("SELECT id,state FROM requests WHERE "
-                    "(state IN ('reserved','dispatched','usage_pending') OR (state='released' AND EXISTS "
+                    "(state IN ('reserved','dispatched') OR "
+                    "(state='usage_pending' AND EXISTS (SELECT 1 FROM attempts a WHERE a.request_id=requests.id "
+                    "AND a.status='completed' AND a.usage IS NOT NULL)) OR "
+                    "(state='released' AND EXISTS "
                     "(SELECT 1 FROM upstream_reservations b WHERE b.request_id=requests.id AND b.state<>'settled'))) "
                     "AND deadline<now()-interval '15 seconds' LIMIT 100"))).mappings().all()
             for row in rows:

@@ -1,7 +1,7 @@
 import json
 from uuid import uuid4
 
-from ..contracts import InferenceRequest, Message, Text, ToolCall, ToolResult, Tool, Reasoning, GenerationOptions
+from ..contracts import InferenceRequest, Message, Text, ToolCall, ToolResult, Tool, Reasoning, GenerationOptions, ThinkingOptions
 from ..errors import GatewayError
 
 STOP_OUT = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use", "content_filter": "refusal"}
@@ -27,7 +27,7 @@ class AnthropicCodec:
         self.omitted = set()
 
     def decode(self, body, options):
-        allowed = {"model", "max_tokens", "system", "messages", "tools", "tool_choice", "temperature", "top_p", "stop_sequences", "stream"}
+        allowed = {"model", "max_tokens", "system", "messages", "tools", "tool_choice", "temperature", "top_p", "stop_sequences", "stream", "thinking", "output_config"}
         if not isinstance(body, dict) or set(body)-allowed:
             raise GatewayError("unsupported_feature")
         try:
@@ -63,11 +63,29 @@ class AnthropicCodec:
                 if set(item)-{"name", "description", "input_schema"}:
                     raise GatewayError("unsupported_feature")
                 tools.append(Tool(name=item["name"], description=item.get("description", ""), parameters=item["input_schema"]))
+            thinking = ThinkingOptions.model_validate(body['thinking']) if body.get('thinking') is not None else None
+            output_config = body.get('output_config', {})
+            if not isinstance(output_config, dict) or set(output_config)-{'effort'}:
+                raise GatewayError('unsupported_feature')
+            thinking_effort = output_config.get('effort')
+            reasoning = None
+            if thinking is not None:
+                budget = thinking.budget_tokens
+                if thinking.type == 'enabled':
+                    if type(body['max_tokens']) is not int or budget >= body['max_tokens']:
+                        raise ValueError('thinking_budget_exceeds_output')
+                    effort = 'low' if budget <= 1024 else 'medium' if budget <= 8192 else 'high' if budget <= 24576 else 'xhigh'
+                else:
+                    effort = 'none' if thinking.type == 'disabled' else thinking_effort or 'high'
+                reasoning = {"effort": effort, "summary": "auto"}
+            elif thinking_effort is not None:
+                raise ValueError('thinking_required')
             request = InferenceRequest(model=body["model"], messages=messages, instructions=system, tools=tools,
                 stream=body.get("stream", False), options=GenerationOptions(max_output_tokens=body["max_tokens"],
                     temperature=body.get("temperature"), top_p=body.get("top_p"), stop=body.get("stop_sequences", ()),
                     tool_choice={"auto": "auto", "any": "required", "none": "none"}[choice["type"]],
-                    parallel_tool_calls=not choice["disable_parallel_tool_use"] if "disable_parallel_tool_use" in choice else None))
+                    parallel_tool_calls=not choice["disable_parallel_tool_use"] if "disable_parallel_tool_use" in choice else None,
+                    reasoning=reasoning, thinking=thinking, thinking_effort=thinking_effort))
             self.model = request.model
             return request
         except GatewayError:
@@ -77,7 +95,11 @@ class AnthropicCodec:
 
     def upstream_body(self, request, model):
         from .responses_options import reject_native_options
-        reject_native_options(request, strict_tools=True)
+        # Native Anthropic gets its original validated budget/adaptive controls,
+        # not the effort approximation used when routing to Codex/Responses.
+        reject_native_options(request.model_copy(update={'options': request.options.model_copy(update={
+            'thinking': None, 'thinking_effort': None,
+            'reasoning': None if request.options.thinking is not None else request.options.reasoning})}), strict_tools=True)
         messages, system = [], []
         if request.instructions:
             system.append(request.instructions)
@@ -90,6 +112,10 @@ class AnthropicCodec:
                 messages.append({"role": "user" if message.role == "tool" else message.role,
                                  "content": [content_block(block) for block in message.blocks]})
         body = {"model": model, "messages": messages, "max_tokens": request.options.max_output_tokens, "stream": True}
+        if request.options.thinking is not None:
+            body['thinking'] = request.options.thinking.model_dump(exclude_none=True)
+        if request.options.thinking_effort is not None:
+            body['output_config'] = {'effort': request.options.thinking_effort}
         if system:
             body["system"] = "\n".join(system)
         if request.tools:

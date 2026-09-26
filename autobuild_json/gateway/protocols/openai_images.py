@@ -69,7 +69,8 @@ class ImagesCodec:
             raise GatewayError("unsupported_feature")
         if "n" in body and (type(body["n"]) is not int or body["n"] != 1):
             raise GatewayError("unsupported_feature")
-        if body.get("response_format", "b64_json") not in {"b64_json", "url"}:
+        response_format = body.get("response_format", "b64_json")
+        if not isinstance(response_format, str) or response_format not in {"b64_json", "url"}:
             raise GatewayError("invalid_request")
         if not isinstance(body.get("prompt"), str) or not body["prompt"].strip() or len(body["prompt"]) > 32768:
             raise GatewayError("invalid_request")

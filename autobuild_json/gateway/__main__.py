@@ -110,7 +110,8 @@ def main():
             uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False, log_level="warning")
         else:
             from .http.app import create_gateway_app
-            app = create_gateway_app(services.identity, services.catalog, services.engine, allowed_hosts=settings.allowed_hosts)
+            app = create_gateway_app(services.identity, services.catalog, services.engine,
+                                     allowed_hosts=settings.allowed_hosts, background_services=services)
             uvicorn.run(app, host=settings.host, port=settings.port, access_log=False, log_level="warning",
                         timeout_graceful_shutdown=settings.request_timeout+15, proxy_headers=bool(settings.trusted_proxy_ips),
                         forwarded_allow_ips=",".join(settings.trusted_proxy_ips))

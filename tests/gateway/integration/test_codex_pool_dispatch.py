@@ -23,7 +23,7 @@ BODY = {"model": "codex-test", "input": "Hi"}
 
 
 @asynccontextmanager
-async def codex_environment(db, *, respond=None, pool=True):
+async def codex_environment(db, *, respond=None, pool=True, count=3):
     async with gateway_environment(db, respond=respond or (lambda r: httpx.Response(200, content=native_wire()))) as env:
         env.engine.digest_key = b"p" * 32
         service = await credential_service(db)
@@ -32,7 +32,7 @@ async def codex_environment(db, *, respond=None, pool=True):
         await catalog.put_model(ModelConfig(model_id="codex-test", identity="codex-test", enabled=True,
                                              input_micro=2, output_micro=3, cache_read_micro=1, cache_write_micro=4))
         env.bindings = []
-        for index in range(3):
+        for index in range(count):
             source = record()
             source["account"]["id"] = f"account-{index}"
             credential = await service.import_record(source, None)
@@ -137,9 +137,9 @@ async def test_legacy_no_pool_still_cools_only_rejected_account(pg_db):
     async with codex_environment(pg_db, pool=False, respond=lambda r: httpx.Response(429)) as env:
         result = await env.client.post("/v1/responses", json=BODY, headers=env.headers)
         assert result.status_code == 429
-        assert [r["headers"]["chatgpt-account-id"] for r in env.upstream_requests] == ["account-0", "account-1"]
+        assert [r["headers"]["chatgpt-account-id"] for r in env.upstream_requests] == ["account-0", "account-1", "account-2"]
         async with pg_db.sessions() as session:
-            assert await session.scalar(text("SELECT count(*) FROM attempts")) == 2
+            assert await session.scalar(text("SELECT count(*) FROM attempts")) == 3
             assert await session.scalar(text("SELECT count(*) FROM usage_ledger")) == 1
             assert await session.scalar(text("SELECT sum(amount_micro) FROM usage_ledger")) == 0
 

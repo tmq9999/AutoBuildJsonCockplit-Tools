@@ -52,6 +52,8 @@ def create_app(settings, runner=None, oauth_sessions=None, token_service=None, g
                 except FlowError:
                     processor = None
                 app.state.runner = Runner(store, processor)
+            if gateway_services is not None:
+                gateway_services.quota_refresh_jobs.start()
             try:
                 yield
             finally:

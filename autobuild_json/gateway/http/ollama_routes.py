@@ -23,8 +23,15 @@ def ollama_router(identity, catalog, engine):
     @router.post("/api/show")
     async def show(request: Request):
         principal = await identity.authenticate(client_secret(request), "ollama")
-        body = await request.json()
-        model = body.get("model", body.get("name"))
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError()
+            model = body.get("model", body.get("name"))
+            if not isinstance(model, str) or not model:
+                raise ValueError()
+        except ValueError:
+            raise GatewayError('invalid_request') from None
         if model not in await catalog.list_model_names(principal):
             raise GatewayError("not_found", 404)
         return {"model_info": {"general.name": model}, "capabilities": ["completion"]}

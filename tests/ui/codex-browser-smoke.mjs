@@ -19,7 +19,7 @@ try{
   const context=await browser.newContext({viewport:{width:1500,height:1100}}),page=await context.newPage();page.setDefaultTimeout(8000);
   const errors=[],external=[],commands=[];
   page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(r.method()!=='GET')commands.push({path:new URL(r.url()).pathname,body:r.postDataJSON()});});
-  await context.route('**/*',r=>{if(!r.request().url().startsWith(base+'/')){external.push(r.request().url());return r.abort();}return r.continue();});
+  await context.route('**/*',r=>{if(!r.request().url().startsWith(base+'/')){external.push(r.request().url());return r.abort();}return r.fallback();});
   if(process.env.CODEX_REVIEW_BASELINE){
     const baselineView=execFileSync('git',['show','cb867df:autobuild_json/gateway/admin/static/codex-view.js'],{encoding:'utf8'});
     await context.route(base+'/service-assets/codex-view.js',async route=>{const response=await route.fetch();await route.fulfill({response,body:baselineView});});
@@ -34,7 +34,9 @@ try{
   assert(await page.locator('#codex-accounts-panel').isVisible());assert(await page.locator('#codex-keys').isHidden());
   assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'light');
   assert.match(await page.locator('#codex-list .plan-badge').first().textContent(),/Không rõ/);
-  assert.equal(await page.locator('#codex-list .row-link').first().evaluate(el=>getComputedStyle(el).whiteSpace),'normal','Private full email must wrap, not ellipsize');
+  // Quota reads can replace cards between locator resolution and evaluation.
+  // Inspect the current connected card, not a detached previous render.
+  await page.waitForFunction(()=>{const el=document.querySelector('#codex-list .row-link');return el?.isConnected&&getComputedStyle(el).whiteSpace==='normal';});
   assert.equal(await page.locator('#codex-list [name="health"]').inputValue(),'Tất cả','Real select uses first choice');
   await page.getByRole('button',{name:'alpha@example.invalid',exact:true}).click();
   assert.match(await page.locator('#codex-detail').textContent(),/Không rõ/);
@@ -42,7 +44,12 @@ try{
   const initialCommands=commands.length;await page.getByRole('button',{name:'Tải lại dữ liệu đã lưu',exact:true}).click();
   await page.locator('#codex-refresh-quota').waitFor();assert.equal(commands.length,initialCommands,'Reload is storage GET only');
   await page.locator('#codex-refresh-quota').click();await page.waitForFunction(()=>document.querySelector('#codex-detail').textContent.includes('58%'));
-  assert.equal(await page.locator('#codex-detail meter').count(),2);assert.equal(await page.locator('#codex-detail meter').first().getAttribute('value'),'58');
+  assert.equal(await page.locator('#codex-detail meter').count(),3);assert.equal(await page.locator('#codex-detail meter').first().getAttribute('value'),'58');
+  assert.match(await page.locator('#codex-detail .codex-additional-quota').textContent(),/GPT-5.6 Reserve/);
+  assert.match(await page.locator('#codex-detail .codex-additional-quota').textContent(),/75% còn lại/);
+  assert.match(await page.locator('#codex-detail .codex-additional-quota').textContent(),/Chưa kích hoạt/);
+  assert.equal(await page.locator('#codex-detail .codex-additional-quota meter').getAttribute('value'),'75');
+  await page.waitForFunction(()=>document.querySelector('#codex-list').textContent.includes('75%'));
   assert.match(await page.locator('#codex-detail').textContent(),/5 giờ/);assert.match(await page.locator('#codex-detail').textContent(),/7 ngày/);assert.match(await page.locator('#codex-detail').textContent(),/58% còn lại/);
   // Make the cached credit version stale through a real explicit admin refresh.
   await page.evaluate(async()=>{const s=await(await fetch('/api/session')).json();const accounts=await(await fetch('/api/service/oauth-accounts')).json();const row=accounts.items.find(a=>a.email==='alpha@example.invalid');const r=await fetch(`/api/service/oauth-accounts/${row.id}/quota/refresh`,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf_token},body:'{}'});if(!r.ok)throw Error('fixture refresh failed');});
@@ -96,7 +103,7 @@ try{
   const proxySelect=page.locator('#codex-service-proxy-select');await proxySelect.waitFor();assert.equal(await proxySelect.inputValue(),'');
   await proxySelect.selectOption({label:'fixed · fixed demo'});assert(await page.locator('#codex-service-proxy-save').isEnabled());
   let releaseProxy,enteredProxy;const proxyGate=new Promise(r=>releaseProxy=r),proxyStarted=new Promise(r=>enteredProxy=r);
-  await page.route(base+'/api/service/codex-service/proxy',async route=>{if(route.request().method()!=='PUT')return route.continue();const response=await route.fetch();enteredProxy();await proxyGate;await route.fulfill({response});});
+  await page.route(base+'/api/service/codex-service/proxy',async route=>{if(route.request().method()!=='PUT')return route.fallback();const response=await route.fetch();enteredProxy();await proxyGate;await route.fulfill({response});});
   const savedProxyResponse=page.waitForResponse(r=>r.url().endsWith('/api/service/codex-service/proxy')&&r.request().method()==='PUT');await page.locator('#codex-service-proxy-save').click();await proxyStarted;
   assert(await page.locator('#codex-service-proxy-save').isDisabled());assert(await proxySelect.isDisabled());assert(await page.locator('#codex-reload-saved').isDisabled());releaseProxy();assert.equal((await savedProxyResponse).status(),200);await page.unroute(base+'/api/service/codex-service/proxy');
   await page.waitForFunction(()=>document.querySelector('#codex-service-proxy-select')?.selectedOptions[0]?.textContent==='fixed · fixed demo');
@@ -139,7 +146,7 @@ try{
   await page.getByRole('button',{name:'Tài khoản Codex',exact:true}).click();await page.locator('#codex-list').waitFor();
   let release,entered;const gate=new Promise(r=>release=r),started=new Promise(r=>entered=r);let delayed=false;
   const quotaPattern=base+'/api/service/oauth-accounts/*/quota';
-  await page.route(quotaPattern,async route=>{if(delayed)return route.continue();delayed=true;const response=await route.fetch();entered();await gate;await route.fulfill({response});});
+  await page.route(quotaPattern,async route=>{if(delayed)return route.fallback();delayed=true;const response=await route.fetch();entered();await gate;await route.fulfill({response});});
   await page.getByRole('button',{name:'alpha@example.invalid',exact:true}).click();await started;
   await page.getByRole('button',{name:'beta@example.invalid',exact:true}).click();release();
   await page.waitForFunction(()=>document.querySelector('#codex-detail h3').textContent==='beta@example.invalid'&&!document.querySelector('#codex-refresh-quota').disabled);
@@ -152,8 +159,8 @@ try{
   assert.equal(await page.locator('#codex-batch-files').getAttribute('accept'),'application/json,.json');assert(await page.locator('#codex-batch-files').evaluate(el=>el.multiple));
   // An incidental list/quota redraw must not destroy a draft being typed.
   let releaseDraft,enteredDraft;const draftGate=new Promise(r=>releaseDraft=r),draftStarted=new Promise(r=>enteredDraft=r);let draftDelayed=false;
-  await page.route(quotaPattern,async route=>{if(draftDelayed)return route.continue();draftDelayed=true;const response=await route.fetch();enteredDraft();await draftGate;await route.fulfill({response});});
-  await page.locator('#codex-reload-saved').click();await draftStarted;
+  await page.route(quotaPattern,async route=>{if(draftDelayed)return route.fallback();draftDelayed=true;const response=await route.fetch();enteredDraft();await draftGate;await route.fulfill({response});});
+  await page.locator('#codex-import-dialog').getByRole('button',{name:'Đóng',exact:true}).click();await page.locator('#codex-reload-saved').click();await draftStarted;await page.locator('#codex-list').getByRole('button',{name:'Thêm tài khoản',exact:true}).click();
   const draft=JSON.stringify([record('draft')]);await page.locator('#codex-batch-import [name="batch-json"]').fill(draft);assert.equal(await page.locator('#codex-batch-import [name="batch-json"]').inputValue(),draft);releaseDraft();
   await page.waitForFunction(value=>document.querySelector('#codex-batch-import [name="batch-json"]')?.value===value,draft);await page.unroute(quotaPattern);await page.locator('#codex-batch-import [name="batch-json"]').fill('');
   await page.locator('#codex-batch-files').setInputFiles([{name:'first.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(bulk.slice(0,113)))},{name:'second.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify([...bulk.slice(113),bulk[0],{email:'invalid@example.invalid'},null]))}]);
@@ -163,13 +170,14 @@ try{
   assert(await page.locator('#codex-batch-import [type="submit"]').isDisabled(),'A running batch must not be submitted twice');releaseImport();const imported=await importedResponse;assert.equal(imported.status(),200);const result=await imported.json();assert.equal(result.imported,226);assert.equal(result.duplicate,1);assert.equal(result.failed,2);assert.equal(result.results.length,229);
   await page.waitForFunction(()=>document.querySelector('#codex-batch-result').textContent.includes('Đã nhập 226')&&!document.querySelector('#codex-batch-import [type="submit"]').disabled,{},{timeout:60000});
   assert.equal(await page.locator('#codex-batch-result li').count(),229);assert.equal(await page.locator('#codex-batch-files').inputValue(),'');
-  await page.unroute(base+'/api/service/oauth/import-batch');const priorResult=await page.locator('#codex-batch-result').elementHandle();await page.getByRole('button',{name:'Tải lại dữ liệu đã lưu',exact:true}).click();await page.waitForFunction(el=>!el.isConnected,priorResult,{timeout:60000});await page.waitForFunction(()=>document.querySelector('#codex-batch-result').textContent.includes('Đã nhập 226'));
+  await page.unroute(base+'/api/service/oauth/import-batch');const priorResult=await page.locator('#codex-batch-result').elementHandle();await page.locator('#codex-import-dialog').getByRole('button',{name:'Đóng',exact:true}).click();await page.getByRole('button',{name:'Tải lại dữ liệu đã lưu',exact:true}).click();await page.waitForFunction(el=>!el.isConnected,priorResult,{timeout:60000});await page.waitForFunction(()=>document.querySelector('#codex-batch-result').textContent.includes('Đã nhập 226'));await page.locator('#codex-list').getByRole('button',{name:'Thêm tài khoản',exact:true}).click();
   assert.match(await page.locator('#codex-batch-result').textContent(),/Trùng 1.*Lỗi 2/);
   await page.locator('#codex-batch-import [name="batch-json"]').fill(JSON.stringify([bulk[0],record('paste'),{tokens:{access_token:'SYNTHETIC-ACCESS'}}]));
   const pastedResponse=page.waitForResponse(r=>r.url().endsWith('/oauth/import-batch')&&r.request().method()==='POST');await page.locator('#codex-batch-import [type="submit"]').click();const pasted=await (await pastedResponse).json();assert.equal(pasted.imported,1);assert.equal(pasted.duplicate,1);assert.equal(pasted.failed,1);
   await page.waitForFunction(()=>document.querySelector('#codex-batch-result').textContent.includes('Đã nhập 1')&&!document.querySelector('#codex-batch-import [type="submit"]').disabled,{},{timeout:60000});
   assert.equal(await page.locator('#codex-batch-import [name="batch-json"]').inputValue(),'');assert.equal(await page.locator('#codex-batch-result li').count(),3);
   for(const sentinel of ['SYNTHETIC-ACCESS','SYNTHETIC-REFRESH','SYNTHETIC-ID'])assert(!(await page.locator('#codex-workspace').innerHTML()).includes(sentinel),'Import results must not render secrets');
+  await page.locator('#codex-import-dialog').getByRole('button',{name:'Đóng',exact:true}).click();
   let releaseLogout,enteredLogout;const logoutGate=new Promise(r=>releaseLogout=r),logoutStarted=new Promise(r=>enteredLogout=r);
   await page.route(quotaPattern,async route=>{const response=await route.fetch();enteredLogout();await logoutGate;await route.fulfill({response}).catch(()=>{});});
   await page.getByRole('button',{name:'Tải lại dữ liệu đã lưu',exact:true}).click();await logoutStarted;

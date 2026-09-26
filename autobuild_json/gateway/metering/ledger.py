@@ -132,7 +132,10 @@ class Ledger:
     async def mark_dispatched(self, request_id, attempt_id, *, route=None):
         async with self._request(request_id, route=route) as (session, row, _):
             count = await session.scalar(text("SELECT count(*) FROM attempts WHERE request_id=:id"), {"id": request_id})
-            if row["state"] != "reserved" or count >= 2 or row["deadline"] <= await self._now(session):
+            # Codex account-pool dispatch is bounded to eight distinct
+            # accounts; prevent duplicate/late callers exceeding that bound.
+            attempt_limit = 8 if route is not None and route.adapter == "codex_oauth" else 2
+            if row["state"] != "reserved" or count >= attempt_limit or row["deadline"] <= await self._now(session):
                 raise GatewayError("invalid_state", 409, "quota")
             if route is not None and row["model_id"] != route.public_model_id:
                 raise GatewayError("invalid_state", 409, "quota")
@@ -210,12 +213,18 @@ class Ledger:
         await session.execute(text("UPDATE requests SET state=:state,usage=CAST(:usage AS jsonb),reason=:reason WHERE id=:id"),
             {"id": row["id"], "state": state, "usage": json.dumps(evidence) if evidence else None, "reason": reason})
 
-    async def settle(self, request_id, usage):
+    async def settle(self, request_id, usage, *, attempt_id=None):
         async with self._request(request_id) as (session, row, _):
             if row["state"] in TERMINAL:
                 return
             if row["state"] not in {"dispatched", "usage_pending"}:
                 raise GatewayError("invalid_state", 409, "quota")
+            if attempt_id is not None:
+                updated = await session.scalar(text("UPDATE attempts SET status='completed',usage=CAST(:usage AS jsonb) "
+                    "WHERE id=:attempt AND request_id=:request AND status IN ('started','completed') RETURNING id"),
+                    {'attempt': attempt_id, 'request': request_id, 'usage': json.dumps(asdict(usage))})
+                if updated is None:
+                    raise GatewayError('invalid_state', 409, 'quota')
             charge = weighted_usage_micro(usage, int(row["input_micro"]), int(row["output_micro"]),
                                           int(row["cache_read_micro"]), int(row["cache_write_micro"]))
             await self._finalize(session, row, min(charge, int(row["hold"])), "completed", usage=usage,

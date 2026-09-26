@@ -27,7 +27,9 @@ class PoolMember(_Record):
 
 
 class AccountPoolPolicy(_Record):
-    mode: Literal["auto", "random", "single", "priority", "weight"] = "auto"
+    mode: Literal["auto", "round_robin", "random", "single", "priority", "weight"] = "auto"
+    # Explicit opt-in; an empty manual member list must remain a paused pool.
+    all_accounts: bool = False
     members: tuple[PoolMember, ...] = Field(default_factory=tuple, max_length=1000)
     single_credential_id: UUID | None = None
     session_affinity: bool = True
@@ -35,7 +37,7 @@ class AccountPoolPolicy(_Record):
     min_primary_remaining: Decimal = Field(default=Decimal("0"), ge=0, le=100)
     min_secondary_remaining: Decimal = Field(default=Decimal("0"), ge=0, le=100)
     snapshot_max_age_seconds: int = Field(default=120, ge=30, le=3600)
-    retry_limit: int = Field(default=1, ge=0, le=1)
+    retry_limit: int = Field(default=7, ge=0, le=7)
     plan_order: tuple[str, ...] = Field(default_factory=tuple, max_length=20)
     prefer_expiring: bool = False
 
@@ -45,6 +47,8 @@ class AccountPoolPolicy(_Record):
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate_pool_member")
         if self.mode == "single":
+            if self.all_accounts:
+                raise ValueError("single_requires_explicit_members")
             if self.single_credential_id is None or self.single_credential_id not in ids:
                 raise ValueError("single_credential_required")
         elif self.single_credential_id is not None:

@@ -27,7 +27,26 @@ export function configForm(form,view,row,data){
   if(view==='proxies'){field(form,'name','Tên profile',{value:row?.name??'',required:true});field(form,'mode','Kiểu proxy',{choices:[['direct','Direct — không proxy'],['fixed','Một proxy cố định'],['pool','Danh sách proxy'],['kiotproxy','KiotProxy API key']],value:r.mode??'direct'});field(form,'entries_text','Proxy / Kiot key (mỗi dòng một mục)',{type:'textarea',help:row?'Nhập lại danh sách để thay thế. Không hiển thị secret đã lưu.':'HTTP/HTTPS/SOCKS5 hoặc mỗi dòng một Kiot key.'});field(form,'region','Vùng Kiot',{choices:[['random','Ngẫu nhiên'],['bac','Bắc'],['trung','Trung'],['nam','Nam']],value:r.region??'random'});field(form,'protocol','Giao thức Kiot',{choices:[['http','HTTP'],['socks5','SOCKS5']],value:r.protocol??'http'});field(form,'rotate','Đổi giữa các lượt khi cooldown cho phép',{type:'checkbox',value:r.rotate??false});}
   if(view==='oauth'){field(form,'record','JSON OAuth (một bản ghi)',{type:'textarea',required:true,help:'Không dán account/password. Import không tự xác nhận quyền sử dụng upstream.'});field(form,'proxy_profile_id','Proxy profile',{choices:profiles});}
   if(view==='usage'){form.append(node('p','Chỉ quyết toán khi có bằng chứng usage. Không sửa token thực gốc.'));field(form,'amount','Token quy đổi quyết toán',{value:'0'});field(form,'reason','Lý do / nguồn đối soát',{type:'textarea',required:true});}
-  if(view==='playground'){field(form,'client_key','API key khách để thử',{type:'password',required:true});field(form,'protocol','Giao thức',{choices:['openai','anthropic','gemini','ollama'].map(x=>[x,x]),value:'openai'});field(form,'body','Request JSON',{type:'textarea',value:'{"model":"test-model","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}',required:true});form.append(node('p','Request sẽ trừ quota key đã chọn. Chỉ JSON, không stream trong playground này.',{class:'muted'}));}
+  if(view==='playground'){
+    field(form,'client_key','API key khách để thử',{type:'password',required:true});
+    const protocol=field(form,'protocol','Giao thức',{choices:['openai','anthropic','gemini','ollama'].map(x=>[x,x]),value:'openai'});
+    const models=data.models.filter(m=>m.enabled),preferred=models.find(m=>m.model_id==='gpt-6-astra')??models[0];
+    const model=field(form,'model','Model đã xuất bản',{choices:[['','Chọn model'],...models.map(m=>[m.model_id,m.model_id])],value:preferred?.model_id??'',required:true});
+    const wire=field(form,'wire','OpenAI endpoint',{choices:[['responses','Responses'],['chat','Chat Completions']],value:'responses'});
+    const effort=field(form,'thinking','Thinking / reasoning effort',{choices:[['','Mặc định upstream'],...['none','minimal','low','medium','high','xhigh','max'].map(e=>[e,e])],value:''});
+    const prompt=field(form,'prompt','Nội dung gửi thật',{type:'textarea',value:'Reply exactly API_OK.',required:true});
+    const json=field(form,'body','Request JSON (có thể chỉnh trực tiếp)',{type:'textarea',required:true});
+    const generate=()=>{
+      wire.disabled=protocol.value!=='openai';const id=model.value,p=prompt.value,e=effort.value;let body;
+      if(protocol.value==='openai')body=wire.value==='responses'?{model:id,input:p,...(e?{reasoning:{effort:e,summary:'auto'}}:{})}:{model:id,messages:[{role:'user',content:p}],...(e?{reasoning_effort:e}:{})};
+      else if(protocol.value==='anthropic')body={model:id,max_tokens:8192,messages:[{role:'user',content:p}],...(e==='none'?{thinking:{type:'disabled'}}:e?{thinking:{type:'adaptive'},output_config:{effort:e==='minimal'?'low':['low','medium','high'].includes(e)?e:'max'}}:{})};
+      else if(protocol.value==='gemini')body={model:id,contents:[{role:'user',parts:[{text:p}]}]};
+      else body={model:id,messages:[{role:'user',content:p}],stream:false};
+      json.value=JSON.stringify(body,null,2);
+    };
+    for(const el of [protocol,model,wire,effort,prompt])el.addEventListener('change',generate);generate();
+    form.append(node('p','Gửi request thật qua cùng engine/proxy/pool và trừ quota key. Key phải được cấp model đã chọn. Usage lấy từ response upstream, không ước lượng. Với Codex, budget Anthropic được đổi sang mức effort, không phải giới hạn token cứng. JSON có thể sửa model nếu key dùng prefix/alias. Không stream trong màn này.',{class:'muted'}));
+  }
 }
 export function configPayload(form,view,row){
   const v=n=>value(form,n),r=row?.config??row??{};

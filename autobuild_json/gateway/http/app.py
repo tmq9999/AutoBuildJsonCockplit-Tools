@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
@@ -15,8 +17,19 @@ from .ollama_routes import ollama_router
 from .codex_routes import codex_router
 
 
-def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
-    app = FastAPI(title="AutoBuild API Gateway", docs_url=None, redoc_url=None, openapi_url=None)
+def create_gateway_app(identity, catalog, engine, *, allowed_hosts, background_services=None):
+    @asynccontextmanager
+    async def lifespan(app):
+        if background_services is not None:
+            background_services.quota_refresh_jobs.start()
+        try:
+            yield
+        finally:
+            if background_services is not None:
+                await background_services.close()
+
+    app = FastAPI(title="AutoBuild API Gateway", lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(GatewayBoundary, allowed_hosts=allowed_hosts)
 
     @app.exception_handler(GatewayError)
@@ -37,7 +50,11 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
 
     @app.exception_handler(SQLAlchemyError)
     async def unavailable(request, error):
-        return JSONResponse(GatewayError("storage_unavailable").to_dict(), status_code=503)
+        # Keep database failures on the same protocol-shaped, redacted error
+        # boundary as explicit GatewayError paths. Returning the generic
+        # OpenAI envelope here made Anthropic/Gemini/Ollama clients receive an
+        # invalid wire shape and dropped the storage stage.
+        return await gateway_error(request, GatewayError("storage_unavailable", 503, "storage"))
 
     @app.get("/models")
     @app.get("/backend-api/codex/models")

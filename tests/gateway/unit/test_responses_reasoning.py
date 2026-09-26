@@ -61,6 +61,40 @@ async def canonical(values=None):
     return [event async for event in responses_events(SyntheticResponse(reasoning_wire(values)))]
 
 
+@pytest.mark.asyncio
+async def test_codex_empty_terminal_retains_streamed_text_reasoning_and_exact_usage():
+    values = reasoning_events()
+    expected = collected(await canonical(values))
+    values[-1]["response"]["output"] = []
+    events = [e async for e in responses_events(SyntheticResponse(reasoning_wire(values)),
+                                               allow_empty_terminal_output=True)]
+    result = collected(events)
+    assert result.blocks == expected.blocks
+    assert result.usage == expected.usage
+    assert result.usage.cached_read == 3 and result.usage.output_tokens == 5
+    # This relaxation belongs only to Codex, not every Responses provider.
+    with pytest.raises(GatewayError):
+        await canonical(values)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["unclosed", "missing_terminal", "mismatched", "not_list"])
+async def test_codex_empty_terminal_does_not_accept_incomplete_or_conflicting_lifecycle(mutation):
+    values = reasoning_events()
+    values[-1]["response"]["output"] = []
+    if mutation == "unclosed":
+        values.pop(-2)
+    elif mutation == "missing_terminal":
+        values.pop()
+    elif mutation == "mismatched":
+        values[-1]["response"]["output"] = [{"id": "unknown"}]
+    else:
+        values[-1]["response"]["output"] = None
+    with pytest.raises(GatewayError):
+        _ = [e async for e in responses_events(SyntheticResponse(reasoning_wire(values)),
+                                               allow_empty_terminal_output=True)]
+
+
 def collected(events):
     collector = EventCollector("resp_public", "model")
     for event in events:

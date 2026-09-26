@@ -80,10 +80,11 @@ follow the inbound protocol, including when a streaming request is rejected befo
 opening its stream. Unknown/mixed/partially attempted fallback chains do not claim
 a retry time. A subsequent request blocked entirely by stored cooldowns receives
 the earliest local eligibility time instead. This is scheduling guidance, not a
-guarantee of upstream capacity. Automatic generation replay remains limited to
-one alternate provider after a definite 429 before generation; uncertain failures
-and started streams are not replayed. Structured/prose retry hints in provider
-response bodies are not parsed.
+guarantee of upstream capacity. Automatic generation replay for Codex is limited
+to the configured bounded pool (at most eight distinct accounts per unpinned
+request) after a definite pre-generation rejection; external providers still
+use one alternate provider. Uncertain failures and started streams are not
+replayed. Structured/prose retry hints in provider response bodies are not parsed.
 
 Reference behavior was examined in FreeLLMAPI commit
 `1346b7d39ecbc71ac4c087fcdd36248ebdbde79b` (cooldown architecture and chain retry

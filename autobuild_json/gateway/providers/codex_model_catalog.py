@@ -7,7 +7,9 @@ from copy import deepcopy
 
 
 def _model(identity, title, context=None, maximum=None, *, vision=True, efforts=4, image=False):
-    levels = ["low", "medium", "high", "xhigh", "max", "ultra"][:efforts]
+    # The live Codex endpoint accepts max but rejects ultra (2026-09-26).
+    # Reference-client metadata must not advertise a rejected API control.
+    levels = ["low", "medium", "high", "xhigh", "max"][:efforts]
     return {"id": identity, "display_name": title, "source": "reference_catalog",
         "context_window": context, "max_context_window": maximum or context,
         "auto_compact_token_limit": context*9//10 if context else None,
@@ -30,7 +32,8 @@ CODEX_MODEL_CATALOG = (
     _model("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128000, vision=False),
     _model("gpt-image-2.5", "GPT Image 2.5", image=True),
     _model("gpt-image-2", "GPT Image 2", image=True),
-    _model("gpt-reserve", "GPT Reserve"),
+    # Luna metadata fallback, not an alias: request ID remains gpt-reserve.
+    _model("gpt-reserve", "GPT-5.6 Reserve", 272000, 921000, efforts=5),
     _model("codex-auto-review", "Codex Auto Review", 272000, 921000, efforts=5),
 )
 

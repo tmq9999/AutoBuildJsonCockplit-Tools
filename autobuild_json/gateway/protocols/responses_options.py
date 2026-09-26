@@ -31,9 +31,13 @@ class TextOptions(StrictRecord):
         return value
 
 
-def reject_native_options(request, *, strict_tools=False):
+def reject_native_options(request, *, strict_tools=False, allow_effort=False):
     """Do not silently lose native options on an unrelated wire API."""
     opts = request.options
-    if (opts.reasoning is not None or opts.include or opts.text is not None or opts.prompt_cache_key is not None
+    reasoning = opts.reasoning
+    unsupported_reasoning = reasoning is not None and (not allow_effort or reasoning.context is not None
+        or reasoning.summary not in {None, 'auto'})
+    if (unsupported_reasoning or opts.thinking is not None or opts.thinking_effort is not None
+            or opts.include or opts.text is not None or opts.prompt_cache_key is not None
             or (strict_tools and any(tool.strict is not None for tool in request.tools))):
         raise GatewayError("unsupported_feature")

@@ -19,8 +19,15 @@ class GatewayBoundary:
         headers = dict(pairs)
         host = headers.get(b"host", b"").decode("latin1")
         origin = headers.get(b"origin", b"").decode("latin1")
+        async def secured_send(message):
+            if message["type"] == "http.response.start":
+                message["headers"] = [
+                    (key, value) for key, value in message.get("headers", [])
+                    if key.lower() != b"cache-control"
+                ] + [(b"cache-control", b"no-store")]
+            await send(message)
         async def reject(status, code):
-            await JSONResponse({"error": {"code": code, "message": code}}, status_code=status)(scope, receive, send)
+            await JSONResponse({"error": {"code": code, "message": code}}, status_code=status)(scope, receive, secured_send)
         if scope['path'].startswith('/backend-api/codex/') and scope['path'] not in {
                 '/backend-api/codex/responses', '/backend-api/codex/responses/compact', '/backend-api/codex/models'}:
             return await reject(404, 'not_found')
@@ -37,7 +44,7 @@ class GatewayBoundary:
         queue.append(now)
         while len(self.clients) > 10000:
             self.clients.popitem(last=False)
-        if origin and origin != scope.get("scheme", "http")+"://"+host:
+        if sum(k == b"origin" for k, _ in pairs) > 1 or origin and origin != scope.get("scheme", "http")+"://"+host:
             return await reject(403, "invalid_origin")
         content_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip()
         multipart_images_edit = scope["path"] == "/v1/images/edits" and content_type == b"multipart/form-data"
@@ -83,7 +90,7 @@ class GatewayBoundary:
             await disconnected.wait()
             return {'type':'http.disconnect'}
         try:
-            await self.app(scope, replay, send)
+            await self.app(scope, replay, secured_send)
         except asyncio.CancelledError:
             if not disconnected.is_set():
                 raise

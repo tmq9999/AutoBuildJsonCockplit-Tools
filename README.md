@@ -7,9 +7,15 @@ và proxy; khách gọi model qua key riêng, không nhận credential upstream.
 Code gateway được xây dựng riêng, tham khảo kiến trúc FreeLLMAPI, Cockpit Tools
 và 9router; không đóng gói source/sidecar của các project này.
 
-> Đã kiểm thử offline với PostgreSQL thật, SDK và Chrome. Chưa xác nhận live
-> Codex inference, KiotProxy hoặc provider bên ngoài bằng credential thật cho
-> gateway. Tương thích giao thức không tự cấp quyền resale dịch vụ.
+> Đã kiểm thử offline với PostgreSQL thật, SDK và Chrome. Ngày 2026-09-26 đã
+> xác nhận live `POST /v1/responses` qua direct, dùng một tài khoản OAuth đã import:
+> `gpt-6-astra`, HTTP 200, nội dung `OK`, input 10 / cached 0 / output 5;
+> ledger quyết toán đúng 15 token quy đổi ở hệ số 1. Đây không phải xác nhận
+> toàn bộ tài khoản/model, streaming client, image hay compact live. Follow-up
+> đã xác nhận một lượt WebSocket thật: 12 input / 7 output, quyết toán đúng
+> 26 token quy đổi tại input ×1/output ×2. Chi tiết: [live verification](docs/live-verification-2026-09-26.md).
+> KiotProxy và provider bên ngoài chưa được xác nhận live. Tương thích giao thức
+> không tự cấp quyền resale dịch vụ.
 
 ## Chức năng
 
@@ -19,6 +25,9 @@ và 9router; không đóng gói source/sidecar của các project này.
   tháng, RPM/concurrency, hệ số input/output riêng theo model/key.
 - **Provider:** Base URL, chuẩn API/auth header, credential mã hóa, discovery có
   bước chọn trước khi công bố; routing ưu tiên, round-robin, cooldown và budget.
+  Codex pool có thể chọn toàn bộ account đã liên kết (`all_accounts`), xoay con
+  trỏ qua các request và thử tối đa 8 account khác nhau cho một request nếu lỗi
+  được xác định là trước generation (giống giới hạn retry của Cockpit).
 - **Proxy:** direct, proxy cố định, danh sách HTTP/HTTPS/SOCKS5 và KiotProxy
   (mỗi dòng một API key; vùng Bắc/Trung/Nam/ngẫu nhiên).
 - **OAuth:** batch HTTP tuần tự/song song, PKCE/callback thủ công, import JSON,
@@ -33,6 +42,15 @@ Codex OAuth hiện cung cấp các đường tương thích Responses/Images:
 - `GET /v1/models`, `/models`, `/backend-api/codex/models` — model được phép bởi
   API key; thêm `?client_version=0.1.0` để nhận metadata theo dạng Codex `models`.
   Admin xem catalog tham khảo ở `/api/service/codex-models` và công bố qua UI.
+  Các model GPT-6/GPT-5.6/GPT-5.5 hiện đã được công bố và bind vào pool động:
+  `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`,
+  `gpt-5.6-luna`, `gpt-5.5`; mỗi model có 226 bindings. Model mới trong catalog
+  vẫn cần publish/bind trước khi gọi; import tài khoản không tự làm việc đó.
+  Catalog không chứng minh quyền dùng model; `model_not_supported` nghĩa là
+  upstream từ chối model trên tài khoản được chọn. Không đổi model ngầm;
+  request mới không ghim session có thể chuyển sang tài khoản tiếp theo trong
+  giới hạn pool, tối đa 8 tài khoản/request. Binding/model bị từ chối được
+  cooldown cục bộ 5 phút, không làm tắt các model khác của tài khoản.
 - `POST /v1/responses` và `POST /backend-api/codex/responses` — Responses SSE.
 - `POST /v1/responses/compact` và alias backend — compaction response có usage.
 - `POST /v1/images/generations`, `POST /v1/images/edits` — JSON hoặc multipart
@@ -49,7 +67,8 @@ WebSocket hiện xử lý tuần tự: chờ terminal event trước khi gửi l
 đồng thời; `generate:false`/warmup chưa hỗ trợ. Giới hạn kết nối 30 phút, idle
 5 phút, message 16 MiB. Mỗi lượt mở một kết nối upstream riêng: chưa xác nhận
 continuation dựa trên cache của cùng socket ở upstream; gửi đủ context khi cần.
-Các kiểm thử WebSocket dùng upstream tổng hợp, không chứng minh mọi chế độ Codex CLI.
+Ngoài kiểm thử hồi quy, một lượt WebSocket đã được xác nhận với upstream thật;
+chưa xác nhận mọi chế độ Codex CLI hoặc continuation dùng lại cùng socket.
 
 | Client | Endpoint chính | Xác thực |
 |---|---|---|
@@ -139,6 +158,25 @@ OAuth đã có, tối đa 1000 records/32 MiB; không tự login hoặc refresh 
 bằng Ctrl+C sẽ dừng đúng các process do runner tạo, giữ nguyên dữ liệu cho lần chạy sau.
 Nếu dùng bộ PostgreSQL riêng cần thiết lập thư viện của bộ đó trước khi chạy.
 
+Trên Linux có systemd user, có thể chạy runner dưới service nền để việc đóng
+terminal không làm mất hai listener (dừng runner foreground trước, không chạy
+hai runner cùng data directory):
+
+```bash
+systemd-run --user --unit=autobuild-local-gateway --working-directory="$PWD" \
+  --property=KillMode=mixed --property=TimeoutStopSec=90 \
+  --setenv=LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
+  "$PWD/.venv/bin/python" "$PWD/scripts/local_gateway.py" \
+  --postgres-bin /absolute/path/to/postgres/bin
+systemctl --user status autobuild-local-gateway
+# Restart hoặc dừng có kiểm soát, không xóa database:
+systemctl --user restart autobuild-local-gateway
+systemctl --user stop autobuild-local-gateway
+```
+
+Đây là transient user service, không phải cấu hình tự khởi động sau reboot.
+`KillMode=mixed` cho runner đóng API và PostgreSQL trước khi systemd dọn process.
+
 Mở `http://127.0.0.1:8787/service/`. Với runner local, admin token nằm trong
 `data/local-gateway/admin-data/local-config.json`; chạy admin riêng với cấu hình
 mặc định thì ở `data/local-config.json`. Lấy trực tiếp trên máy, không gửi lên GitHub. Đây không
@@ -155,6 +193,81 @@ Khi đó UI ở `http://127.0.0.1:8789/service/`, token ở
 `data/gateway-admin/local-config.json`. Không chạy hai coordinator cùng data.
 
 ### Thiết lập qua UI
+
+Trang `/service/` mở workspace **Codex** với năm tab theo cấu trúc dịch vụ API
+trong source Cockpit, dùng frontend riêng kết nối backend của project này:
+
+- **Tổng quan dịch vụ:** Base URL, tình trạng đã lưu, proxy đầu ra và đường dẫn API.
+  “Đã cấu hình” không có nghĩa là đã kiểm tra kết nối provider.
+- **Khóa máy khách:** tạo/sửa/bật/tắt/đổi/xóa key ngay trong tab. Key đầy đủ chỉ
+  hiện một lần khi tạo/đổi; đóng hộp thoại sẽ xóa secret khỏi giao diện.
+- **Nhóm tài khoản:** email đầy đủ, quota/reset credit và form định tuyến theo
+  model ở cột bên phải. Danh sách dùng phân trang server-side 24/48/96 dòng, có
+  đầu/trước/số trang/sau/cuối và nhảy trang; tìm email/lọc trạng thái áp dụng
+  toàn bộ catalog, không tải 1000 tài khoản vào một DOM. **Thêm tài khoản** mở
+  hộp thoại nhập nhiều JSON hoặc mảng JSON; đóng/mở lại không làm mất draft.
+  Đây là nhập OAuth đã có, không tự đăng nhập.
+  Nút **Refresh quota tất cả** tạo một job server-side áp dụng cho toàn bộ tài
+  khoản đang bật, độc lập với trang/bộ lọc hiện tại. UI hiển thị tiến độ thành
+  công/lỗi/bỏ qua, tối đa hai lượt đồng thời, có nút dừng, tự ngắt khi upstream
+  rate-limit và không chạy lại khi mất kết nối. Phần **Tự động refresh (phút)**
+  hỗ trợ tắt (`0`), 2/5/10/15 hoặc số tùy chỉnh 1–999 phút; lịch được lưu trong
+  PostgreSQL và worker tiếp tục chạy khi đóng trình duyệt. Mặc định luôn tắt.
+- **Mô hình và năng lực:** chọn model từ catalog, xem trạng thái xuất bản, hệ số
+  và khả năng adapter. Chưa xuất bản thì chưa xuất hiện trong `/v1/models`.
+- **GPT-5.6 Reserve (`gpt-reserve`):** catalog và API allowlist hỗ trợ model này
+  như một model riêng. Tài khoản chỉ được chọn khi quota upstream lưu đủ cả ba
+  điều kiện: quota chính `allowed=false`, banner `luna_reserve`, và mục
+  `additional_rate_limits` của `gpt-reserve` có `allowed=true`. Quota Reserve
+  hiển thị riêng trên từng tài khoản; snapshot thiếu/cũ/lỗi bị coi là chưa rõ,
+  không tự chuyển sang Luna/Astra và không bịa phần trăm còn lại.
+- **Thống kê và nhật ký:** chọn 24 giờ/7 ngày/30 ngày hoặc khoảng UTC. Tổng
+  requests/input/cache/output/reasoning/quota được tính phía server trên **toàn
+  khoảng thời gian và bộ lọc**, không phụ thuộc trang log. Biểu đồ attempts
+  vẫn ghi rõ phạm vi trang hiện tại. Tổng quan dịch vụ hiển thị số tích lũy toàn
+  gateway, tự cập nhật mỗi 10 giây khi mở tab.
+
+Không có nút Sidecar/start-stop giả hoặc trường định tuyến không được backend
+hỗ trợ. Các màn quản trị khách hàng/provider/proxy vẫn ở sidebar. Bộ kiểm tra
+layout và thao tác key mới: `node tests/ui/codex-layout-smoke.mjs` (cần cùng
+cấu hình PostgreSQL fixture như các browser smoke khác).
+
+**Chạy thử API thật:** chọn model đã xuất bản, Responses/Chat và mức thinking,
+nhập API key được cấp model rồi bấm **Gửi request thật**. Có thể chỉnh JSON để
+dùng model prefix/alias của key. Màn này dùng cùng engine/proxy/pool và tính quota
+như API công khai, không phải response giả lập.
+
+Thinking Codex: Responses dùng `reasoning: {"effort":"high"}`, Chat dùng
+`reasoning_effort: "high"`. Messages nhận `thinking: {"type":"enabled",
+"budget_tokens":1024}` (với `max_tokens` lớn hơn budget), hoặc `adaptive` cùng
+`output_config.effort`. Khi sang Codex, budget được đổi sang mức effort, **không
+phải giới hạn token cứng**. `ultra` bị endpoint Codex thực tế từ chối; gateway
+không quảng bá mức này hoặc âm thầm đổi thành `max`.
+Gọi `/v1/messages` phải có header `anthropic-version: 2023-06-01`.
+
+Usage lấy từ upstream sau khi request hoàn tất: tổng = input + output; cached
+là phần con của input, reasoning là phần con của output. Request chưa có usage
+được thống kê riêng, không bịa số token hay xóa lịch sử chờ đối soát. Kết quả
+gọi thật và giới hạn đã xác minh: [live verification](docs/live-verification-2026-09-26.md).
+Lọc báo cáo theo tài khoản chỉ gán token/charge cho tài khoản phục vụ thực tế;
+attempt bị từ chối trước retry không nhận usage của tài khoản thay thế.
+
+Kiểm chứng trình duyệt với upstream thật (gateway local đang chạy, có tài khoản
+được dùng `gpt-6-astra`): `AUTOBUILD_LIVE_VERIFY=1 node tests/ui/codex-playground-live.mjs`.
+Lệnh gửi một request thật, tiêu quota upstream, tạo cấu hình thử tạm rồi thu hồi
+key/tắt cấu hình; lịch sử usage và audit được giữ. Không nằm trong suite offline.
+
+Kiểm chứng HTTP tools/usage đa chuẩn: `AUTOBUILD_LIVE_VERIFY=1 node tests/ui/gateway-review-live.mjs`.
+Kiểm chứng WebSocket thật: `AUTOBUILD_LIVE_VERIFY=1 .venv/bin/python tests/gateway/live_websocket.py`.
+Cả hai tạo key thử ngắn hạn và thu hồi sau khi chạy; request không rõ usage vẫn
+giữ trạng thái chờ đối soát, không giả token bằng 0.
+
+API quản trị refresh (private admin + CSRF): `GET /api/service/codex-service/quota-refresh`
+đọc trạng thái; `POST /api/service/codex-service/quota-refresh` với
+`request_id` xếp hàng refresh tất cả; `POST .../quota-refresh/stop` dừng job;
+`PUT .../quota-refresh/settings` với `{version, interval_minutes}` cập nhật lịch
+theo CAS. Migration `0014_codex_quota_refresh` tạo lịch mặc định tắt và lịch sử
+job; backup/restore giữ các bảng này và luôn tắt lịch sau restore.
 
 1. Thêm **Provider**: adapter, Base URL với prefix phù hợp (`/v1`, `/v1beta` hoặc
    `/api`), auth mode, timeout, RPM/concurrency và proxy profile nếu cần.
@@ -208,8 +321,24 @@ zero là miễn phí rõ ràng.
 
 Thứ tự proxy của account là credential override, kế đến provider profile, rồi direct;
 fixed/list/KiotProxy chỉ được dùng khi profile tương ứng được cấu hình, không tự
-fallback direct. Proxy pool/list khác với account pool auto/random/single/priority/weight;
+fallback direct. Proxy pool/list khác với account pool auto/round_robin/random/single/priority/weight;
 account selection và session affinity đều chịu policy và account health.
+
+Trong **Tùy chọn định tuyến**, chọn `round_robin` và bật **Toàn bộ tài khoản đã
+liên kết model** để xoay tuần tự toàn pool động. `all_accounts=false` vẫn dùng
+danh sách thành viên thủ công; danh sách rỗng ở chế độ này là tạm dừng, không
+tự mở toàn bộ tài khoản. `retry_limit=0..7` là số lần chuyển tài khoản tối đa
+sau lượt đầu (mặc định 7 cho policy mới; policy đã lưu giữ nguyên giá trị).
+Tài khoản unverified/reauth_required/refresh_uncertain, disabled, cooldown hoặc
+đã biết hết quota không được phục vụ. Dùng Refresh quota/OAuth để xác minh lại;
+pool không tự đặt lại quota hay ép health thành active. Lỗi refresh trước
+inference bỏ qua tài khoản đó, vẫn giữ nguyên trạng thái cần xử lý.
+
+Kiểm thử live 2026-09-26 sau khi bỏ pin: bốn request `gpt-6-astra` đều completed
+qua bốn tài khoản khác nhau; một request qua 3 attempts và một qua 2 attempts
+sau rejection. Ledger chỉ quyết toán một lần/request: 19, 20, 20, 20 token
+quy đổi. Pool triển khai bao gồm 226 bindings, 51 active / 155 unverified /
+20 refresh_uncertain tại thời điểm kiểm thử; không phải 226 tài khoản đã chạy thành công.
 
 Responses native hỗ trợ `reasoning` (effort/summary/context),
 `include: ["reasoning.encrypted_content"]`, `text` (verbosity/format),
@@ -290,8 +419,9 @@ giữ spent/held và khôi phục available 100m; không reset quota upstream ha
 - Tính thời gian chờ từ lúc nhận rejection, không bắt đầu lại sau cleanup.
   Hint cuối xét cả tuyến đã cooldown trước đó và cooldown dài hơn từ worker khác.
   Responses continuation kiểm tra handle và giữ đúng cooldown của binding gốc.
-- External adapters giữ cooldown toàn provider. Codex đánh cooldown account bị 429 và
-  chỉ thử tối đa một account khác cùng provider khi fresh/unpinned và policy cho phép;
+- External adapters giữ cooldown toàn provider. Codex đánh cooldown account bị 429,
+  model entitlement failure theo binding/model và thử tối đa 8 account khác nhau
+  cùng provider khi fresh/unpinned và policy cho phép;
   session/continuation pin không fallback. Không xoay IP để né giới hạn. Thiếu hint
   dùng cooldown cục bộ 60 giây; timeout, 5xx không rõ kết quả và stream đã mở không
   tự replay. Request bị từ chối rõ ràng được trả phần quota/budget đã giữ.

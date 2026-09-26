@@ -1,5 +1,43 @@
 # Implementation status
 
+## Live gateway follow-up — 2026-09-26
+
+Current checkpoint: [real HTTP/browser evidence](live-verification-2026-09-26.md).
+Responses/Chat, Messages enabled/adaptive, SSE and the private playground have
+completed real Codex requests with provider usage matched against PostgreSQL.
+Account-filtered summaries now exclude another account's successful retry usage;
+Playground waits for the latest model registry before creating its form.
+README/CHANGELOG include the opt-in live browser command and observed limitations.
+The full review additionally repaired exact-token 401 fencing/failover, tool
+metadata/correlation, proxy references, boundary validation and token counting.
+Real Responses JSON/SSE, Gemini/Ollama tool history, browser pagination and a
+WebSocket generation completed with exact saved usage and quota settlement.
+The follow-up pass also fixed malformed image/Gemini counter errors, route
+disable fencing during count-token dispatch, and protocol-shaped storage errors.
+The latest recovery/report pass additionally keeps evidence-free usage holds out
+of the bounded maintenance queue, attempts all proxy lease releases, and aligns
+report rows plus trend charts to request admission time. A scoped independent
+review found no Critical or Important issue in these changes.
+Final regression run (2026-09-27): 1,779 Python tests and 55 Node tests passed; Ruff, JS
+syntax and diff checks passed. Two dependency deprecation warnings remain.
+After restart, 106 real report windows matched summary/detail charges. A fresh
+real WebSocket request returned 12 input / 7 output and charged exactly 26
+weighted tokens with zero held on its temporary, subsequently revoked key.
+
+Local listeners: admin `http://127.0.0.1:8787/service/`, public API
+`http://127.0.0.1:8788`. The transient `autobuild-local-gateway` service was
+recreated after reboot using the existing database/keyring. It is not an
+auto-start-on-boot installation. No changes were committed or pushed in this
+follow-up; existing unrelated worktree changes were preserved.
+
+Do not repeat earlier implementation tasks based on the historical checkpoints
+below. Remaining verification limits: no demonstrated positive cache hit or
+successful `gpt-reserve` inference; 14 usage-pending requests retain their holds
+pending real reconciliation evidence (four older requests and ten failed
+WebSocket diagnostic requests on temporary, revoked keys). No lost usage was
+invented, silently charged or refunded. Latest known total after the last real
+WebSocket check: 13,273 tokens (72 requests: 54 completed, 4 failed, 14 pending).
+
 ## Rate-limit and cooldown follow-up — 2026-09-24
 
 User-approved bounded upgrade referencing FreeLLMAPI commit `1346b7d` behavior,

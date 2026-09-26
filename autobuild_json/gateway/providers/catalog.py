@@ -34,6 +34,7 @@ class Catalog:
         identity = uuid4()
         payload = config.model_dump_json()
         async with self.db.sessions.begin() as session:
+            await self._validate_proxy_reference(session, config.proxy_profile_id)
             await session.execute(text("INSERT INTO providers(id,config) VALUES (:id,CAST(:config AS jsonb))"),
                                   {"id": identity, "config": payload})
             await session.execute(text("INSERT INTO config_versions(provider_id,version,config) "
@@ -43,6 +44,10 @@ class Catalog:
 
     async def update_provider(self, provider_id, version, config: ProviderConfig):
         async with self.db.sessions.begin() as session:
+            # Account/quota writers lock provider before profile. Match them;
+            # proxy deletion holds only profile while checking references.
+            await session.execute(text('SELECT id FROM providers WHERE id=:id FOR UPDATE'), {'id': provider_id})
+            await self._validate_proxy_reference(session, config.proxy_profile_id)
             updated = await session.scalar(text("UPDATE providers SET config=CAST(:config AS jsonb),version=version+1 "
                 "WHERE id=:id AND version=:version RETURNING version"),
                 {"id": provider_id, "version": version, "config": config.model_dump_json()})
@@ -52,6 +57,11 @@ class Catalog:
                 "VALUES (:id,:version,CAST(:config AS jsonb))"),
                 {"id": provider_id, "version": updated, "config": config.model_dump_json()})
             await self._audit(session, "provider.updated", provider_id)
+
+    async def _validate_proxy_reference(self, session, profile_id):
+        if profile_id is not None and not await session.scalar(
+                text('SELECT id FROM proxy_profiles WHERE id=:id FOR KEY SHARE'), {'id': profile_id}):
+            raise GatewayError('invalid_request', 422)
 
     async def put_credential(self, provider_id, secret):
         if not isinstance(secret, str) or not 1 <= len(secret) <= 65536:
@@ -233,12 +243,19 @@ class Catalog:
         model_id = model_row["id"]
         rows = (await session.execute(text("""SELECT b.id AS binding_id,b.config AS binding,p.id AS provider_id,
             p.config AS provider,p.version,c.id AS credential_id,c.profile_id AS credential_profile,
-            GREATEST(p.cooldown_until,c.cooldown_until) AS cooldown_until FROM model_bindings b
+            a.usage_snapshot,a.usage_error,
+            GREATEST(p.cooldown_until,c.cooldown_until,b.cooldown_until) AS cooldown_until FROM model_bindings b
             JOIN providers p ON p.id=b.provider_id JOIN credentials c ON c.id=b.credential_id
+            LEFT JOIN codex_account_state a ON a.credential_id=c.id
             WHERE b.model_id=:model AND c.enabled AND c.health='active' ORDER BY b.id"""),
             {"model": model_id})).mappings().all()
         routes, mismatch, cooldowns = [], False, []
         now = await session.scalar(text("SELECT clock_timestamp()"))
+        from ..accounts.quota_records import CodexQuotaSnapshot
+        from ..accounts.reserve import RESERVE_MODEL, reserve_diagnostic
+        pool_config = await session.scalar(text("SELECT policy FROM account_pool_policies WHERE model_id=:model"),
+                                           {"model": model_id})
+        reserve_age = (pool_config or {}).get("snapshot_max_age_seconds", 120)
         for row in rows:
             if binding_id is not None and row["binding_id"] != binding_id:
                 continue
@@ -247,11 +264,18 @@ class Catalog:
             if (not provider.enabled or not binding["enabled"]
                     or not model.router_model and binding["identity"] != model.identity):
                 continue
+            # This gate applies even without a pool policy and is rechecked by
+            # affinity/continuation/dispatch. A public alias cannot bypass it.
+            if provider.adapter == "codex_oauth" and binding["upstream_model"] == RESERVE_MODEL:
+                quota = (CodexQuotaSnapshot.model_validate_json(json.dumps(row["usage_snapshot"]))
+                         if row["usage_snapshot"] is not None else None)
+                if row["usage_error"] or reserve_diagnostic(quota, row["credential_id"], now, reserve_age):
+                    continue
             caps = frozenset(binding["capabilities"])
             # Compact and Responses WebSocket are transport capabilities of the
-            # Codex adapter, unlike vision/images which remain account/binding
-            # specific and must be explicitly granted by the admin.
-            if provider.adapter == "codex_oauth":
+            # Codex text adapter, not image-only models. Vision/images remain
+            # account/binding specific and must be explicitly granted by admin.
+            if provider.adapter == "codex_oauth" and not binding['upstream_model'].startswith('gpt-image-'):
                 caps = caps | {"compact", "websocket"}
             if not request.required_capabilities <= caps:
                 mismatch = True
@@ -287,9 +311,23 @@ class Catalog:
                                                                           binding_id=binding_id)
             if not routes:
                 raise GatewayError("rate_limited", 429, "upstream", retry_after)
-            priority = min(route.priority for route in routes)
-            first = [route for route in routes if route.priority == priority]
-            rest = sorted((route for route in routes if route.priority != priority), key=lambda route: route.priority)
+            pool = await session.scalar(text("SELECT policy FROM account_pool_policies WHERE model_id=:id"),
+                                        {"id": model_row["id"]})
+            if pool is not None and pool.get("mode") == "round_robin":
+                # This mode explicitly replaces priority routing. Rotate once
+                # per account, not once per duplicate binding, over the whole
+                # model pool. Health/capabilities/cooldowns were checked above.
+                unique = {}
+                for route in routes:
+                    if route.adapter == "codex_oauth":
+                        unique.setdefault(route.credential_id, route)
+                first, rest = list(unique.values()), []
+                if not first:
+                    raise GatewayError("upstream_unavailable", 503)
+            else:
+                priority = min(route.priority for route in routes)
+                first = [route for route in routes if route.priority == priority]
+                rest = sorted((route for route in routes if route.priority != priority), key=lambda route: route.priority)
             offset = model_row["cursor"] % len(first)
             await session.execute(text("UPDATE public_models SET cursor=(cursor+1)%2147483647 WHERE id=:id"), {"id": model_row["id"]})
             return first[offset:] + first[:offset] + rest
@@ -355,6 +393,18 @@ class Catalog:
             else:
                 await session.execute(text("UPDATE credentials SET cooldown_until=GREATEST(cooldown_until,:until) WHERE id=:id AND provider_id=:provider"),
                                       {"until": now + timedelta(seconds=remaining), "id": credential_id, "provider": provider_id})
+
+    async def model_cooldown(self, route, seconds, *, started_at=None):
+        """A model entitlement failure must not disable the account's other models."""
+        if type(seconds) is not int or not 0 <= seconds <= 86400:
+            raise GatewayError("invalid_request")
+        remaining = seconds if started_at is None else max(0, seconds - (time.monotonic() - started_at))
+        async with self.db.sessions.begin() as session:
+            await session.execute(text("UPDATE model_bindings SET cooldown_until=GREATEST(cooldown_until,"
+                "clock_timestamp()+make_interval(secs=>:seconds)) WHERE provider_id=:provider "
+                "AND credential_id=:credential AND config->>'upstream_model'=:model"),
+                {"seconds": remaining, "provider": route.provider_id,
+                 "credential": route.credential_id, "model": route.upstream_model})
 
     async def credential_outcome(self, provider_id, credential_id, error=None):
         """Observation only: transport success never repairs OAuth health."""

@@ -69,6 +69,7 @@ class CodexQuotaService:
             route = SimpleNamespace(root=ACCOUNT_ROOT, proxy_profile_id=claim.proxy_id)
             usage = credits = None
             errors = []
+            rate_limited = False
             retry = False
             async with self.proxies.acquire(selection, uuid4(), deadline) as lease:
                 for kind, parser in (('usage', parse_usage), ('credits', parse_credits)):
@@ -86,6 +87,11 @@ class CodexQuotaService:
                             retry = True
                             break
                         errors.append('codex_' + kind + '_unavailable')
+                        if getattr(exc, 'upstream_status', None) == 429 or exc.status == 429:
+                            rate_limited = True
+                            errors.extend(['codex_usage_unavailable'] if usage is None else [])
+                            errors.extend(['codex_credits_unavailable'] if credits is None else [])
+                            break
             if retry:
                 # Save any successful subfetch with its original observation
                 # stamp before OAuth changes token_generation or health.
@@ -99,8 +105,15 @@ class CodexQuotaService:
                 if changed:
                     continue
                 raise GatewayError('claim_lost', 409, 'quota')
+            if rate_limited:
+                # Preserve the rate-limit reason in the durable projection so
+                # a server-owned all-account run can stop without guessing
+                # from a generic partial-refresh error.
+                errors = ['rate_limited', 'rate_limited']
             if not await self.store.save_refresh(claim, usage, credits, errors):
                 raise GatewayError('claim_lost', 409, 'quota')
+            if rate_limited:
+                raise GatewayError('rate_limited', 429, 'quota')
             result = await self.get(credential_id)
             if result is None:
                 raise GatewayError('codex_usage_unavailable', 502, 'quota')

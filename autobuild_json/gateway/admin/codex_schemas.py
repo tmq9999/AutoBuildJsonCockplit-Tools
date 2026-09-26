@@ -24,6 +24,15 @@ class RefreshInput(StrictInput):
     pass
 
 
+class QuotaRefreshSettingsInput(StrictInput):
+    version: int = Field(strict=True, ge=0)
+    interval_minutes: int = Field(strict=True, ge=0, le=999)
+
+
+class QuotaRefreshRunInput(StrictInput):
+    request_id: UUID
+
+
 class QuotaAdjustInput(VersionInput):
     request_id: UUID
     amount_micro: int = Field(strict=True, ge=0, lt=10**38)

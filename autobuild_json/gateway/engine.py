@@ -96,23 +96,37 @@ class Engine:
         if route.budget_id is not None:
             # A provider charging for counting needs an explicit cost policy.
             raise GatewayError("unsupported_feature")
+        validate_request(request, route)
         await self.ledger.reserve(Admission(meta.request_id, principal, route.public_model_id, Bounds(0, 0), 0, 0,
                                            meta.deadline, protocol=meta.protocol))
         selection = ProxySelection("direct")
         dispatched = False
+        known_rejection = None
         try:
             if route.proxy_profile_id is not None:
                 if self.proxy_resolver is None:
                     raise GatewayError("proxy_not_ready", 503)
                 selection = await self.proxy_resolver(route.proxy_profile_id)
             async with self.proxies.acquire(selection, meta.request_id, meta.deadline) as lease:
+                await self.transport._validate(route, lease.proxy)
                 async with self.provider_limits.acquire(route,meta.deadline):
+                    await self.credential(route)
+                    await routing_session.revalidate(self, principal, request, route)
                     attempt = uuid4()
-                    await self.ledger.mark_dispatched(meta.request_id, attempt)
+                    await self.ledger.mark_dispatched(meta.request_id, attempt, route=route)
                     dispatched = True
                     try:
+                        # The attribution transaction can wait on configuration
+                        # writers. Fence again before any provider HTTP, just as
+                        # generation does, and retain proof of zero dispatch.
+                        try:
+                            await routing_session.revalidate(self, principal, request, route)
+                        except BaseException:
+                            known_rejection = attempt
+                            raise
                         count = await self.adapters[route.adapter].count(request, route, lease)
                     except UpstreamRejected as exc:
+                        known_rejection = attempt
                         received_at = time.monotonic()
                         await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
                         dispatched = False
@@ -123,10 +137,12 @@ class Engine:
                             if exc.retry_after is not None:
                                 exc.retry_after = await self.catalog.retry_after(principal, request, binding_id=route.binding_id)
                         raise
-                    await self.ledger.settle(meta.request_id, Usage(0, 0))
+                    await self.ledger.settle(meta.request_id, Usage(0, 0), attempt_id=attempt)
                     return count
         except BaseException:
-            if dispatched:
+            if known_rejection is not None:
+                await self.ledger.reject_and_release(meta.request_id, known_rejection)
+            elif dispatched:
                 await self.ledger.mark_pending(meta.request_id, "interrupted")
             else:
                 await self.ledger.release_unspent(meta.request_id, "not_dispatched")
@@ -141,11 +157,16 @@ class Engine:
             raise GatewayError("upstream_unavailable", 503)
         codex = route.adapter == "codex_oauth"
         if codex:
-            # A fresh Codex call may retry only a distinct account on this
-            # provider. Never let a duplicate binding consume that opportunity.
-            fallback = next((r for r in routes[1:] if r.provider_id == route.provider_id
-                             and r.credential_id != route.credential_id and r.adapter == "codex_oauth"), None)
-            routes = (route, fallback) if fallback and not selection_state.pinned and selection_state.retry_limit else (route,)
+            # Each account once, same provider, finite budget (at most eight).
+            # The pool itself is not truncated: subsequent requests rotate its
+            # starting account through the shared catalog cursor.
+            unique = {}
+            for candidate in routes:
+                if candidate.provider_id == route.provider_id and candidate.adapter == "codex_oauth":
+                    unique.setdefault(candidate.credential_id, candidate)
+            limit = 1 if selection_state.pinned else selection_state.retry_limit + 1
+            routes = tuple(unique.values())
+        dispatch_routes = routes[:limit] if codex else routes[:2]
         # Codex strips client output-limit hints; they cannot lower admission
         # or retry reservations below the binding's certified output bound.
         max_output = route.bounds.output_tokens if codex else request.options.max_output_tokens or min(4096, route.bounds.output_tokens)
@@ -164,9 +185,12 @@ class Engine:
         budget_attempt = None
         known_rejection = None
         hinted_providers = set()
+        hinted_accounts = set()
         try:
-            for number, selected in enumerate(routes[:2]):
+            for number, selected in enumerate(dispatch_routes):
                 known_rejection = None
+                if datetime.now(timezone.utc) >= deadline:
+                    raise GatewayError("deadline_exceeded", 504, "request")
                 attempt_output = selected.bounds.output_tokens if codex else max_output
                 validate_request(request,selected)
                 if selected.adapter not in self.adapters or attempt_output > selected.bounds.output_tokens:
@@ -178,7 +202,18 @@ class Engine:
                 selection = ProxySelection("direct")
                 stamp = None
                 if codex:
-                    await self.credentials.fresh_tokens(selected.credential_id, deadline)
+                    try:
+                        await self.credentials.fresh_tokens(selected.credential_id, deadline)
+                    except GatewayError as exc:
+                        # No inference was sent. A failed refresh fences that
+                        # credential, not the rest of an unpinned account pool.
+                        if exc.code not in {"reauth_required", "refresh_uncertain", "not_found"}:
+                            raise
+                        if exc.code != "not_found":
+                            await self.catalog.credential_outcome(selected.provider_id, selected.credential_id, exc.code)
+                        if number + 1 == len(dispatch_routes):
+                            raise
+                        continue
                     selection, stamp = await AccountProxyResolver(self.db, self.proxy_resolver).policy(selected.credential_id)
                 elif selected.proxy_profile_id is not None:
                     if self.proxy_resolver is None:
@@ -220,10 +255,15 @@ class Engine:
                     received_at = getattr(exc, "received_at", time.monotonic())
                     if exc.upstream_status == 429 and exc.retry_after is not None:
                         hinted_providers.add(selected.provider_id)
+                        hinted_accounts.add(selected.credential_id)
                     await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
                     dispatched = False
                     if codex:
-                        await self.catalog.credential_outcome(selected.provider_id, selected.credential_id, exc.code)
+                        if exc.upstream_status == 401:
+                            await self.credentials.expire_rejected_access(
+                                selected.credential_id, getattr(exc, 'access_token_digest', None), started_at=received_at)
+                        else:
+                            await self.catalog.credential_outcome(selected.provider_id, selected.credential_id, exc.code)
                     if budget_attempt is not None:
                         await self.budgets.settle(budget_attempt, Decimal(0))
                         budget_attempt = None
@@ -231,17 +271,21 @@ class Engine:
                         await self.catalog.cooldown(selected.provider_id, selected.credential_id if codex else None,
                                                     exc.retry_after if exc.retry_after is not None else 60,
                                                     started_at=received_at)
+                    elif codex and exc.code == "model_not_supported":
+                        await self.catalog.model_cooldown(selected, 300, started_at=received_at)
                     await stack.aclose()
                     stack = AsyncExitStack()
-                    if (not exc.safe_retry or number == 1 or len(routes) < 2 or selection_state.pinned
+                    if (not exc.safe_retry or number + 1 == len(dispatch_routes) or selection_state.pinned
                             or not codex and routes[1].provider_id == selected.provider_id):
                         if exc.upstream_status == 429:
                             # No promise for untried/unhinted providers. Re-read
                             # local deadlines, including routes already cooling at
                             # selection and longer concurrent cooldown updates.
-                            if {r.provider_id for r in routes} <= hinted_providers:
+                            hints_complete = ({r.credential_id for r in routes} <= hinted_accounts if codex
+                                              else {r.provider_id for r in routes} <= hinted_providers)
+                            if hints_complete:
                                 exc.retry_after = await self.catalog.retry_after(
-                                    principal, request, binding_id=selected.binding_id if codex or selection_state.pinned else None)
+                                    principal, request, binding_id=selected.binding_id if selection_state.pinned else None)
                             else:
                                 exc.retry_after = None
                         raise

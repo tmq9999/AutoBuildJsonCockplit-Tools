@@ -16,7 +16,9 @@ async def test_every_mutation_is_private_session_origin_and_csrf_protected(pg_db
     identity = uuid4()
     paths = [("PATCH", f"oauth-accounts/{identity}"), ("POST", f"oauth-accounts/{identity}/quota/refresh"),
              ("POST", f"oauth-accounts/{identity}/reset-credits/consume"), ("POST", f"reset-requests/{identity}/resolve"),
-             ("PUT", "account-pools/vendor/model:v1"), ("POST", f"keys/{identity}/quota-adjust")]
+             ("PUT", "account-pools/vendor/model:v1"), ("POST", f"keys/{identity}/quota-adjust"),
+             ("PUT", "codex-service/quota-refresh/settings"), ("POST", "codex-service/quota-refresh"),
+             ("POST", "codex-service/quota-refresh/stop")]
     async with private_env(pg_db, settings, login=False) as (client, services):
         for method, path in paths:
             assert (await client.request(method, "/api/service/"+path, headers={"Origin":ORIGIN}, json={})).status_code == 401
@@ -211,6 +213,35 @@ async def test_account_identity_proxy_audit_pagination_and_legacy_stamp_invalida
         async with pg_db.sessions.begin() as session:
             await session.execute(text("UPDATE credentials SET issuer='https://other.invalid' WHERE id=:id"), {"id":identities[1]})
         assert (await client.patch(f"/api/service/oauth-accounts/{identities[1]}", json={"version":1,"enabled":True,"proxy_profile_id":None})).status_code == 409
+
+
+async def test_numbered_account_pages_filter_server_side_and_keep_cursor_compatibility(pg_db, settings):
+    async with private_env(pg_db, settings) as (client, services):
+        identities = [await account(services, str(n)) for n in range(5)]
+        async with pg_db.sessions.begin() as session:
+            for n, identity in enumerate(sorted(identities)):
+                await session.execute(text("UPDATE credentials SET email=:email,enabled=:enabled WHERE id=:id"),
+                                      {"email": f"USER{n}%_@example.invalid", "enabled": n != 4, "id": identity})
+        numbered = await client.get('/api/service/oauth-accounts', params={'page': 2, 'limit': 2})
+        assert numbered.status_code == 200
+        body = numbered.json()
+        assert body['page'] == 2 and body['page_size'] == 2 and body['total'] == 5
+        assert body['total_pages'] == 3 and len(body['items']) == 2
+        assert [r['id'] for r in body['items']] == list(map(str, sorted(identities)[2:4]))
+        filtered = await client.get('/api/service/oauth-accounts', params={'page': 1, 'limit': 2, 'q': 'user4%_', 'status': 'disabled'})
+        assert filtered.status_code == 200 and filtered.json()['total'] == 1
+        assert filtered.json()['items'][0]['email'] == 'USER4%_@example.invalid'
+        active = (await client.get('/api/service/oauth-accounts', params={'page': 1, 'limit': 2, 'status': 'active'})).json()
+        assert active['total'] == 4 and all(r['enabled'] for r in active['items'])
+        last = (await client.get('/api/service/oauth-accounts', params={'page': 999, 'limit': 2})).json()
+        assert last['page'] == 3 and len(last['items']) == 1 and last['next_after'] is None
+        empty = (await client.get('/api/service/oauth-accounts', params={'page': 999, 'limit': 2, 'q': "' OR 1=1 --"})).json()
+        assert empty['page'] == 1 and empty['total'] == 0 and empty['total_pages'] == 1 and empty['items'] == []
+        cursor = await client.get('/api/service/oauth-accounts', params={'limit': 2})
+        assert cursor.status_code == 200 and cursor.json()['page'] is None and cursor.json()['next_after']
+        assert (await client.get('/api/service/oauth-accounts', params={'page': 1, 'after': cursor.json()['next_after']})).status_code in {400, 422}
+        for query in ('page=0', 'page=1000001', 'page=1&page=2', 'status=unknown', 'q='+'a'*321):
+            assert (await client.get('/api/service/oauth-accounts?'+query)).status_code in {400, 422}
 
 
 async def test_switching_proxy_reference_does_not_lock_two_profiles(pg_db, settings):

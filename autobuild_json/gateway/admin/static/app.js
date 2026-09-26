@@ -3,6 +3,7 @@ import {node,action,value} from './dom.js';
 import {keyForm,keyPayload} from './keys.js';
 import {configForm,configPayload} from './forms.js';
 import {createCodexWorkspace} from './codex-view.js';
+import {icon,decorate} from './codex-ui.js';
 const $=id=>document.getElementById(id),api=createApi();
 const codex=createCodexWorkspace($('codex-workspace'),api,()=>{api.clear();hideAll();});
 // Keep the navigation focused on Codex while retaining direct access to the
@@ -38,7 +39,7 @@ function rowValues(row){
   if(view==='bindings')return[row.public_model_id,row.upstream_model,row.identity,row.priority,row.enabled?'Bật':'Tắt'];
   if(view==='usage')return[row.id.slice(0,8),row.model_id,row.state,row.usage?`${row.usage.input_tokens} / ${row.usage.output_tokens}`:'Chưa có usage',microToDecimal(row.hold)];
   if(view==='audit')return[row.action,row.actor,row.created_at];
-  if(view==='overview')return[row.name,row.count];return[];
+  if(view==='overview'){const labels={requests:'Yêu cầu',completed:'Hoàn tất',failed:'Lỗi',pending:'Chờ usage',input_tokens:'Input token',output_tokens:'Output token',total_tokens:'Tổng token',cached_read:'Cache đọc (trong input)',cached_write:'Cache ghi (trong input)',reasoning:'Reasoning (trong output)',uncached_input_tokens:'Input chưa cache',unknown_usage_requests:'Hoàn tất thiếu usage',unknown_detail_requests:'Thiếu chi tiết usage',charged_micro:'Quota quy đổi đã trừ',held_micro:'Quota đang giữ'};return[labels[row.name]??row.name,row.name.endsWith('_micro')?microToDecimal(row.count):row.count];}return[];
 }
 const headers={keys:['Key / Tên','Khách hàng','Quota tổng (quy đổi)','Giao thức','Trạng thái'],customers:['Tên','Trạng thái','Phiên bản'],providers:['Tên','Chuẩn','Base URL','Trạng thái'],models:['Public ID','Identity','Hệ số in / out','Trạng thái'],proxies:['Tên','Loại','Vùng','Phiên bản'],credentials:['Credential','Health','Trạng thái','Loại'],oauth:['Tài khoản','Health','Trạng thái','Account ID'],bindings:['Public model','Upstream','Identity','Ưu tiên','Trạng thái'],usage:['Request','Model','Trạng thái','Token thực in / out','Giữ trước'],audit:['Hành động','Actor','Thời gian'],overview:['Chỉ số','Giá trị'],playground:['Kết quả thử']};
 Object.assign(headers,{aliases:['Alias','Public model'],budgets:['Budget ID','Tiền tệ','Hạn mức','Đã dùng','Giữ trước']});
@@ -72,9 +73,9 @@ function edit(row=null){
   if(view==='usage'&&row?.state!=='usage_pending'){$('editor').append(node('pre',JSON.stringify(row,null,2)));return;}
   if(view==='budgets'&&row){$('editor').append(node('pre',JSON.stringify(row,null,2)));return;}
   const form=node('form','',{id:'editor-form',autocomplete:'off'});if(view==='keys')keyForm(form,row,data);else configForm(form,view,row,data);
-  const submit=node('button',row?'Lưu thay đổi':'Tạo mới',{type:'submit',class:'primary'});form.append(submit);$('editor').append(form);
+  const submit=node('button',view==='playground'?'Gửi request thật':row?'Lưu thay đổi':'Tạo mới',{type:'submit',class:'primary'});form.append(submit);$('editor').append(form);
   form.addEventListener('submit',event=>{event.preventDefault();guard(async()=>{const payload=view==='keys'?keyPayload(form,row):configPayload(form,view,row);const[path,method]=savePath(row,form);const result=await api.request(path,{method,body:payload});
-    if(view==='playground'){form.reset();$('editor').append(node('pre',JSON.stringify(result,null,2)));return;}
+    if(view==='playground'){const usage=result?.usage;const old=$('playground-result');if(old)old.remove();const output=node('section','',{id:'playground-result'});output.append(node('h3','Response thật từ gateway'));if(usage)output.append(node('pre',JSON.stringify(usage,null,2)));const full=node('details');full.append(node('summary','Xem response JSON'),node('pre',JSON.stringify(result,null,2)));output.append(full);$('editor').append(output);await load();notice('Request hoàn tất. Usage và tổng gateway đã cập nhật.');return;}
     $('editor').replaceChildren(node('p','Đã lưu. Chọn bản ghi để chỉnh sửa.',{class:'muted'}));selected=null;await load();notice('Đã lưu thay đổi.');if(result?.secret)reveal(result.secret);
   });});
   if(view==='keys'&&row&&!row.revoked_at){action($('editor'),'Đổi key',()=>guard(async()=>{if(!confirm('Key cũ sẽ mất hiệu lực cho request mới. Tiếp tục?'))return;const result=await api.request(`/api/service/keys/${row.key_id}/rotate`,{method:'POST',body:{version:row.version}});await load();edit(data.keys.find(k=>k.key_id===row.key_id));reveal(result.secret);}));action($('editor'),'Thu hồi key',()=>guard(async()=>{if(!confirm('Thu hồi key này? Usage/audit được giữ lại.'))return;await api.request(`/api/service/keys/${row.key_id}/revoke`,{method:'POST',body:{version:row.version}});await load();edit(data.keys.find(k=>k.key_id===row.key_id));}),'danger');}
@@ -85,7 +86,29 @@ function edit(row=null){
   if(view==='models'&&row)action($('editor'),'Ẩn / ngừng model',()=>guard(async()=>{await api.request(`/api/service/models/${encodeURIComponent(row.model_id)}`,{method:'DELETE',body:{version:row.version}});await load();edit(data.models.find(m=>m.model_id===row.model_id));}),'danger');
   if(view==='proxies'&&row){action($('editor'),'Xóa profile không còn dùng',()=>guard(async()=>{if(!confirm('Xóa cấu hình proxy này? Không gọi /out.'))return;await api.request(`/api/service/proxies/${row.id}`,{method:'DELETE',body:{version:row.version}});await load();$('editor').replaceChildren();}),'danger');if(row.config.mode==='kiotproxy')action($('editor'),'Giải phóng Kiot key…',()=>guard(async()=>{const index=prompt('Số thứ tự key (bắt đầu từ 1). Chỉ giải phóng khi không có request sử dụng.');if(index===null)return;await api.request(`/api/service/proxies/${row.id}/release`,{method:'POST',body:{key_index:Number(index)-1}});notice('Đã giải phóng key được chọn.');}));}
 }
-for(const button of document.querySelectorAll('[data-nav]'))button.addEventListener('click',()=>{if(busy)return;const wasCodex=view==='codex-accounts';const requested=button.dataset.nav;view=requested==='oauth'?'codex-accounts':requested;selected=null;$('search').value='';if(view==='codex-accounts'){codex.open();$('codex-workspace').hidden=false;render();for(const other of document.querySelectorAll('[data-nav]'))other.classList.toggle('active',other===button);return;}codex.leave();$('editor').replaceChildren(node('p','Chọn bản ghi hoặc thêm mới.',{class:'muted'}));render();if(wasCodex)guard(load);if(view==='playground')edit();});
+const navIcons={overview:'activity',customers:'users',keys:'key',providers:'route',credentials:'key',models:'image',bindings:'route',proxies:'route',oauth:'upload',playground:'play',usage:'activity',audit:'activity',aliases:'route',budgets:'settings','codex-accounts':'codex'};
+document.querySelector('.cockpit-logo').replaceChildren(icon('codex'));
+for(const button of document.querySelectorAll('[data-nav]')){
+  button.textContent=button.dataset.nav==='codex-accounts'?'Codex':button.textContent.replace(/^\S+\s*/, '');decorate(button,navIcons[button.dataset.nav]);
+  button.addEventListener('click',()=>{
+    if(busy)return;
+    const wasCodex=view==='codex-accounts',requested=button.dataset.nav;
+    view=requested==='oauth'?'codex-accounts':requested;selected=null;$('search').value='';
+    if(view==='codex-accounts'){
+      codex.open().then(()=>{if(requested==='oauth'&&view==='codex-accounts')codex.showImport();});
+      $('codex-workspace').hidden=false;render();
+      for(const other of document.querySelectorAll('[data-nav]'))other.classList.toggle('active',other===button);
+      return;
+    }
+    codex.leave();$('editor').replaceChildren(node('p','Chọn bản ghi hoặc thêm mới.',{class:'muted'}));render();
+    // Codex publication has its own data cache. Build the required model
+    // selector only after fetching the current registry, including first entry.
+    if(wasCodex||view==='playground')guard(async()=>{
+      await load();
+      if(authenticated&&view==='playground')edit();
+    });
+  });
+}
 $('new-item').addEventListener('click',()=>edit());$('search').addEventListener('input',render);$('refresh').addEventListener('click',()=>guard(load));
 $('hide-secret').addEventListener('click',clearSecret);$('one-time-secret').addEventListener('cancel',clearSecret);$('copy-secret').addEventListener('click',()=>navigator.clipboard.writeText($('secret-value').value));
 $('logout').addEventListener('click',()=>guard(async()=>{try{await api.request('/api/session',{method:'DELETE'});}finally{api.clear();hideAll();}}));

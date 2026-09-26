@@ -27,8 +27,11 @@ async def test_status_is_private_storage_only_and_does_not_claim_running(pg_db, 
         assert result.json() == {"status": "configured", "base_url": "http://127.0.0.1:8788/v1",
             "accounts": {"total": 0, "active": 0, "reauth_required": 0, "refresh_uncertain": 0, "unverified": 0, "disabled": 0},
             "keys": {"total": 0, "enabled": 0},
-            "usage": {"requests": 0, "completed": 0, "failed": 0, "pending": 0,
-                      "input_tokens": "0", "cached_read": "0", "cached_write": "0", "output_tokens": "0", "charged_micro": "0"},
+                    "usage": {"requests": 0, "completed": 0, "failed": 0, "pending": 0,
+                              "unknown_usage_requests": 0, "unknown_detail_requests": 0,
+                              "input_tokens": "0", "cached_read": "0", "cached_write": "0", "output_tokens": "0",
+                              "reasoning": "0", "total_tokens": "0", "uncached_input_tokens": "0",
+                              "charged_micro": "0", "held_micro": "0"},
             "version": "codex-http-v2"}
         assert "no-store" in result.headers["cache-control"].split(", ")
         bad = await client.get(PATH + "?token=DO-NOT-ECHO")
@@ -99,7 +102,10 @@ async def test_status_sums_only_settled_serving_usage_with_exact_decimal_strings
         assert result.status_code == 200, result.text
         assert result.json()["usage"] == {"requests": 4, "completed": 2, "failed": 1, "pending": 1,
             "input_tokens": str(huge * 2), "cached_read": "6", "cached_write": "4", "output_tokens": "10",
-            "charged_micro": str((huge + 5) * 2)}
+                "reasoning": None, "total_tokens": str((huge + 5) * 2),
+                "uncached_input_tokens": str((huge - 5) * 2),
+                "unknown_usage_requests": 0, "unknown_detail_requests": 2,
+                "charged_micro": str((huge + 5) * 2), "held_micro": "100"}
 
 
 async def test_status_unknown_usage_and_ambiguous_legacy_serving_attempt_are_not_zero(pg_db, settings):
@@ -120,4 +126,5 @@ async def test_status_unknown_usage_and_ambiguous_legacy_serving_attempt_are_not
                 {"id": uuid4(), "request": request.request_id, "usage": json.dumps({"input_tokens": 5, "output_tokens": 2})})
         usage = (await client.get(PATH)).json()["usage"]
         assert usage["requests"] == 1 and usage["completed"] == 1
-        assert all(usage[name] is None for name in ("input_tokens", "cached_read", "cached_write", "output_tokens", "charged_micro"))
+        assert usage['unknown_usage_requests'] == 1
+        assert all(usage[name] == '0' for name in ("input_tokens", "cached_read", "cached_write", "output_tokens", "charged_micro"))

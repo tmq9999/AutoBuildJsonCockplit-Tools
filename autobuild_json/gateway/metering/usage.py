@@ -39,15 +39,18 @@ def normalize_provider_usage(payload: dict, provider: str) -> Usage:
     """
     if not isinstance(payload, dict):
         raise ValueError("invalid_usage")
+    cached_write = 0
     if provider == "openai_chat":
         input_tokens = _required(payload, "prompt_tokens")
         output_tokens = _required(payload, "completion_tokens")
         cached_read = _nested_optional(payload, "prompt_tokens_details", "cached_tokens")
+        cached_write = _nested_optional(payload, "prompt_tokens_details", "cache_write_tokens")
         reasoning = _nested_optional(payload, "completion_tokens_details", "reasoning_tokens")
     elif provider in {"openai_responses", "codex"}:
         input_tokens = _required(payload, "input_tokens")
         output_tokens = _required(payload, "output_tokens")
         cached_read = _nested_optional(payload, "input_tokens_details", "cached_tokens")
+        cached_write = _nested_optional(payload, "input_tokens_details", "cache_write_tokens")
         reasoning = _nested_optional(payload, "output_tokens_details", "reasoning_tokens")
     elif provider == "anthropic":
         uncached_input = _required(payload, "input_tokens")
@@ -65,4 +68,4 @@ def normalize_provider_usage(payload: dict, provider: str) -> Usage:
         cached_read = _optional(payload, "cachedContentTokenCount")
     else:
         raise ValueError("invalid_usage")
-    return Usage(input_tokens, output_tokens, cached_read=cached_read, reasoning=reasoning)
+    return Usage(input_tokens, output_tokens, cached_read=cached_read, cached_write=cached_write, reasoning=reasoning)

@@ -1,6 +1,9 @@
 import asyncio
+import hashlib
+import hmac
 from datetime import datetime, timedelta, timezone
 import json
+import time
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -157,3 +160,31 @@ class CredentialService:
         async with self.db.sessions.begin() as session:
             await session.execute(text("UPDATE credentials SET health='refresh_uncertain',refresh_owner=NULL WHERE id=:id"),
                                   {"id": credential_id})
+
+    async def expire_rejected_access(self, credential_id, token_digest, *, started_at=None):
+        """Fence expiry, cooldown and failure metadata to the rejected token."""
+        if not isinstance(token_digest, bytes) or len(token_digest) != 32:
+            return
+        async with self.db.sessions.begin() as session:
+            provider = await session.scalar(text('SELECT provider_id FROM credentials WHERE id=:id'),
+                                            {'id': credential_id})
+            if provider is None:
+                return
+            # Keep the provider -> credential -> account-state lock ordering.
+            await session.execute(text('SELECT id FROM providers WHERE id=:id FOR KEY SHARE'), {'id': provider})
+            row = (await session.execute(text("SELECT * FROM credentials WHERE id=:id AND issuer=:issuer "
+                                             "AND provider_id=:provider AND enabled FOR UPDATE"),
+                                         {"id": credential_id, "issuer": ISSUER, 'provider': provider})).mappings().first()
+            if row is None or row['health'] != 'active':
+                return
+            current = hashlib.sha256(self._tokens(row)['access_token'].encode()).digest()
+            if hmac.compare_digest(current, token_digest):
+                remaining = 60 if started_at is None else max(0, 60 - (time.monotonic() - started_at))
+                await session.execute(text("UPDATE credentials SET token_expires_at=clock_timestamp()-interval '1 second',"
+                    "cooldown_until=GREATEST(cooldown_until,clock_timestamp()+make_interval(secs=>:seconds)) WHERE id=:id"),
+                    {"id": credential_id, 'seconds': remaining})
+                await session.execute(text('INSERT INTO codex_account_state(credential_id) VALUES (:id) ON CONFLICT DO NOTHING'),
+                                      {'id': credential_id})
+                await session.execute(text("UPDATE codex_account_state SET last_attempt_at=clock_timestamp(),"
+                    "last_failure_at=clock_timestamp(),last_error='upstream_error',"
+                    "failure_count=LEAST(failure_count+1,2147483647) WHERE credential_id=:id"), {'id': credential_id})

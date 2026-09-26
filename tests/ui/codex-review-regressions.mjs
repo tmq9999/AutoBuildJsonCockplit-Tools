@@ -20,11 +20,23 @@ export async function codexReviewRegressions(context,base){
     await page.locator('#codex-pool-model').selectOption('vendor/model:v1');await page.locator('#codex-pool-form').waitFor();
   }
   async function savePool(page){assert(await page.locator('#codex-pool-save').isEnabled(),'Valid pool must be saveable');assert(await page.locator('#codex-pool-form').evaluate(f=>f.checkValidity()),'Pool form is valid');const response=page.waitForResponse(r=>r.request().method()==='PUT'&&decodeURIComponent(new URL(r.url()).pathname).endsWith(poolPath));await page.locator('#codex-pool-save').click();assert.equal((await response).status(),200);}
+  await scenario('dynamic full pool and eight-account limit persist through real admin API',async page=>{
+    await seedPool(page,{members:[]});await openPool(page,true);
+    await page.locator('#codex-pool-form [name="mode"]').selectOption('round_robin');
+    await page.locator('#codex-pool-form [name="all_accounts"]').check();
+    await page.locator('#codex-pool-form [name="retry_limit"]').selectOption('7');await savePool(page);
+    const saved=await get(page,poolPath);assert.equal(saved.policy.mode,'round_robin');assert.equal(saved.policy.all_accounts,true);assert.equal(saved.policy.retry_limit,7);assert.deepEqual(saved.policy.members,[]);
+    const oldForm=await page.locator('#codex-pool-form').elementHandle();await page.locator('#codex-pool-reload').click();
+    await page.waitForFunction(el=>!el.isConnected,oldForm);assert(await page.locator('#codex-pool-form [name="all_accounts"]').isChecked());
+    assert(!(await page.locator('#codex-pool').textContent()).includes('Request mới sẽ tạm dừng'));
+    await page.locator('#codex-pool-form [name="mode"]').selectOption('single');
+    assert(await page.locator('#codex-pool-form [name="all_accounts"]').isDisabled());assert(!await page.locator('#codex-pool-form [name="all_accounts"]').isChecked());assert(await page.locator('#codex-pool-save').isDisabled());
+  });
   await scenario('paging preserves a member outside the rendered controls',async page=>{
     const {items}=await get(page,'oauth-accounts');const before=await seedPool(page,{members:[{credential_id:items[0].id,priority:1,weight:2,backup:false},{credential_id:items[1].id,priority:7,weight:8,backup:true}]});
     await openPool(page,true);assert.equal(await page.locator('#codex-pool-form .codex-member').count(),1);
-    await page.getByRole('button',{name:'Thêm tài khoản đã lưu',exact:true}).click();await page.locator('#codex-list').getByRole('button',{name:items[1].email,exact:true}).waitFor();
-    await page.locator('#codex-pool-form [name="weight-0"]').fill('9');await savePool(page);const saved=await get(page,poolPath);
+    await page.locator('.codex-pagination[data-position="top"]').getByRole('button',{name:'Trang tiếp theo',exact:true}).click();await page.locator('#codex-list').getByRole('button',{name:items[1].email,exact:true}).waitFor();
+    await page.locator('#codex-pool-members summary').click();await page.locator('#codex-pool-form [name="weight-0"]').fill('9');await savePool(page);const saved=await get(page,poolPath);
     assert.deepEqual(saved.policy.members.find(m=>m.credential_id===items[1].id),before.policy.members[1],'Unrendered member must survive paging plus valid CAS save');
     assert.equal(saved.policy.members.find(m=>m.credential_id===items[0].id).weight,9);
   });
@@ -35,7 +47,7 @@ export async function codexReviewRegressions(context,base){
   });
   await scenario('off-page single selection stays valid after loading that account',async page=>{
     const {items}=await get(page,'oauth-accounts');await seedPool(page,{mode:'single',members:[{credential_id:items[1].id,priority:3,weight:4,backup:false}],single_credential_id:items[1].id});await openPool(page,true);
-    await page.getByRole('button',{name:'Thêm tài khoản đã lưu',exact:true}).click();await page.locator('#codex-list').getByRole('button',{name:items[1].email,exact:true}).waitFor();
+    await page.locator('.codex-pagination[data-position="top"]').getByRole('button',{name:'Trang tiếp theo',exact:true}).click();await page.locator('#codex-list').getByRole('button',{name:items[1].email,exact:true}).waitFor();
     await savePool(page);const saved=await get(page,poolPath);assert.equal(saved.policy.single_credential_id,items[1].id,'Existing off-page single ID must not become first account');assert.equal(saved.policy.members.length,1);
   });
   await scenario('real 409 reloads keys before a new explicitly confirmed grant',async page=>{
@@ -43,7 +55,7 @@ export async function codexReviewRegressions(context,base){
     // Another admin commits an audited zero grant, leaving this form's version stale.
     await put(page,`keys/${key.key_id}/quota-adjust`,'POST',{request_id:crypto.randomUUID(),version:key.version,amount_micro:'0',reason:'Synthetic concurrent admin'});
     await page.locator('#codex-grant-amount').fill('0');await page.locator('#codex-grant-reason').fill('Synthetic retry');await page.locator('#codex-grant-ack').check();
-    let keyReloaded=false;page.on('response',async response=>{if(response.url()===base+'/api/service/keys'&&response.status()===200){await response.finished();keyReloaded=true;}});
+    let keyReloaded=false;const observeReload=async response=>{if(response.url()===base+'/api/service/keys'&&response.status()===200){await response.finished();keyReloaded=true;page.off('response',observeReload);}};page.on('response',observeReload);
     const rejected=page.waitForResponse(r=>r.request().method()==='POST'&&r.url().endsWith('/quota-adjust'));await page.locator('#codex-grant-submit').click();assert.equal((await rejected).status(),409);
     await page.waitForFunction(()=>document.querySelector('#codex-message').textContent.includes('409'));
     assert(keyReloaded,'Definite rejection must finish authoritative key reload before reporting recovery');assert(await page.locator('#codex-grant-ack').isEnabled(),'Authoritative key reload must unlock a definite 409 rejection');

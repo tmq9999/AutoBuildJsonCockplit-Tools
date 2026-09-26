@@ -10,7 +10,8 @@ from pydantic import ValidationError
 from ..errors import GatewayError, UpstreamRejected
 from ..providers.retry import parse_retry_after
 from ..transport.http import OutboundRequest
-from .quota_records import CodexQuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditsSnapshot
+from .quota_records import AdditionalRateLimit, CodexQuotaSnapshot, QuotaWindow, ResetCredit, ResetCreditsSnapshot
+from .reserve import RESERVE_MODEL, is_reserve_name, normalize_limit_name
 
 ACCOUNT_ROOT = 'https://chatgpt.com/backend-api/wham'
 
@@ -70,6 +71,43 @@ def _window(data, now):
     return QuotaWindow(used_percent=percent, window_seconds=seconds, reset_at=reset)
 
 
+def _additional_limits(payload, received_at):
+    raw = _alias(payload, 'additional_rate_limits', 'additionalRateLimits')
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, dict)) or len(raw) > 100:
+        raise ValueError()
+    entries = raw.items() if isinstance(raw, dict) else ((None, item) for item in raw)
+    result, seen = [], set()
+    for key, entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError()
+        label = _alias(entry, 'limit_name', 'limitName')
+        feature = _alias(entry, 'metered_feature', 'meteredFeature')
+        names = [name for name in (key, label, entry.get('name'), feature) if name is not None]
+        if not names:
+            raise ValueError()
+        reserve = any(is_reserve_name(name) for name in names)
+        model = RESERVE_MODEL if reserve else normalize_limit_name(label or key or names[0])
+        if model in seen:
+            raise ValueError()
+        seen.add(model)
+        limits = _alias(entry, 'rate_limit', 'rateLimit')
+        if limits is None:
+            limits = {}
+        if not isinstance(limits, dict):
+            raise ValueError()
+        allowed = limits.get('allowed', entry.get('allowed'))
+        if 'allowed' in limits and 'allowed' in entry and (
+                type(limits['allowed']) is not type(entry['allowed']) or limits['allowed'] != entry['allowed']):
+            raise ValueError()
+        result.append(AdditionalRateLimit(model_id=model, limit_name=label or key or names[0],
+            metered_feature=feature, allowed=allowed, limit_reached=limits.get('limit_reached'),
+            primary=_window(limits.get('primary_window'), received_at),
+            secondary=_window(limits.get('secondary_window'), received_at)))
+    return tuple(result)
+
+
 def parse_usage(payload, credential_id, received_at):
     try:
         if not isinstance(payload, dict):
@@ -82,9 +120,16 @@ def parse_usage(payload, credential_id, received_at):
         allowed = limits.get('allowed')
         if allowed is not None and type(allowed) is not bool:
             raise ValueError()
+        upsell = payload.get('rate_limit_upsell')
+        if upsell is None:
+            upsell = {}
+        if not isinstance(upsell, dict):
+            raise ValueError()
         return CodexQuotaSnapshot(credential_id=credential_id, version=1, fetched_at=received_at,
             plan_type=payload.get('plan_type'), primary=_window(limits.get('primary_window'), received_at),
-            secondary=_window(limits.get('secondary_window'), received_at), limit_reached=limits.get('limit_reached'))
+            secondary=_window(limits.get('secondary_window'), received_at), limit_reached=limits.get('limit_reached'),
+            allowed=allowed, banner_type=upsell.get('banner_type'),
+            additional_rate_limits=_additional_limits(payload, received_at))
     except (ValueError, TypeError, OverflowError, ValidationError):
         raise GatewayError('codex_usage_unavailable', 502, 'quota') from None
 

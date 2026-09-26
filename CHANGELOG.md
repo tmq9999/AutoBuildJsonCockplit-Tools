@@ -5,6 +5,210 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ## [Unreleased] — 2026-09-24
 
+### Full gateway review repairs — 2026-09-26
+
+- Follow-up recovery/report review: maintenance no longer spends its bounded
+  recovery batch repeatedly revisiting usage-pending requests with no saved
+  provider usage; their holds remain pending. Saved usage remains recoverable.
+- Proxy cleanup attempts every lease even when one release fails, then reports
+  the first cleanup error without swallowing cancellation or timeout behavior.
+- Usage report rows and summaries now use the same request-admission window.
+  Request trend charts prefer `admitted_at` (with a legacy `started_at`
+  fallback), so OAuth refresh/proxy wait time cannot make a charged request
+  disappear from the selected report window.
+- Post-restart verification on 2026-09-27: 106 real history windows matched
+  summary/detail charges; a fresh Codex WebSocket request completed with
+  12 input / 7 output, 26 weighted tokens charged and zero held. The 14 old
+  pending requests were preserved without invented usage or refunds.
+
+- A Codex HTTP/WebSocket 401 expires only the access token actually rejected,
+  enabling refresh after cooldown without invalidating a concurrent newer token.
+  Turning off session affinity now also stops using existing header-based pins;
+  native continuations remain bound to their original account.
+- Responses JSON/SSE retain validated tools, tool choice and parallel-call
+  settings. Gemini/Ollama match repeated same-name tool results FIFO instead of
+  overwriting the first call; Gemini validates explicit result IDs.
+- Report account selectors use stable UUIDs across account pages, merge newly
+  visited accounts, and preserve the selection when submitting a saved report.
+- Token counting validates egress before dispatch and atomically completes its
+  zero-generation usage attempt with settlement. Provider create/update rejects
+  nonexistent proxy profiles under a lock that also fences concurrent deletion.
+- Image-only Codex bindings no longer implicitly advertise compact/WebSocket.
+  Invalid Ollama `/api/show` JSON/model types return a controlled 400.
+- Codex WebSocket `codex.rate_limits`, `codex.response.metadata` and
+  `responsesapi.websocket_timing` handshake/timing advisories are ignored at
+  the adapter boundary; the shared Responses parser remains strict and
+  terminal provider usage remains authoritative.
+- WebSocket upgrades inspect the first lifecycle frame before exposing the
+  stream to the engine. Typed pre-start model/authorization/rate-limit
+  rejections can fail over to the next eligible account; errors after
+  `response.created` remain non-replayed and usage-pending.
+- Public HTTP responses, including model catalogs and errors, are `no-store`.
+  Public/admin boundaries reject duplicate Origin headers; trusted proxy config
+  rejects wildcards, invalid hosts, noncanonical CIDRs and comma injection.
+- After restarting the existing local gateway, four real Codex calls through
+  Responses JSON/SSE, Gemini and Ollama completed: 541 input / 44 output tokens,
+  exactly 629 weighted tokens charged at input ×1 / output ×2, with zero holds.
+  Real Chromium verified the cross-page report selection, first-entry models,
+  Playground response and saved dashboard totals. Details and limitations:
+  [live verification](docs/live-verification-2026-09-26.md#full-gateway-review-follow-up).
+- Real WebSocket generation completed after reproducing and fixing the advisory
+  parser failures: 12 input / 7 output, exactly 26 weighted tokens charged,
+  zero held on its temporary key. Earlier failed diagnostics retain unknown
+  usage/holds on revoked temporary keys; their receipts are not fabricated.
+- Follow-up regression review fixed malformed image input and malformed Gemini
+  token-count payloads (safe 400/502), fenced token counting after a route is
+  disabled while dispatch waits, and shaped SQLAlchemy failures for each public
+  protocol instead of returning the wrong OpenAI envelope.
+- Final fresh regression suite: 1,779 Python tests and 55 Node tests passed;
+  Ruff, JavaScript syntax and diff checks passed (two dependency warnings remain).
+
+### Live thinking, usage and dashboard repair — 2026-09-26
+
+- Fixed account-filtered report summaries after cross-account retries: serving
+  usage/charge and current holds no longer leak into a rejected account's totals.
+  Verified against six real account histories in the running gateway.
+- Playground waits for the current model registry before constructing its form;
+  new publications appear on first entry. Added an explicitly opted-in real
+  Chromium verification (no upstream mocks, temporary keys revoked afterward).
+- Seven fresh real API/browser calls matched immutable PostgreSQL settlements:
+  113 tokens charged, zero held, 99,999,887 left on a 100-million-token key.
+- Reproduced live failures: Chat rejected `reasoning_effort`, Messages rejected
+  `thinking`, and the Codex stream parser rejected a real reasoning item with
+  `content: []` before reading terminal provider usage.
+- Accept the empty reasoning content envelope without exposing raw reasoning;
+  support Chat effort and Messages enabled/adaptive/disabled controls, retaining
+  native Anthropic intent while translating Codex effort explicitly.
+- Read cache-write usage when present. Share a server-side request/settlement
+  summary across dashboard and reports; input/output totals no longer depend
+  on log pagination or disappear because a rejected attempt has no usage.
+  Cached and reasoning subsets are never added to total tokens again.
+- Replace the invalid `test-model` playground default with published model,
+  wire API and thinking selectors. Display actual response usage and refresh
+  saved totals. Codex overview updates every ten seconds while visible.
+- Real HTTP evidence: Responses/Chat high, Responses SSE, Chat SSE, Messages
+  enabled/adaptive and private playground completed with provider usage matching
+  PostgreSQL settlement. Real `max` and `xhigh` requests succeeded. `ultra`
+  returned upstream HTTP 400 `invalid_value` for `reasoning.effort`; removed it
+  from Codex capabilities and added a safe explicit error instead of generic 502.
+- Three real 3,820-input-token cache probes returned cached=0; no cache-hit claim
+  is made. Earlier interrupted requests remain pending, excluded from known
+  token totals rather than silently refunded or assigned fabricated usage.
+
+### GPT-5.6 Reserve quota and routing — 2026-09-26
+
+- Added strict parsing and durable storage for `additional_rate_limits`, including
+  the upstream `gpt-reserve` entitlement and its independent primary/secondary
+  windows.
+- Account cards and detail views now show Reserve quota separately, preserve
+  unknown/stale state, and never render missing allowance as a full balance.
+- Published Reserve metadata is Luna-derived while requests retain the literal
+  `gpt-reserve` model ID. Routing requires all upstream Reserve predicates and
+  fails closed on missing, stale, mismatched or errored snapshots; it never
+  falls back to ordinary Luna/Astra or an account outside the configured pool.
+- Added 16 PostgreSQL integration tests plus parser, routing and browser UI
+  coverage for eligibility, aliases, allowlists, refresh persistence and
+  pinned-session revalidation.
+
+### GPT-6/GPT-5.6 model publication — 2026-09-26
+
+- Published `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`,
+  `gpt-5.6-luna` and `gpt-5.5`; each received 226 Codex OAuth bindings and an
+  explicit `round_robin/all_accounts` pool with retry limit 7.
+- Bounded live verification returned HTTP 200 and `MODEL_OK` for all seven
+  enabled text models: the six above plus `gpt-6-astra`. Temporary smoke key
+  and customer were revoked/disabled afterward.
+- `gpt-5.3-codex` remains disabled because the upstream explicitly rejected it;
+  reference catalog presence is not treated as account entitlement.
+
+### Full Codex account-pool rotation — 2026-09-26
+
+- Removed the diagnostic single-account routing behavior. Admin can explicitly
+  enable `all_accounts` so newly linked eligible OAuth credentials join the
+  model pool without editing the pool every time.
+- The catalog cursor rotates the starting account between requests. An unpinned
+  Codex request can try up to eight distinct accounts, matching the Cockpit
+  reference bound; sessions and continuations remain pinned to one account.
+- Only pre-generation `401`, `429`, model-entitlement rejections and fenced
+  refresh failures move to another account. Ambiguous 5xx/transport/started
+  streams are never replayed. Per-account proxy selection and one-time quota
+  settlement remain attached to each attempt.
+- Added binding/model cooldown persistence and full-pool rotation tests.
+- Local pool switched by versioned admin API to `round_robin`, `all_accounts=true`,
+  `retry_limit=7`; diagnostic single-account pin removed. Four live requests
+  completed on four distinct accounts (attempt counts 1/3/1/2). Exact ledger
+  settlement: 19/20/20/20 weighted tokens, once per request. Temporary keys
+  revoked and test customers disabled. 226 bindings are configured; only 51
+  accounts were active, 155 unverified and 20 refresh-uncertain at verification.
+
+### Live Codex verification and stream repair — 2026-09-26
+
+- Fixed a real false-502 failure: Codex can finish a complete item lifecycle
+  with `response.completed.output=[]`. Codex HTTP/WS parsers now retain the
+  streamed items and provider usage; generic Responses parsing stays strict.
+  Unclosed items, missing terminal events and conflicting nonempty output are
+  still rejected. No usage is invented when a stream fails.
+- Added safe `model_not_supported` / `provider_rejected` classification for
+  Codex HTTP 400 details without returning provider bodies or retrying other
+  accounts. Added Codex runtime Originator/User-Agent headers based on the
+  reference contract; these do not grant model access.
+- Live public `/v1/responses` verified over direct egress with one imported OAuth account and
+  `gpt-6-astra`: HTTP 200, `completed`, `OK`, input 10 / cached 0 / output 5.
+  Database confirms one completed serving attempt and 15,000,000 micro-units
+  settled (15 weighted tokens at factor 1). Temporary test keys were revoked.
+  Two earlier parser-failed diagnostic requests remain usage-pending because
+  their provider usage was not retained; no fabricated refund or settlement.
+- Local test setup publishes `gpt-6-astra` with an explicit dynamic all-account
+  pool; `gpt-5.3-codex` remains disabled after an explicit upstream model
+  rejection. This is not proof of entitlement for all 226 imported accounts.
+- Started the local deployment under a transient systemd user service
+  (`autobuild-local-gateway`) so it survives terminal closure; documented
+  graceful stop/restart. This does not enable startup after reboot.
+- Verification: 57 targeted Python tests passed, including synthetic HTTP
+  JSON/SSE, Chat compatibility, cached usage, rejection release/no-retry,
+  incomplete lifecycle and existing reasoning/generation-control regressions.
+  Final expanded runs: **1,466 gateway + 167 remaining Python tests passed**
+  (1,633 total; two dependency deprecation warnings), **49 Node UI tests**,
+  Ruff, compileall and diff-check passed. Synthetic WebSocket coverage includes
+  empty-terminal sequential turns with exact cached-token settlement.
+
+### Codex service UI rebuild — 2026-09-26
+
+- Added a durable server-side **Refresh quota all** job: full-account scope
+  independent of pagination/search, bounded concurrency, progress/error/skip
+  counts, explicit stop, idempotent request IDs, rate-limit stop, and recovery
+  fencing after worker interruption. Added opt-in automatic refresh in minutes
+  (off/2/5/10/15/custom 1–999), CAS-protected settings, PostgreSQL persistence,
+  and backup/restore handling that disables schedules after restore.
+- Added real server-side numbered pagination for OAuth accounts (`page`, `limit`,
+  `q`, `status`), with totals and bounded page controls (24/48/96 rows), direct
+  jump/first/last/previous/next navigation, and page-scoped snapshot reads. The
+  legacy cursor response remains supported for existing clients.
+- Replaced the accumulated dark/light CSS with a compact light admin surface.
+  Implemented the hierarchy from the local Cockpit reference's
+  `CodexApiServiceView.tsx` and `CodexApiServicePage.css`: Accounts title,
+  group switcher/floating tabs, service strip, and tab-specific panels.
+  This is independent DOM/CSS code, not a copied React/Tauri application.
+- Account cards retain full email and stored quota/reset-credit information.
+  Routing is the real versioned pool editor beside the cards, not cosmetic
+  settings. Batch OAuth import is now a dialog preserving drafts and FileList.
+- Client-key cards have compact quota summaries and expandable policy details.
+  Added in-tab key creation/editing/toggling/rotation/revocation and one-time
+  secret dialogs; quota grants retain existing exact arithmetic and CAS checks.
+- Models use a selectable catalog and separate capability/rule panels. Reports
+  include range presets, exact BigInt page summaries and an attempt trend chart.
+  Paginated totals are labelled as page-scoped; missing usage remains unknown.
+- Verification: **49 Node unit tests**, six PostgreSQL job tests (including a
+  1,000-account two-worker run), 12 account-admin tests, Codex browser/regression
+  suite (including
+  226-record batch import), gateway CRUD smoke and new five-tab desktop/mobile
+  layout/key-dialog smoke passed against temporary PostgreSQL. Some repeated
+  regression runs hit asynchronous Playwright route/element teardown races;
+  final runs passed. No live OAuth, reset, Kiot rotation or inference was run.
+- Not a claim of full Cockpit parity: no desktop Sidecar lifecycle controls,
+  fabricated service liveness, unsupported routing fields or estimated prices.
+  Backend transport limitations documented below remain unchanged.
+
 ### Codex transport parity — 2026-09-26
 
 - Hardened WebSocket handshake validation, safe per-turn error/stream-ID correlation,

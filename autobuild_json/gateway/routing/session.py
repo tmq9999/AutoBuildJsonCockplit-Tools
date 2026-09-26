@@ -49,7 +49,7 @@ async def select(engine, principal, request, meta):
     if not routes:
         raise GatewayError("invalid_state" if native else "upstream_unavailable", 400 if native else 503)
     pinned = native is not None
-    if meta.session_digest is not None:
+    if meta.session_digest is not None and (policy is None or policy.session_affinity):
         if not isinstance(engine.digest_key, bytes) or len(engine.digest_key) < 32:
             raise GatewayError("invalid_request")
         pools = PoolStore(engine.db, scope_key=hmac.digest(engine.digest_key, b"gateway-pool-scope-v1", hashlib.sha256))
@@ -64,7 +64,8 @@ async def select(engine, principal, request, meta):
             if not request.required_capabilities <= winner.capabilities:
                 raise GatewayError("unsupported_feature")
             routes, pinned = (winner,), True
-    return Selection(request, tuple(routes), scope, pinned, policy.retry_limit if policy else 1)
+    return Selection(request, tuple(routes), scope, pinned,
+                     policy.retry_limit if policy else (7 if routes[0].adapter == "codex_oauth" else 1))
 
 
 async def revalidate(engine, principal, request, selected, stamp=None):

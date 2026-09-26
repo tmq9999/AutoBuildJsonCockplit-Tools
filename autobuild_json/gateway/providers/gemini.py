@@ -105,6 +105,6 @@ class GeminiAdapter:
             if response.status != 200:
                 raise GatewayError("upstream_error", 502)
             payload = await response.read_json()
-            if type(payload.get("totalTokens")) is not int or payload["totalTokens"] < 0:
+            if not isinstance(payload, dict) or type(payload.get("totalTokens")) is not int or payload["totalTokens"] < 0:
                 raise GatewayError("upstream_error", 502)
             return payload["totalTokens"]

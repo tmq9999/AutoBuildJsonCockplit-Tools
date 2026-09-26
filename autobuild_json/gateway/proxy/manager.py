@@ -54,8 +54,17 @@ class ProxyManager:
         return current.proxy
 
     async def _cleanup(self, tokens):
+        failure = None
         for token in reversed(tokens):
-            await self.store.release(token)
+            try:
+                await self.store.release(token)
+            except Exception as exc:
+                # Try every slot even if one release fails. Report the first
+                # failure afterward; cancellation still respects our timeout.
+                if failure is None:
+                    failure = exc
+        if failure is not None:
+            raise failure
 
     @asynccontextmanager
     async def acquire(self, selection, owner, deadline):

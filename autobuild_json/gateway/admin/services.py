@@ -35,6 +35,8 @@ class AdminServices:
                                            self.profiles, self.transport, self.quota_store)
         from ..accounts.reset_credits import ResetCreditService
         self.codex_reset = ResetCreditService(self.codex_quota)
+        from ..accounts.quota_refresh_jobs import QuotaRefreshJobs
+        self.quota_refresh_jobs = QuotaRefreshJobs(self)
         from ..routing.pool_store import PoolStore
         self.pool_store = PoolStore(db, scope_key=hmac.digest(pepper, b"gateway-pool-scope-v1", hashlib.sha256))
         self.catalog_worker = None
@@ -93,6 +95,7 @@ class AdminServices:
         return asyncio.run_coroutine_threadsafe(self.profiles.load(identity), self._loop).result()
 
     async def close(self):
+        await self.quota_refresh_jobs.close()
         if self._loop:
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._thread.join(timeout=5)

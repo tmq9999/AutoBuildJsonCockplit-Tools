@@ -12,6 +12,7 @@ SAFE_CODES = frozenset({
     "codex_usage_unavailable", "codex_credits_unavailable", "codex_credits_stale", "codex_no_credits",
     "codex_reset_uncertain", "codex_refresh_failed", "codex_reset_applied", "codex_reset_not_applied",
     "image_accounts_required",
+    "model_not_supported", "provider_rejected", "unsupported_reasoning_effort",
 })
 SAFE_STAGES = frozenset({"auth", "policy", "storage", "quota", "proxy", "upstream", "stream", "request", "refresh"})
 
@@ -25,12 +26,16 @@ class GatewayError(Exception):
         super().__init__(self.code)
 
     def to_dict(self):
-        return {"error": {"code": self.code, "message": self.code, "stage": self.stage}}
+        message = ("Codex does not accept this reasoning effort. Use none, minimal, low, medium, high, xhigh or max."
+                   if self.code == 'unsupported_reasoning_effort' else self.code)
+        return {"error": {"code": self.code, "message": message, "stage": self.stage}}
 
 
 class UpstreamRejected(GatewayError):
-    def __init__(self, status, retry_after=None):
-        super().__init__("rate_limited" if status == 429 else "upstream_error",
+    def __init__(self, status, retry_after=None, code=None):
+        super().__init__(code or ("rate_limited" if status == 429 else "upstream_error"),
                          429 if status == 429 else 502, "upstream", retry_after if status == 429 else None)
         self.upstream_status = status
+        if self.code == 'unsupported_reasoning_effort':
+            self.status = 400
         self.safe_retry = status == 429

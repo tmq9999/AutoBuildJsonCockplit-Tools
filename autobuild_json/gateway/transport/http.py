@@ -52,7 +52,7 @@ class OutboundRequest:
                 or any(part in {".", ".."} for part in unquote(self.suffix).split("/"))
                 or any(ord(c) <= 32 for c in self.suffix)):
             raise ValueError("invalid_upstream_path")
-        allowed = {"accept", "content-type", "anthropic-version", "chatgpt-account-id", "originator"}
+        allowed = {"accept", "content-type", "anthropic-version", "chatgpt-account-id", "originator", "user-agent"}
         if self.kind == "discovery":
             from ..providers.discovery.pagination import SUFFIXES, valid_mode, validate_query
             mode = valid_mode(self.discovery_mode)

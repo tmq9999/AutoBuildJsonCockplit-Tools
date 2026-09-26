@@ -179,3 +179,24 @@ async def test_cleanup_timeout_or_cancel_joins_release_task(monkeypatch, cancel)
     release.set()
     await asyncio.sleep(0)
     assert was_closed, "release task survived its owner's cleanup boundary"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_attempts_every_lease_after_one_release_fails():
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+
+    class PartiallyBrokenStore(MemoryLeaseStore):
+        async def release(self, token):
+            if token.resource == "endpoint:failed":
+                raise OSError("synthetic release failure")
+            await super().release(token)
+
+    store = PartiallyBrokenStore()
+    manager = ProxyManager(store)
+    key = await store.claim("kiot:key", uuid4(), deadline())
+    endpoint = await store.claim("endpoint:failed", uuid4(), deadline())
+    with pytest.raises(OSError, match="synthetic release failure"):
+        await manager._cleanup([key, endpoint])
+    assert await store.claim("kiot:key", uuid4(), deadline()) is not None
+    assert await store.claim("endpoint:failed", uuid4(), deadline()) is None

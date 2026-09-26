@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from collections import deque
 import json
 from uuid import uuid4
 
@@ -43,9 +44,12 @@ class OllamaCodec:
                             "function": {"name": call["function"]["name"], "arguments": json.dumps(call["function"]["arguments"])}}
                             for call in message["tool_calls"]]
                         for call in message["tool_calls"]:
-                            names[call["function"]["name"]] = call["id"]
+                            names.setdefault(call["function"]["name"], deque()).append(call["id"])
                     if message.get("role") == "tool" and "tool_name" in message:
-                        message["tool_call_id"] = names[message.pop("tool_name")]
+                        queue = names.get(message.pop("tool_name"))
+                        if not queue:
+                            raise ValueError()
+                        message["tool_call_id"] = queue.popleft()
                     messages.append(message)
                 request = OpenAIChatCodec().decode({"model": body["model"], "messages": messages, "tools": body.get("tools", []),
                     "stream": body.get("stream", True), "max_tokens": opts.get("num_predict"), "temperature": opts.get("temperature"),

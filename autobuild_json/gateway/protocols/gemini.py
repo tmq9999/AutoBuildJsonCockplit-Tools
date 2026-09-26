@@ -1,4 +1,5 @@
 import json
+from collections import deque
 from uuid import uuid4
 
 from ..contracts import InferenceRequest, Message, Text, ToolCall, ToolResult, Tool, Reasoning, GenerationOptions
@@ -31,7 +32,7 @@ class GeminiCodec:
         if not isinstance(body, dict) or set(body)-{"contents", "systemInstruction", "tools", "generationConfig"}:
             raise GatewayError("unsupported_feature")
         try:
-            messages, names = [], {}
+            messages, names, call_names = [], {}, {}
             for item in body.get("contents", []):
                 if set(item)-{"role", "parts"}:
                     raise GatewayError("unsupported_feature")
@@ -44,11 +45,28 @@ class GeminiCodec:
                         if set(call)-{"name", "args", "id"}:
                             raise GatewayError("unsupported_feature")
                         identity = call.get("id") or "call_"+uuid4().hex
-                        names[call["name"]] = identity
+                        if identity in call_names:
+                            raise ValueError()
+                        call_names[identity] = call["name"]
+                        names.setdefault(call["name"], deque()).append(identity)
                         blocks.append(ToolCall(call_id=identity, name=call["name"], arguments=json.dumps(call["args"])))
                     elif set(part) == {"functionResponse"}:
                         result = part["functionResponse"]
-                        blocks.append(ToolResult(call_id=result.get("id") or names[result["name"]], content=json.dumps(result["response"])))
+                        if set(result)-{"id", "name", "response"}:
+                            raise GatewayError("unsupported_feature")
+                        name = result["name"]
+                        queue = names.get(name)
+                        identity = result.get("id")
+                        if identity is None:
+                            if not queue:
+                                raise ValueError()
+                            identity = queue.popleft()
+                        elif call_names.get(identity) != name or not queue:
+                            raise ValueError()
+                        else:
+                            queue.remove(identity)
+                        call_names.pop(identity)
+                        blocks.append(ToolResult(call_id=identity, content=json.dumps(result["response"])))
                     else:
                         raise GatewayError("unsupported_feature")
                 role = {"model": "assistant", "user": "user"}[item.get("role", "user")]

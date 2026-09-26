@@ -1,4 +1,5 @@
 from pathlib import Path
+import ipaddress
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -29,6 +30,19 @@ class ServiceSettings(BaseSettings):
             if parsed.scheme != "postgresql+psycopg" or not parsed.hostname or not parsed.path.strip("/"):
                 raise ValueError("A PostgreSQL psycopg URL is required")
         return value
+
+    @field_validator("trusted_proxy_ips")
+    @classmethod
+    def explicit_trusted_proxies(cls, values):
+        for value in values:
+            try:
+                network = (ipaddress.ip_network(value, strict=True) if "/" in value
+                           else ipaddress.ip_network(value))
+            except (TypeError, ValueError):
+                raise ValueError("Trusted proxies must be explicit IP addresses or CIDRs") from None
+            if network.prefixlen == 0:
+                raise ValueError("A wildcard trusted proxy network is forbidden")
+        return values
 
     @model_validator(mode="after")
     def enabled_config(self):

@@ -5,7 +5,9 @@
     "test:ui": "node --test tests/ui/*.test.mjs",
     "test:browser": "node tests/ui/browser-smoke.mjs",
     "test:gateway-browser": "node tests/ui/gateway-browser-smoke.mjs",
-    "test:codex-browser": "node tests/ui/codex-browser-smoke.mjs"
+    "test:codex-browser": "node tests/ui/codex-browser-smoke.mjs",
+    "test:codex-layout": "node tests/ui/codex-layout-smoke.mjs",
+    "test:codex-pagination": "node tests/ui/codex-pagination-smoke.mjs"
   },
   "devDependencies": {
     "playwright-core": "^1.63.0"

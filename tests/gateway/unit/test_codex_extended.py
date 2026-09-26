@@ -8,7 +8,9 @@ def test_codex_reference_catalog_exposes_client_metadata_without_entitling_accou
     astra = client_model("gpt-6-astra")
     assert astra["context_window"] == 256000
     assert astra["auto_compact_token_limit"] == 230400
-    assert astra["supported_reasoning_levels"][-1]["effort"] == "ultra"
+    # The live endpoint rejects ultra with invalid_value; max is the highest
+    # supported effort and must be advertised without silent downgrade.
+    assert astra["supported_reasoning_levels"][-1]["effort"] == "max"
 
 
 def test_images_codec_translates_generation_and_edit_inputs():

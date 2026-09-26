@@ -108,7 +108,8 @@ class BoundaryMiddleware:
         origin = headers.get(b"origin", b"").decode("latin1")
         expected_origin = scope.get("scheme", "http") + "://" + host
         mutation = scope["method"] not in {"GET", "HEAD", "OPTIONS"}
-        if (origin and origin != expected_origin) or (mutation and origin != expected_origin):
+        if (sum(key == b"origin" for key, _ in scope["headers"]) > 1
+                or (origin and origin != expected_origin) or (mutation and origin != expected_origin)):
             return await reject(403, "INVALID_ORIGIN")
         if scope.get("query_string") and not self._catalog_query(scope):
             return await reject(400, "QUERY_NOT_ALLOWED")
@@ -148,7 +149,7 @@ class BoundaryMiddleware:
             return False
         path = scope.get("path", "")
         if path == "/api/service/oauth-accounts":
-            allowed = {"limit", "after"}
+            allowed = {"limit", "after", "page", "q", "status"}
         elif path in {"/api/service/usage/accounts", "/api/service/usage/requests"}:
             allowed = {"credential_id", "model_id", "from", "to", "limit", "after"}
         elif path == "/api/service/catalog/sources":

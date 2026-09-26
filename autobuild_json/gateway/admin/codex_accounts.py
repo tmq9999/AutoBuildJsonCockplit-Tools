@@ -1,6 +1,7 @@
 """Private account views and explicit commands. GETs never contact providers."""
 import json
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 from uuid import UUID
 
 from fastapi import Query, Response
@@ -14,7 +15,8 @@ from ..providers.codex_capabilities import codex_runtime_capabilities
 from ..routing.records import ProviderConfig
 from ..settings import ServiceSettings
 from .codex_schemas import AccountUpdate, CodexProxyInput, PoolInput, QuotaAdjustInput, RefreshInput, ResetConsumeInput, ResetResolveInput
-from .usage import UsageReports, report_window
+from .codex_schemas import QuotaRefreshSettingsInput, QuotaRefreshRunInput
+from .usage import UsageReports, report_window, usage_summary
 
 
 class ServiceStatus:
@@ -54,30 +56,7 @@ class ServiceStatus:
                 count(*) FILTER (WHERE k.enabled AND k.revoked_at IS NULL AND c.enabled
                     AND (k.expires_at IS NULL OR k.expires_at>now())) AS enabled
                 FROM api_keys k JOIN customers c ON c.id=k.customer_id"""))).mappings().one())
-            usage = dict((await session.execute(text("""SELECT count(*) AS requests,
-                count(*) FILTER (WHERE state='completed') AS completed,
-                count(*) FILTER (WHERE state='released') AS failed,
-                count(*) FILTER (WHERE state IN ('reserved','dispatched','usage_pending')) AS pending
-                FROM requests"""))).mappings().one())
-            counters = ("input_tokens", "cached_read", "cached_write", "output_tokens")
-            # A completed request must have one serving attempt AND an
-            # immutable settlement. Rejected/retried/pending attempts cannot
-            # contribute. Missing legacy fields remain unknown, not zero.
-            sums = ",".join(f"CASE WHEN count(*)=0 THEN 0 WHEN count(usage->>'{name}')=count(*) "
-                            f"THEN sum((usage->>'{name}')::numeric) ELSE NULL END AS {name}" for name in counters)
-            totals = (await session.execute(text("""WITH settled AS (
-                SELECT CASE WHEN a.completed_count=1 AND l.id IS NOT NULL THEN a.usage ELSE NULL END AS usage,
-                    CASE WHEN a.completed_count=1 THEN l.amount_micro ELSE NULL END AS charged_micro
-                FROM requests r
-                LEFT JOIN LATERAL (SELECT x.usage,count(*) OVER () AS completed_count
-                    FROM attempts x WHERE x.request_id=r.id AND x.status='completed'
-                    ORDER BY x.started_at DESC,x.id DESC LIMIT 1) a ON true
-                LEFT JOIN usage_ledger l ON l.request_id=r.id AND l.entry_kind='settlement'
-                WHERE r.state='completed'
-            ) SELECT """ + sums + """,CASE WHEN count(*)=0 THEN 0
-                WHEN count(charged_micro)=count(*) THEN sum(charged_micro) ELSE NULL END AS charged_micro
-                FROM settled"""))).mappings().one()
-            usage.update({name: str(value) if value is not None else None for name, value in totals.items()})
+            usage = await usage_summary(session)
         return {"status": status, "base_url": base_url, "accounts": accounts, "keys": keys,
                 "usage": usage, "version": codex_runtime_capabilities()["version"]}
 
@@ -151,17 +130,34 @@ class AccountViews:
     def __init__(self, services):
         self.services, self.db = services, services.db
 
-    async def list(self, limit, after):
-        async with self.db.sessions() as session:
+    async def list(self, limit, after, *, page=None, search="", status=None):
+        # Keep the cursor contract for existing clients/batch operations. The
+        # admin grid uses numbered pages so it can jump directly across 1k+ rows.
+        if page is not None and after is not None:
+            raise GatewayError("invalid_request", 422)
+        predicate = """c.issuer=:issuer AND c.account_id IS NOT NULL AND c.account_id<>''
+            AND upstream.config->>'adapter'='codex_oauth' AND upstream.config->>'auth_mode'='oauth'
+            AND strpos(lower(COALESCE(c.email,'')),lower(:search))>0
+            AND (CAST(:status AS text) IS NULL
+                OR (:status='disabled' AND NOT c.enabled)
+                OR (:status<>'disabled' AND c.enabled AND c.health=:status))"""
+        params = {"issuer": ISSUER, "after": after, "limit": limit + 1,
+                  "search": search.strip(), "status": status}
+        async with self.db.sessions.begin() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            total = await session.scalar(text("""SELECT count(*) FROM credentials c
+                JOIN providers upstream ON upstream.id=c.provider_id WHERE """ + predicate), params)
+            total_pages = max(1, (total + limit - 1) // limit)
+            current_page = min(page, total_pages) if page is not None else None
+            params["offset"] = (current_page - 1) * limit if current_page else 0
             rows = (await session.execute(text("""SELECT c.id,c.email,c.enabled,c.health,c.profile_id,c.version,
                 a.usage_snapshot,p.name AS proxy_profile_name FROM credentials c
                 JOIN providers upstream ON upstream.id=c.provider_id
                 LEFT JOIN codex_account_state a ON a.credential_id=c.id
                 LEFT JOIN proxy_profiles p ON p.id=c.profile_id
-                WHERE c.issuer=:issuer AND c.account_id IS NOT NULL AND c.account_id<>''
-                AND upstream.config->>'adapter'='codex_oauth' AND upstream.config->>'auth_mode'='oauth'
-                AND (CAST(:after AS uuid) IS NULL OR c.id>CAST(:after AS uuid)) ORDER BY c.id LIMIT :limit"""),
-                {"issuer": ISSUER, "after": after, "limit": limit + 1})).mappings().all()
+                WHERE """ + predicate + """
+                AND (CAST(:after AS uuid) IS NULL OR c.id>CAST(:after AS uuid))
+                ORDER BY c.id LIMIT :limit OFFSET :offset"""), params)).mappings().all()
         # Full email is an operator-visible identity on this private,
         # authenticated projection; tokens and provider account IDs stay out.
         return {"items": [{"id": r["id"], "email": r["email"], "enabled": r["enabled"],
@@ -169,7 +165,8 @@ class AccountViews:
                            "plan_type": (r["usage_snapshot"] or {}).get("plan_type"),
                            "proxy_profile_id": r["profile_id"], "proxy_profile_name": r["proxy_profile_name"]}
                           for r in rows[:limit]],
-                "next_after": rows[limit - 1]["id"] if len(rows) > limit else None}
+                "next_after": rows[limit - 1]["id"] if len(rows) > limit else None,
+                "page": current_page, "page_size": limit, "total": total, "total_pages": total_pages}
 
     async def projection(self, identity, kind):
         async with self.db.sessions.begin() as session:
@@ -231,9 +228,48 @@ class AccountViews:
                  "proxy_profile_id": str(payload.proxy_profile_id) if payload.proxy_profile_id else None})
         return {"id": identity, "version": payload.version + 1}
 
+    async def refresh(self, identity):
+        services = self.services
+        pending = await services.quota_store.pending_refresh_reset(identity)
+        try:
+            await services.codex_quota.refresh(identity, datetime.now(timezone.utc) + timedelta(seconds=30))
+        except GatewayError as exc:
+            if exc.code != "codex_usage_unavailable":
+                raise
+        usage, credits = await self.projection(identity, "usage"), await self.projection(identity, "credits")
+        if pending and all(p["snapshot"] is not None and not p["stale"] and not p["last_error"] for p in (usage, credits)):
+            try:
+                operation_id, generation, status = pending
+                await services.quota_store.finish_reset(operation_id, generation, "succeeded", None, status)
+            except GatewayError as exc:
+                # Same receipt fence as individual refresh. Never consumes a
+                # reset credit or resolves an unknown operation automatically.
+                if exc.code not in {"claim_lost", "invalid_state"}:
+                    raise
+            credits = await self.projection(identity, "credits")
+        return {"usage_status": "failed" if usage["last_error"] or usage["snapshot"] is None else "updated",
+                "credits_status": "failed" if credits["last_error"] or credits["snapshot"] is None else "updated",
+                "usage": usage, "credits": credits}
+
 
 def mount_codex_routes(router, services):
     views, reports = AccountViews(services), UsageReports(services.db)
+
+    @router.get("/codex-service/quota-refresh")
+    async def quota_refresh_status():
+        return await services.quota_refresh_jobs.read()
+
+    @router.put("/codex-service/quota-refresh/settings")
+    async def quota_refresh_settings(payload: QuotaRefreshSettingsInput):
+        return await services.quota_refresh_jobs.configure(payload)
+
+    @router.post("/codex-service/quota-refresh", status_code=202)
+    async def quota_refresh_all(payload: QuotaRefreshRunInput):
+        return await services.quota_refresh_jobs.enqueue(payload.request_id)
+
+    @router.post("/codex-service/quota-refresh/stop")
+    async def quota_refresh_stop(payload: QuotaRefreshRunInput):
+        return await services.quota_refresh_jobs.stop(payload.request_id)
 
     @router.get("/codex-service/status")
     async def service_status():
@@ -248,8 +284,11 @@ def mount_codex_routes(router, services):
         return await CodexProxy(services).update(payload)
 
     @router.get("/oauth-accounts")
-    async def accounts(limit: int = Query(100, ge=1, le=200), after: UUID | None = None):
-        return await views.list(limit, after)
+    async def accounts(limit: int = Query(100, ge=1, le=200), after: UUID | None = None,
+                       page: int | None = Query(None, ge=1, le=1000000),
+                       q: str = Query("", max_length=320),
+                       status: Literal["active", "unverified", "reauth_required", "refresh_uncertain", "disabled"] | None = None):
+        return await views.list(limit, after, page=page, search=q, status=status)
 
     @router.patch("/oauth-accounts/{identity}")
     async def update(identity: UUID, payload: AccountUpdate):
@@ -265,28 +304,7 @@ def mount_codex_routes(router, services):
 
     @router.post("/oauth-accounts/{identity}/quota/refresh")
     async def refresh(identity: UUID, payload: RefreshInput):
-        pending = await services.quota_store.pending_refresh_reset(identity)
-        try:
-            await services.codex_quota.refresh(identity, datetime.now(timezone.utc) + timedelta(seconds=30))
-        except GatewayError as exc:
-            # The reviewed service persists both independent fetch outcomes
-            # before raising for missing usage. Return that partial truth.
-            if exc.code != "codex_usage_unavailable":
-                raise
-        usage, credits = await views.projection(identity, "usage"), await views.projection(identity, "credits")
-        if pending and all(p["snapshot"] is not None and not p["stale"] and not p["last_error"] for p in (usage, credits)):
-            try:
-                operation_id, generation, status = pending
-                await services.quota_store.finish_reset(operation_id, generation, "succeeded", None, status)
-            except GatewayError as exc:
-                # Another refresh/resolution or changed stamp won the fence.
-                # Never weaken it, retry a consume, or resolve an unknown here.
-                if exc.code not in {"claim_lost", "invalid_state"}:
-                    raise
-            credits = await views.projection(identity, "credits")
-        return {"usage_status": "failed" if usage["last_error"] else "updated",
-                "credits_status": "failed" if credits["last_error"] else "updated",
-                "usage": usage, "credits": credits}
+        return await views.refresh(identity)
 
     @router.post("/oauth-accounts/{identity}/reset-credits/consume")
     async def consume(identity: UUID, payload: ResetConsumeInput, response: Response):

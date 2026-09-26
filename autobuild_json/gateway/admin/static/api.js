@@ -42,7 +42,7 @@ export function createApi(fetcher=globalThis.fetch.bind(globalThis)) {
         if(generation!==epoch)throw new Error('STALE_SESSION');
         const data=response.status===204?null:await response.json();
         if(generation!==epoch)throw new Error('STALE_SESSION');
-        if(!response.ok){const error=new Error(typeof data?.error==='string'?data.error:data?.error?.code||'REQUEST_FAILED');error.status=response.status;throw error;}
+        if(!response.ok){const error=new Error(typeof data?.error==='string'?data.error:data?.error?.message||data?.error?.code||'REQUEST_FAILED');error.status=response.status;throw error;}
         return data;
       } finally {active.delete(controller);}
     }

@@ -14,7 +14,8 @@ def response_usage(usage):
         return None
     return {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
             "total_tokens": usage.input_tokens+usage.output_tokens,
-            "input_tokens_details": {"cached_tokens": usage.cached_read},
+            "input_tokens_details": {"cached_tokens": usage.cached_read,
+                                     **({"cache_write_tokens": usage.cached_write} if usage.cached_write else {})},
             "output_tokens_details": {"reasoning_tokens": usage.reasoning}}
 
 
@@ -44,12 +45,20 @@ def output_item(block, item_id, status="completed"):
 
 def reasoning_item(item):
     """Read only published summaries and opaque replay data, never raw content."""
-    if not isinstance(item, dict) or set(item)-{"type", "id", "summary", "encrypted_content", "status"} or item.get("type") != "reasoning":
+    # Live Codex reasoning items include an empty `content` array alongside
+    # the public summary and opaque encrypted replay data.
+    if not isinstance(item, dict) or set(item)-{"type", "id", "summary", "encrypted_content", "status", "content"} or item.get("type") != "reasoning":
         raise GatewayError("unsupported_feature")
     summary = item.get("summary", [])
     if not isinstance(summary, list) or any(not isinstance(part, dict) or set(part) != {"type", "text"}
         or part["type"] != "summary_text" for part in summary):
         raise ValueError("invalid_reasoning_summary")
+    content = item.get("content", [])
+    # The live Codex item includes this field but currently leaves it empty.
+    # Non-empty raw reasoning is intentionally rejected: it is not a portable
+    # public summary and must never be persisted or exposed by another wire API.
+    if content != []:
+        raise ValueError("invalid_reasoning_content")
     return Reasoning(id=item["id"], summary=tuple(part["text"] for part in summary),
                      encrypted_content=item.get("encrypted_content"), status=item.get("status"))
 
@@ -60,6 +69,9 @@ class ResponsesCodec:
         self.created = int(time.time())
         self.sequence = 0
         self.collector = EventCollector(self.response_id, model)
+        self.response_tools = []
+        self.response_tool_choice = "auto"
+        self.response_parallel_tool_calls = True
 
     def decode(self, body, options):
         allowed = {"model", "input", "instructions", "tools", "tool_choice", "max_output_tokens", "temperature",
@@ -135,6 +147,13 @@ class ResponsesCodec:
                     prompt_cache_key=body.get("prompt_cache_key")))
             self.model = request.model
             self.collector = EventCollector(self.response_id, self.model)
+            self.response_tools = [dict(type="function", **tool.model_dump(exclude_none=True))
+                                   for tool in request.tools]
+            if request.image_tool is not None:
+                self.response_tools.append(request.image_tool.model_dump(exclude_none=True))
+            self.response_tool_choice = request.options.tool_choice
+            if request.options.parallel_tool_calls is not None:
+                self.response_parallel_tool_calls = request.options.parallel_tool_calls
             return request
         except GatewayError:
             raise
@@ -194,7 +213,9 @@ class ResponsesCodec:
     def _base(self, status):
         return {"id": self.response_id, "object": "response", "created_at": self.created, "status": status,
                 "model": self.model, "output": [], "error": None, "incomplete_details": None,
-                "parallel_tool_calls": True, "tool_choice": "auto", "tools": [], "usage": None}
+                "parallel_tool_calls": self.response_parallel_tool_calls,
+                "tool_choice": self.response_tool_choice,
+                "tools": [dict(tool) for tool in self.response_tools], "usage": None}
 
     def encode_result(self, result):
         value = self._base("incomplete" if result.finish_reason == "length" else "completed")
@@ -290,7 +311,10 @@ def image_source(value):
         except ValueError:
             raise GatewayError("invalid_request") from None
         return value
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        raise GatewayError("invalid_request") from None
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or any(ord(c) < 33 for c in value):
         raise GatewayError("invalid_request")
     return value

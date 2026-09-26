@@ -43,6 +43,16 @@ class QuotaWindow(_Record):
         return _aware(value) if value else None
 
 
+class AdditionalRateLimit(_Record):
+    model_id: str = Field(min_length=1, max_length=200)
+    limit_name: str = Field(min_length=1, max_length=200)
+    metered_feature: str | None = Field(default=None, max_length=200)
+    allowed: bool | None = None
+    limit_reached: bool | None = None
+    primary: QuotaWindow | None = None
+    secondary: QuotaWindow | None = None
+
+
 class CodexQuotaSnapshot(_Record):
     credential_id: UUID
     version: int = Field(ge=1)
@@ -50,6 +60,9 @@ class CodexQuotaSnapshot(_Record):
     primary: QuotaWindow | None = None
     secondary: QuotaWindow | None = None
     limit_reached: bool | None = None
+    allowed: bool | None = None
+    banner_type: str | None = Field(default=None, max_length=200)
+    additional_rate_limits: tuple[AdditionalRateLimit, ...] = Field(default_factory=tuple, max_length=100)
     fetched_at: AwareDatetime
     last_error: str | None = Field(default=None, max_length=200)
 

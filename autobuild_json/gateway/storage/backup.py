@@ -19,7 +19,7 @@ TABLES = ("customers", "api_keys", "audit_events", "providers", "config_versions
           "continuation_handles", "provider_admissions", "catalog_sources", "provider_operations",
           "provider_operation_claims", "catalog_entries", "catalog_decisions", "catalog_publications")
 TABLES = TABLES + ("codex_account_state", "codex_reset_requests", "account_pool_policies",
-                   "account_session_bindings", "key_quota_adjustments")
+                   "account_session_bindings", "key_quota_adjustments", "codex_quota_refresh_settings", "codex_quota_refresh_runs")
 MAX_BACKUP = 64*1024*1024
 
 
@@ -108,6 +108,10 @@ class BackupService:
             # Restoring a snapshot cannot resurrect a worker lease or replay a
             # potentially submitted redemption. Preserve unknown active locks.
             await session.execute(text("UPDATE codex_account_state SET generation=generation+1,refresh_deadline=NULL"))
+            # Restore never starts background provider work without a new opt-in.
+            await session.execute(text("UPDATE codex_quota_refresh_settings SET interval_minutes=0,next_run_at=NULL,version=version+1"))
+            await session.execute(text("UPDATE codex_quota_refresh_runs SET state='interrupted',result_code='backup_restored',"
+                "finished_at=clock_timestamp() WHERE state IN ('queued','running')"))
             rows = (await session.execute(text("""UPDATE codex_reset_requests SET
                 state=CASE WHEN state='prepared' THEN 'rejected' WHEN state='dispatched' THEN 'unknown' ELSE state END,
                 result_code=CASE WHEN state='prepared' THEN 'operation_expired'

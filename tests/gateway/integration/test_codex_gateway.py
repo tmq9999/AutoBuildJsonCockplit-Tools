@@ -39,7 +39,8 @@ async def test_codex_route_uses_account_tokens_and_normalizes_generation_control
         assert outbound["headers"]["authorization"] == "Bearer verified-access"
         assert outbound["headers"]["chatgpt-account-id"] == "account-test"
         assert outbound["headers"]["accept"] == "text/event-stream"
-        assert "originator" not in outbound["headers"]
+        assert outbound["headers"]["originator"] == "codex-tui"
+        assert outbound["headers"]["user-agent"].startswith("codex-tui/")
         assert not set(outbound["body"]) & {"max_output_tokens", "temperature", "top_p"}
         async with pg_db.sessions() as session:
             assert await session.scalar(text("SELECT output_bound FROM requests")) == 500

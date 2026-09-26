@@ -18,8 +18,9 @@ def normalize_responses_usage(payload):
 class ResponsesEvents:
     """Validate provider item/summary lifecycles before publishing events."""
 
-    def __init__(self):
+    def __init__(self, *, allow_empty_terminal_output=False):
         self.collector = EventCollector("", "")
+        self.allow_empty_terminal_output = allow_empty_terminal_output
         self.calls = False
         self.summary_text_done = set()
 
@@ -120,7 +121,13 @@ class ResponsesEvents:
             if "output" in payload:
                 output = payload["output"]
                 ordered = sorted(self.collector.blocks, key=lambda identity: self.collector.blocks[identity][0])
-                if not isinstance(output, list) or [item["id"] for item in output] != ordered:
+                # Codex sometimes emits an empty terminal ``output`` array
+                # after the item lifecycle has already delivered
+                # ``response.output_item.done``.  The lifecycle is the
+                # authoritative stream in that case; rejecting it turns a
+                # successful upstream response into a false 502.
+                streamed_only = self.allow_empty_terminal_output and output == []
+                if not isinstance(output, list) or (not streamed_only and [item["id"] for item in output] != ordered):
                     raise ValueError("invalid_terminal_output")
                 for item in output:
                     block = self.collector.blocks[item["id"]][1]
@@ -147,8 +154,9 @@ class ResponsesEvents:
         return events
 
 
-async def responses_events(response, *, images=False):
-    decoder, parser = SSEDecoder(max_frame_bytes=40_000_000 if images else 1_048_576), ResponsesEvents()
+async def responses_events(response, *, images=False, allow_empty_terminal_output=False):
+    decoder = SSEDecoder(max_frame_bytes=40_000_000 if images else 1_048_576)
+    parser = ResponsesEvents(allow_empty_terminal_output=allow_empty_terminal_output)
     try:
         async for chunk in response.chunks():
             for _, data in decoder.feed(chunk):

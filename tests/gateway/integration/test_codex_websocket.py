@@ -29,9 +29,13 @@ def upstream_events():
 
 
 @pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
-async def test_websocket_handshake_sequential_turns_and_cached_ledger(pg_db, path):
+@pytest.mark.parametrize("empty_terminal", [False, True])
+async def test_websocket_handshake_sequential_turns_and_cached_ledger(pg_db, path, empty_terminal):
     async with codex_environment(pg_db) as env:
-        adapter = SocketTransport(upstream_events())
+        events = upstream_events()
+        if empty_terminal:
+            events[-1]["response"]["output"] = []
+        adapter = SocketTransport(events)
         env.engine.transport.adapter = adapter
         async with asgi_socket(env.app, path=path, headers=headers(env)) as socket:
             assert (await socket.receive())["type"] == "websocket.accept"

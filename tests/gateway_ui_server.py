@@ -118,9 +118,11 @@ def main():
                     fail_reads -= 1
                     return httpx.Response(500, text='SYNTHETIC-SECRET-ERROR')
                 if request.url.path.endswith('/usage'):
-                    return httpx.Response(200, json={'plan_type':'plan-synthetic','rate_limit':{
+                    return httpx.Response(200, json={'plan_type':'plan-synthetic','rate_limit':{'allowed':True,
                         'primary_window':{'used_percent':42, 'limit_window_seconds':18000, 'reset_after_seconds':3600},
-                        'secondary_window':{'used_percent':18, 'limit_window_seconds':604800}}})
+                        'secondary_window':{'used_percent':18, 'limit_window_seconds':604800}},
+                        'additional_rate_limits':[{'limit_name':'gpt-reserve','rate_limit':{'allowed':True,
+                            'primary_window':{'used_percent':25,'limit_window_seconds':18000,'reset_after_seconds':7200}}}]})
                 return httpx.Response(200, json={'available_count':2-reset_count,'credits':[
                     {'id':'SYNTHETIC-CREDIT-ID','state':'available'}]})
             if request.url.path.endswith("/models"):

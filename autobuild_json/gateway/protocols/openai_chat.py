@@ -11,7 +11,8 @@ def usage_dict(usage):
         return None
     return {"prompt_tokens": usage.input_tokens, "completion_tokens": usage.output_tokens,
             "total_tokens": usage.input_tokens+usage.output_tokens,
-            "prompt_tokens_details": {"cached_tokens": usage.cached_read},
+            "prompt_tokens_details": {"cached_tokens": usage.cached_read,
+                                      **({"cache_write_tokens": usage.cached_write} if usage.cached_write else {})},
             "completion_tokens_details": {"reasoning_tokens": usage.reasoning}}
 
 
@@ -28,7 +29,8 @@ class OpenAIChatCodec:
 
     def decode(self, body, options):
         allowed = {"model", "messages", "tools", "tool_choice", "max_tokens", "max_completion_tokens",
-                   "temperature", "top_p", "stop", "stream", "stream_options", "n", "parallel_tool_calls"}
+                   "temperature", "top_p", "stop", "stream", "stream_options", "n", "parallel_tool_calls",
+                   "reasoning_effort"}
         if not isinstance(body, dict) or set(body)-allowed or body.get("n", 1) != 1:
             raise GatewayError("unsupported_feature")
         try:
@@ -72,11 +74,15 @@ class OpenAIChatCodec:
             if set(stream_options)-{"include_usage"}:
                 raise GatewayError("unsupported_feature")
             self.include_usage = stream_options.get("include_usage", False)
+            effort = body.get("reasoning_effort")
+            if effort is not None and (not isinstance(effort, str) or effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}):
+                raise ValueError()
             result = InferenceRequest(model=body["model"], messages=tuple(messages), tools=tuple(tools),
                 stream=body.get("stream", False), options=GenerationOptions(
                     max_output_tokens=body.get("max_completion_tokens", body.get("max_tokens")),
                     temperature=body.get("temperature"), top_p=body.get("top_p"), stop=stop,
-                    tool_choice=body.get("tool_choice", "auto"), parallel_tool_calls=body.get("parallel_tool_calls")))
+                    tool_choice=body.get("tool_choice", "auto"), parallel_tool_calls=body.get("parallel_tool_calls"),
+                    reasoning={"effort": effort, "summary": "auto"} if effort is not None else None))
             self.model = result.model
             return result
         except GatewayError:
@@ -86,7 +92,7 @@ class OpenAIChatCodec:
 
     def upstream_body(self, request, model):
         from .responses_options import reject_native_options
-        reject_native_options(request)
+        reject_native_options(request, allow_effort=True)
         messages = []
         if request.continuation:
             raise GatewayError("unsupported_feature")
@@ -113,6 +119,8 @@ class OpenAIChatCodec:
                 result["tool_calls"] = calls
             messages.append(result)
         body = {"model": model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}}
+        if request.options.reasoning is not None and request.options.reasoning.effort is not None:
+            body['reasoning_effort'] = request.options.reasoning.effort
         if request.tools:
             body["tools"] = [{"type": "function", "function": tool.model_dump(exclude_none=True)} for tool in request.tools]
             body["tool_choice"] = request.options.tool_choice

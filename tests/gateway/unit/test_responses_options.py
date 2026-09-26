@@ -46,7 +46,15 @@ def test_native_options_are_not_silently_dropped_on_other_upstream_codecs(extra)
     from autobuild_json.gateway.protocols.gemini import GeminiCodec
     from autobuild_json.gateway.protocols.ollama import OllamaCodec
     request = ResponsesCodec().decode({"model": "m", "input": "hi", **extra}, {})
-    for codec in (OpenAIChatCodec(), AnthropicCodec(), GeminiCodec(), OllamaCodec()):
+    # Chat has a native reasoning_effort field and deliberately translates the
+    # portable Responses effort. Other wires do not support these Responses
+    # options and must reject instead of silently dropping them.
+    if set(extra) == {"reasoning"}:
+        assert OpenAIChatCodec().upstream_body(request, "actual")["reasoning_effort"] == "low"
+        codecs = (AnthropicCodec(), GeminiCodec(), OllamaCodec())
+    else:
+        codecs = (OpenAIChatCodec(), AnthropicCodec(), GeminiCodec(), OllamaCodec())
+    for codec in codecs:
         with pytest.raises(GatewayError, match="unsupported_feature"):
             codec.upstream_body(request, "actual")
 

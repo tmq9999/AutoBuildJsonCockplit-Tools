@@ -108,6 +108,18 @@ class ReasoningOptions(StrictRecord):
     context: Literal["current_turn", "all_turns"] | None = None
 
 
+class ThinkingOptions(StrictRecord):
+    """Keep the original Messages intent for native Anthropic forwarding."""
+    type: Literal["enabled", "disabled", "adaptive"]
+    budget_tokens: int | None = Field(default=None, strict=True, ge=1024, le=1_000_000)
+
+    @model_validator(mode="after")
+    def valid_budget(self):
+        if (self.type == "enabled") != (self.budget_tokens is not None):
+            raise ValueError("invalid_thinking_budget")
+        return self
+
+
 class Opaque(StrictRecord):
     type: Literal["opaque"] = "opaque"
     provider: str
@@ -137,6 +149,8 @@ class GenerationOptions(StrictRecord):
     tool_choice: Literal["auto", "none", "required"] = "auto"
     parallel_tool_calls: bool | None = None
     reasoning: ReasoningOptions | None = None
+    thinking: ThinkingOptions | None = None
+    thinking_effort: Literal["low", "medium", "high", "max"] | None = None
     include: tuple[Literal["reasoning.encrypted_content"], ...] = Field(default=(), max_length=1)
     text: dict | None = Field(default=None, repr=False)
     prompt_cache_key: str | None = Field(default=None, min_length=1, max_length=512, repr=False)

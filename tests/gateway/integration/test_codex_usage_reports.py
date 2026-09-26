@@ -48,6 +48,38 @@ async def test_retry_reports_charge_only_serving_account_and_keep_legacy_unknown
         filtered = await client.get("/api/service/usage/requests", params={"credential_id": str(second), "model_id": "m", "limit": 1})
         assert filtered.status_code == 200 and len(filtered.json()["items"]) == 1
         assert filtered.json()["items"][0]["id"] == str(completed)
+        assert filtered.json()["summary"]["charged_micro"] == "1085"
+        for endpoint in ("requests", "accounts"):
+            rejected_report = (await client.get("/api/service/usage/" + endpoint,
+                params={"credential_id": str(first)})).json()
+            summary = rejected_report["summary"]
+            assert summary["charged_micro"] == "0"
+            assert summary["total_tokens"] == "0"
+            assert summary["completed"] == 0
+            assert summary["failed"] == 1
+            assert summary["unknown_usage_requests"] == 0
+
+
+async def test_account_summary_holds_belong_only_to_current_attempt(pg_db, settings):
+    ledger, admission, _, _ = await ledger_case(pg_db, total_micro=10000)
+    async with private_env(pg_db, settings) as (client, services):
+        first, second = await account(services, "first"), await account(services, "second")
+        request, rejected, pending = admission(200), uuid4(), uuid4()
+        await ledger.reserve(request)
+        await ledger.mark_dispatched(request.request_id, rejected)
+        await ledger.mark_rejected(request.request_id, rejected, "rejected_before_generation")
+        await ledger.mark_dispatched(request.request_id, pending)
+        await ledger.mark_pending(request.request_id, "usage_missing")
+        async with pg_db.sessions.begin() as session:
+            for attempt, credential in ((rejected, first), (pending, second)):
+                await session.execute(text("UPDATE attempts SET credential_id=:credential WHERE id=:id"),
+                                      {"credential": credential, "id": attempt})
+        for credential, held, failed, waiting in ((first, "0", 1, 0), (second, "200", 0, 1)):
+            result = (await client.get("/api/service/usage/requests",
+                params={"credential_id": str(credential)})).json()
+            assert result["summary"]["held_micro"] == held
+            assert result["summary"]["failed"] == failed
+            assert result["summary"]["pending"] == waiting
 
 
 async def test_report_filters_are_bounded_and_aggregate_counts_are_exact(pg_db, settings):
@@ -161,3 +193,40 @@ async def test_attempt_computed_quota_and_money_are_separate_from_settlement(pg_
         account_row = (await client.get("/api/service/usage/accounts")).json()["items"][0]
         assert account_row["computed_micro"] == "215" and account_row["charged_micro"] == "0"
         assert account_row["upstream_costs"] == [{"currency":"EUR","amount":"0.001000000001"}]
+
+
+@pytest.mark.parametrize("endpoint", ["requests", "accounts"])
+@pytest.mark.parametrize("includes_admission", [False, True])
+async def test_report_rows_and_summary_share_admission_window(pg_db, settings, endpoint, includes_admission):
+    from autobuild_json.gateway.metering.records import Bounds
+
+    ledger, admission, _, _ = await ledger_case(pg_db)
+    async with private_env(pg_db, settings) as (client, services):
+        credential = await account(services)
+        request = replace(admission(100), bounds=Bounds(100, 20))
+        attempt = uuid4()
+        await ledger.reserve(request)
+        await ledger.mark_dispatched(request.request_id, attempt)
+        await ledger.settle(request.request_id, Usage(10, 5), attempt_id=attempt)
+        now = datetime.now(timezone.utc)
+        async with pg_db.sessions.begin() as session:
+            await session.execute(text("UPDATE requests SET admitted_at=:at WHERE id=:id"),
+                                  {"id": request.request_id, "at": now-timedelta(minutes=2)})
+            # Dispatch can cross the reporting boundary while waiting for a
+            # proxy, OAuth refresh or a provider slot.
+            await session.execute(text("UPDATE attempts SET started_at=:at,credential_id=:credential WHERE id=:id"),
+                {"id": attempt, "at": now-timedelta(minutes=1), "credential": credential})
+        boundary = now-timedelta(seconds=90)
+        params = {"credential_id": str(credential),
+                  "from": (now-timedelta(minutes=3) if includes_admission else boundary).isoformat(),
+                  "to": (boundary if includes_admission else now).isoformat()}
+        response = await client.get("/api/service/usage/"+endpoint, params=params)
+        assert response.status_code == 200
+        report = response.json()
+        assert report["summary"]["requests"] == int(includes_admission)
+        assert report["summary"]["charged_micro"] == ("15" if includes_admission else "0")
+        assert len(report["items"]) == int(includes_admission)
+        assert sum(int(row["charged_micro"]) for row in report["items"]) == (15 if includes_admission else 0)
+        if includes_admission and endpoint == "requests":
+            assert datetime.fromisoformat(report["items"][0]["admitted_at"]) == now-timedelta(minutes=2)
+            assert datetime.fromisoformat(report["items"][0]["started_at"]) == now-timedelta(minutes=1)

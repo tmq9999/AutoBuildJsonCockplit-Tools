@@ -43,7 +43,7 @@ def test_no_policy_preserves_catalog_order_and_does_not_invent_authorization():
     assert ordered(policy(a), ()) == []
 
 
-def test_auto_uses_minimum_remaining_then_plan_then_optional_expiry_then_uuid():
+def test_auto_uses_minimum_remaining_then_plan_then_expiry_then_rotating_catalog_order():
     a, b, c, unknown = candidate(1, "20"), candidate(2, "30"), candidate(3, "30"), candidate(4)
     a = a.model_copy(update={"quota": a.quota.model_copy(update={
         "secondary": QuotaWindow(used_percent=Decimal("95"))})})
@@ -52,7 +52,7 @@ def test_auto_uses_minimum_remaining_then_plan_then_optional_expiry_then_uuid():
     config = policy(a, b, c, unknown, plan_order=("pro", "plus"))
     assert ordered(config, (unknown, a, b, c)) == [3, 2, 1, 4]
     a, b = candidate(1, "20"), candidate(2, "20", subscription_expires_at=NOW + timedelta(days=1))
-    assert ordered(policy(a, b), (b, a)) == [1, 2]
+    assert ordered(policy(a, b), (b, a)) == [2, 1]
     assert ordered(policy(a, b, prefer_expiring=True), (a, b)) == [2, 1]
 
 
@@ -177,7 +177,19 @@ def test_duplicate_members_and_retry_budget_rejected():
     with pytest.raises(ValidationError):
         AccountPoolPolicy(members=(member, member))
     with pytest.raises(ValidationError):
-        AccountPoolPolicy(mode="random", members=(), retry_limit=2)
+        AccountPoolPolicy(mode="random", members=(), retry_limit=8)
+
+
+def test_all_accounts_is_explicit_dynamic_and_does_not_unpause_empty_manual_pool():
+    items = tuple(candidate(n) for n in range(1, 1001))
+    assert ordered(AccountPoolPolicy(), items) == []
+    config = AccountPoolPolicy(mode="round_robin", all_accounts=True)
+    assert ordered(config, items) == list(range(1, 1001))
+    assert ordered(config, items[225:] + items[:225]) == list(range(226, 1001)) + list(range(1, 226))
+    assert ordered(config, (candidate(1001),)) == [1001]
+    with pytest.raises(ValidationError):
+        AccountPoolPolicy(mode="single", all_accounts=True, members=(PoolMember(credential_id=items[0].route.credential_id),),
+                          single_credential_id=items[0].route.credential_id)
 
 
 @pytest.mark.parametrize("bad", ["a\nb", "a\x00b", "a\x7fb", "a\u200bb"])
