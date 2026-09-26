@@ -6,13 +6,13 @@ from pydantic import ValidationError
 from autobuild_json.gateway.identity.policy import KeyPolicy
 
 
-def test_capabilities_are_fixed_and_caller_mutation_cannot_enable_transports():
+def test_capabilities_are_fixed_and_caller_mutation_cannot_disable_transports():
     module = importlib.import_module('autobuild_json.gateway.providers.codex_capabilities')
     value = module.codex_capabilities()
-    assert value == {'version': 'codex-http-v1', 'chat': True, 'responses': True,
-                     'text': True, 'tools': True, 'compact': False, 'images': False, 'websocket': False}
-    value['websocket'] = True
-    assert module.codex_capabilities()['websocket'] is False
+    assert value['version'] == 'codex-http-v2'
+    assert value['compact'] is True and value['images'] is True and value['websocket'] is True
+    value['websocket'] = False
+    assert module.codex_capabilities()['websocket'] is True
 
 
 def test_policy_defaults_preserve_existing_namespace():

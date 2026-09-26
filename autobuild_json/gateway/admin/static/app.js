@@ -5,13 +5,23 @@ import {configForm,configPayload} from './forms.js';
 import {createCodexWorkspace} from './codex-view.js';
 const $=id=>document.getElementById(id),api=createApi();
 const codex=createCodexWorkspace($('codex-workspace'),api,()=>{api.clear();hideAll();});
+// Keep the navigation focused on Codex while retaining direct access to the
+// model registry and bindings used by the API service.
+const adminNav=document.querySelector('.admin-nav');
+for(const link of document.querySelectorAll('[data-footer-nav]'))link.addEventListener('click',e=>{e.preventDefault();document.querySelector(`[data-nav="${link.dataset.footerNav}"]`)?.click();});
+if(adminNav&&!adminNav.querySelector('[data-nav="models"]')){
+  const anchor=adminNav.querySelector('[data-nav="proxies"]');
+  for(const [id,label] of [['models','◉ Models'],['bindings','▣ Model mapping']]){
+    const button=document.createElement('button');button.dataset.nav=id;button.textContent=label;adminNav.insertBefore(button,anchor);
+  }
+}
 const titles={keys:'API key',customers:'Khách hàng',providers:'Provider',credentials:'Credential',models:'Model',bindings:'Model mapping',proxies:'Proxy',oauth:'OAuth / Import',usage:'Usage',audit:'Audit',overview:'Tổng quan',playground:'Chạy thử API'};
 Object.assign(titles,{aliases:'Alias',budgets:'Budget upstream'});
-let data={},view='keys',selected=null,authenticated=false,busy=false,loadEpoch=0;
+let data={},view='codex-accounts',selected=null,authenticated=false,busy=false,loadEpoch=0;
 const endpoints=['customers','keys','providers','credentials','models','bindings','proxies','usage','audit','overview','aliases','budgets','key-balances'];
 function notice(text,error=false){$('notice').textContent=text;$('notice').className='notice'+(error?' error':'');$('notice').hidden=!text;}
 function clearSecret(){$('secret-value').value='';$('one-time-secret').close();}
-function hideAll(){authenticated=false;loadEpoch++;data={};selected=null;codex.clear();view='keys';$('split-workspace').hidden=false;clearSecret();$('editor').replaceChildren();$('rows').replaceChildren();$('workspace').hidden=true;$('login-panel').hidden=false;$('admin-token').value='';}
+function hideAll(){authenticated=false;loadEpoch++;data={};selected=null;codex.clear();view='codex-accounts';$('split-workspace').hidden=true;clearSecret();$('editor').replaceChildren();$('rows').replaceChildren();$('workspace').hidden=true;$('login-panel').hidden=false;$('admin-token').value='';}
 function controls(){for(const b of document.querySelectorAll('#workspace button'))if(!b.closest('#codex-workspace'))b.disabled=busy;$('new-item').hidden=['overview','audit','usage','codex-accounts'].includes(view);$('refresh').hidden=view==='codex-accounts';}
 async function guard(fn){if(busy)return;busy=true;controls();try{await fn();}catch(e){if(e.message==='STALE_SESSION'||e.name==='AbortError')return;if(e.status===401){api.clear();hideAll();}else notice(e.message,true);}finally{busy=false;controls();}}
 async function load(){const token=++loadEpoch;const values=await Promise.all(endpoints.map(k=>api.request('/api/service/'+k)));if(!authenticated||token!==loadEpoch)return;data=Object.fromEntries(endpoints.map((k,i)=>[k,values[i]]));$('pending-notice').hidden=!data.overview.pending;render();}
@@ -34,7 +44,8 @@ const headers={keys:['Key / Tên','Khách hàng','Quota tổng (quy đổi)','Gi
 Object.assign(headers,{aliases:['Alias','Public model'],budgets:['Budget ID','Tiền tệ','Hạn mức','Đã dùng','Giữ trước']});
 function render(){
   $('split-workspace').hidden=view==='codex-accounts';
-  if(view==='codex-accounts'){$('page-title').textContent='Tài khoản Codex';controls();return;}
+  $('global-header').hidden=view==='codex-accounts';
+  if(view==='codex-accounts'){controls();return;}
   $('page-title').textContent=view==='keys'?'Quản lý API key':titles[view];$('list-title').textContent=titles[view];$('new-item').textContent='＋ '+(view==='playground'?'Chạy thử':'Thêm '+titles[view]);
   for(const b of document.querySelectorAll('[data-nav]'))b.classList.toggle('active',b.dataset.nav===view);
   const head=node('tr');for(const title of headers[view])head.append(node('th',title));$('columns').replaceChildren(head);
@@ -78,5 +89,5 @@ for(const button of document.querySelectorAll('[data-nav]'))button.addEventListe
 $('new-item').addEventListener('click',()=>edit());$('search').addEventListener('input',render);$('refresh').addEventListener('click',()=>guard(load));
 $('hide-secret').addEventListener('click',clearSecret);$('one-time-secret').addEventListener('cancel',clearSecret);$('copy-secret').addEventListener('click',()=>navigator.clipboard.writeText($('secret-value').value));
 $('logout').addEventListener('click',()=>guard(async()=>{try{await api.request('/api/session',{method:'DELETE'});}finally{api.clear();hideAll();}}));
-$('login-form').addEventListener('submit',event=>{event.preventDefault();guard(async()=>{api.clear();$('login-error').textContent='';try{const session=await api.request('/api/session',{method:'POST',body:{token:$('admin-token').value}});api.setSession(session.csrf_token);authenticated=true;$('admin-token').value='';$('login-panel').hidden=true;$('workspace').hidden=false;await load();}catch(e){$('login-error').textContent='Không đăng nhập được: '+e.message;throw e;}});});
-(async()=>{try{const session=await api.request('/api/session');api.setSession(session.csrf_token);authenticated=true;$('login-panel').hidden=true;$('workspace').hidden=false;await load();}catch(e){if(e.message!=='STALE_SESSION')hideAll();}})();
+$('login-form').addEventListener('submit',event=>{event.preventDefault();guard(async()=>{api.clear();$('login-error').textContent='';try{const session=await api.request('/api/session',{method:'POST',body:{token:$('admin-token').value}});api.setSession(session.csrf_token);authenticated=true;$('admin-token').value='';$('login-panel').hidden=true;$('workspace').hidden=false;await Promise.all([load(),codex.open()]);}catch(e){$('login-error').textContent='Không đăng nhập được: '+e.message;throw e;}});});
+(async()=>{try{const session=await api.request('/api/session');api.setSession(session.csrf_token);authenticated=true;$('login-panel').hidden=true;$('workspace').hidden=false;await Promise.all([load(),codex.open()]);}catch(e){if(e.message!=='STALE_SESSION')hideAll();}})();

@@ -1,6 +1,6 @@
 import json
 
-from ..contracts import InferenceResult, Text, ToolCall, Reasoning, REASONING_BYTE_LIMIT, REASONING_PART_LIMIT
+from ..contracts import InferenceResult, Text, ToolCall, Reasoning, GeneratedImage, Compaction, Opaque, REASONING_BYTE_LIMIT, REASONING_PART_LIMIT
 
 
 class EventCollector:
@@ -79,6 +79,10 @@ class EventCollector:
                 self.tool_bytes += len(event.delta.encode())
                 block = block.model_copy(update={"arguments": block.arguments + event.delta})
             elif event.kind == "block_finished":
+                if isinstance(block, GeneratedImage) and event.block is not None:
+                    if not isinstance(event.block, GeneratedImage) or event.block.id != block.id:
+                        raise ValueError("invalid_image")
+                    block = event.block
                 if isinstance(block, ToolCall) and not isinstance(json.loads(block.arguments), dict):
                     raise ValueError("invalid_tool_arguments")
                 if isinstance(block, Reasoning):
@@ -94,10 +98,17 @@ class EventCollector:
                         self.reasoning_part_count += len(final.summary) - len(block.summary)
                         self.reasoning_encrypted_bytes += len((final.encrypted_content or "").encode()) - len((block.encrypted_content or "").encode())
                         block = final
+                elif not isinstance(block, (Text, ToolCall, GeneratedImage, Compaction, Opaque)):
+                    raise ValueError("invalid_delta")
                 self.closed.add(event.item_id)
             else:
                 raise ValueError("invalid_delta")
             self.blocks[event.item_id] = (index, block)
+        elif event.kind == "image_partial":
+            if (event.item_id not in self.blocks or event.item_id in self.closed
+                    or not isinstance(self.blocks[event.item_id][1], GeneratedImage)
+                    or not isinstance(event.block, GeneratedImage)):
+                raise ValueError("invalid_image")
         elif event.kind == "usage":
             if event.usage is None:
                 raise ValueError("invalid_usage")

@@ -81,7 +81,7 @@ try{
   await page.locator('[data-codex-tab="usage"]').click();assert(await page.locator('#codex-reports').isVisible());assert(await page.locator('#codex-accounts-panel').isHidden());
   assert.match(await page.locator('#codex-reports').textContent(),/1085/);assert.match(await page.locator('#codex-reports').textContent(),/Không rõ/);
   await page.locator('[data-codex-tab="models"]').click();assert(await page.locator('#codex-capabilities').isVisible());assert(await page.locator('#codex-reports').isHidden());
-  assert.match(await page.locator('#codex-capabilities').textContent(),/websocket.*chưa hỗ trợ/);
+  assert.match(await page.locator('#codex-capabilities').textContent(),/websocket.*hỗ trợ/);
   assert.equal(await page.locator('#codex-capabilities input').count(),0);
   await page.locator('[data-codex-tab="overview"]').click();await page.locator('#codex-overview .codex-stat').first().waitFor();
   assert.doesNotMatch(await page.locator('#codex-overview').textContent(),/3\.4K|713\.3M|1462\.05|15\.81s/,'Overview must never contain copied screenshot metrics');

@@ -143,8 +143,9 @@ async def test_pool_create_only_cas_and_capabilities(pg_db, settings):
         assert (await client.put(path, json=dict(payload, version=1))).json()["version"] == 2
         assert (await client.get(path)).json()["policy"]["members"][0]["credential_id"] == str(identity)
         matrix = (await client.get("/api/service/capabilities")).json()
-        assert matrix["codex_oauth"]["responses"] is True and matrix["codex_oauth"]["compact"] is False
-        assert set(matrix) == {"codex_oauth", "openai_compatible", "anthropic", "gemini", "ollama"}
+        assert matrix["codex_oauth"]["responses"] is True and matrix["codex_oauth"]["compact"] is True
+        assert set(matrix) == {"codex_oauth", "openai_compatible", "anthropic", "gemini", "ollama", "model_catalog"}
+        assert any(model["id"] == "gpt-6-astra" for model in matrix["model_catalog"])
 
 
 async def test_partial_refresh_retains_old_snapshot_but_marks_it_stale(pg_db, settings):

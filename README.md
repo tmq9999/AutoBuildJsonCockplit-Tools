@@ -28,6 +28,29 @@ và 9router; không đóng gói source/sidecar của các project này.
 
 ## Chuẩn API
 
+Codex OAuth hiện cung cấp các đường tương thích Responses/Images:
+
+- `GET /v1/models`, `/models`, `/backend-api/codex/models` — model được phép bởi
+  API key; thêm `?client_version=0.1.0` để nhận metadata theo dạng Codex `models`.
+  Admin xem catalog tham khảo ở `/api/service/codex-models` và công bố qua UI.
+- `POST /v1/responses` và `POST /backend-api/codex/responses` — Responses SSE.
+- `POST /v1/responses/compact` và alias backend — compaction response có usage.
+- `POST /v1/images/generations`, `POST /v1/images/edits` — JSON hoặc multipart
+  edit, trả `{created,data:[{b64_json|url,revised_prompt}]}`.
+- `wss://<gateway>/v1/responses` — Responses WebSocket beta; client gửi
+  `response.create`, gateway giữ quota/proxy/account routing như HTTP.
+
+Image capability vẫn phụ thuộc binding/account thực tế; catalog không tự cấp quyền
+cho tài khoản không có binding. WebSocket upstream dùng header
+`OpenAI-Beta: responses_websockets=2026-02-06`.
+
+WebSocket hiện xử lý tuần tự: chờ terminal event trước khi gửi lượt tiếp theo.
+`stream_id` hợp lệ được trả lại ở cả event và lỗi, nhưng chưa chạy nhiều lane
+đồng thời; `generate:false`/warmup chưa hỗ trợ. Giới hạn kết nối 30 phút, idle
+5 phút, message 16 MiB. Mỗi lượt mở một kết nối upstream riêng: chưa xác nhận
+continuation dựa trên cache của cùng socket ở upstream; gửi đủ context khi cần.
+Các kiểm thử WebSocket dùng upstream tổng hợp, không chứng minh mọi chế độ Codex CLI.
+
 | Client | Endpoint chính | Xác thực |
 |---|---|---|
 | OpenAI | `/v1/chat/completions`, `/v1/responses`, `/v1/models` | Bearer |
@@ -116,8 +139,9 @@ OAuth đã có, tối đa 1000 records/32 MiB; không tự login hoặc refresh 
 bằng Ctrl+C sẽ dừng đúng các process do runner tạo, giữ nguyên dữ liệu cho lần chạy sau.
 Nếu dùng bộ PostgreSQL riêng cần thiết lập thư viện của bộ đó trước khi chạy.
 
-Mở `http://127.0.0.1:8787/service/`. Admin token nằm trong
-`data/local-config.json`; lấy trực tiếp trên máy, không gửi lên GitHub. Đây không
+Mở `http://127.0.0.1:8787/service/`. Với runner local, admin token nằm trong
+`data/local-gateway/admin-data/local-config.json`; chạy admin riêng với cấu hình
+mặc định thì ở `data/local-config.json`. Lấy trực tiếp trên máy, không gửi lên GitHub. Đây không
 phải client API key hay token OpenAI.
 
 Nếu server OAuth cũ đang chạy, không dùng cùng port/data directory:
@@ -322,6 +346,15 @@ loopback, port tường minh, tên `abgw_test_<32 ký tự hex>`, role được 
 Không dùng database thật. Chrome dùng `/usr/bin/google-chrome` hoặc `CHROME_PATH`.
 Test không gọi account/model thật; provider I/O dùng dữ liệu tổng hợp.
 
+Nếu dùng PostgreSQL 18 bundle ở checkout này, cần cả đường dẫn binary và thư viện
+(các biến export chỉ có hiệu lực trong terminal hiện tại):
+
+```bash
+export AUTOBUILD_TEST_POSTGRES_BIN="$PWD/.deps/gateway-pg18/root/usr/lib/postgresql/18/bin"
+export LD_LIBRARY_PATH="$PWD/.deps/gateway-pg18/root/usr/lib/x86_64-linux-gnu:$PWD/.deps/gateway-pg18/root/usr/lib/postgresql/18/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+.venv/bin/python -m pytest -q --tb=short
+```
+
 Checkpoint historical: 549 Python tests trên 3.10/3.14, 12 Node tests, hai Chrome E2E.
 Task12 phải được đánh giá bằng output
 của các lệnh chạy trên snapshot hiện tại. Codex verification dùng synthetic upstream/
@@ -350,11 +383,10 @@ test local không thay thế trạng thái CI hiện tại.
 - [Compose](deploy/gateway-compose.yml) là template local, không phải production
   deployment đã xác minh. Cài tool không tự public port.
 
-Bản đầu hỗ trợ text/basic tools và streaming theo capability đã kiểm thử; không
-hứa đầy đủ mọi beta feature hay phiên bản Codex CLI/Claude Code. Codex subset hiện
-không hỗ trợ compact, images, realtime/WebSocket, profile takeover, shell/tool chạy
-thay khách, hay toàn bộ tham số Platform API. Chưa có payment, embeddings, tạo
-ảnh/audio/video.
+Gateway hỗ trợ text/basic tools, compact, image generation/edit và Responses
+WebSocket theo capability/binding đã cấu hình; không hứa đầy đủ mọi beta feature
+hay phiên bản Codex CLI. Profile takeover, shell/tool chạy thay khách, payment,
+embeddings, audio/video và toàn bộ tham số Platform API vẫn ngoài phạm vi.
 Codex OAuth không nhận mọi tham số Platform API; đọc matrix trước khi dùng.
 
 Resale phải phù hợp điều khoản của từng provider. Repo chưa cấp giấy phép phân

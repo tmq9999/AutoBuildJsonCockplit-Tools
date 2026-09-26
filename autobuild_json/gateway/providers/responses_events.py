@@ -1,6 +1,6 @@
 import json
 
-from ..contracts import InferenceEvent, Text, ToolCall, Reasoning
+from ..contracts import InferenceEvent, Text, ToolCall, Reasoning, GeneratedImage, Compaction
 from ..errors import GatewayError
 from ..metering.usage import normalize_provider_usage
 from ..protocols.common import EventCollector
@@ -52,6 +52,8 @@ class ResponsesEvents:
                 self.calls = True
             elif item["type"] == "reasoning":
                 block = reasoning_item(item)
+            elif item["type"] == "image_generation_call":
+                block = GeneratedImage.model_validate(dict(item, type="generated_image"))
             else:
                 raise GatewayError("unsupported_feature", 502, "stream")
             events.append(InferenceEvent(kind="block_started", item_id=item["id"], index=value["output_index"], block=block))
@@ -88,13 +90,30 @@ class ResponsesEvents:
                     raise ValueError("invalid_reasoning_part")
                 events.append(InferenceEvent(kind="reasoning_summary_finished", item_id=identity,
                                              summary_index=part_index, delta=part["text"]))
+        elif kind == "response.image_generation_call.partial_image":
+            identity, block = self._item(value)
+            if not isinstance(block, GeneratedImage):
+                raise ValueError("invalid_image")
+            events.append(InferenceEvent(kind="image_partial", item_id=identity,
+                index=self.collector.blocks[identity][0], summary_index=value["partial_image_index"],
+                block=GeneratedImage(id=identity, result=value["partial_image_b64"])))
+        elif kind in {"response.image_generation_call.in_progress", "response.image_generation_call.generating",
+                      "response.image_generation_call.completed"}:
+            _, block = self._item(value)
+            if not isinstance(block, GeneratedImage):
+                raise ValueError("invalid_image")
         elif kind == "response.output_item.done":
             item = value["item"]
             identity, block = self._item(value, item["id"])
-            expected = "reasoning" if isinstance(block, Reasoning) else "function_call" if isinstance(block, ToolCall) else "message"
+            expected = ("image_generation_call" if isinstance(block, GeneratedImage) else
+                "reasoning" if isinstance(block, Reasoning) else "function_call" if isinstance(block, ToolCall) else "message")
             if item.get("type") != expected:
                 raise ValueError("invalid_item_type")
             final = reasoning_item(item) if isinstance(block, Reasoning) else None
+            if isinstance(block, GeneratedImage):
+                final = GeneratedImage.model_validate(dict(item, type="generated_image"))
+                if final.status != "completed" or not final.result:
+                    raise ValueError("image_missing")
             events.append(InferenceEvent(kind="block_finished", item_id=identity, block=final))
         elif kind in {"response.completed", "response.incomplete"}:
             payload = value["response"]
@@ -107,6 +126,8 @@ class ResponsesEvents:
                     block = self.collector.blocks[item["id"]][1]
                     if isinstance(block, Reasoning) and reasoning_item(item) != block:
                         raise ValueError("reasoning_terminal_mismatch")
+                    if isinstance(block, GeneratedImage) and GeneratedImage.model_validate(dict(item, type="generated_image")) != block:
+                        raise ValueError("image_terminal_mismatch")
             usage = normalize_responses_usage(payload["usage"]) if payload.get("usage") is not None else None
             if usage:
                 events.append(InferenceEvent(kind="usage", usage=usage))
@@ -126,8 +147,8 @@ class ResponsesEvents:
         return events
 
 
-async def responses_events(response):
-    decoder, parser = SSEDecoder(), ResponsesEvents()
+async def responses_events(response, *, images=False):
+    decoder, parser = SSEDecoder(max_frame_bytes=40_000_000 if images else 1_048_576), ResponsesEvents()
     try:
         async for chunk in response.chunks():
             for _, data in decoder.feed(chunk):
@@ -138,3 +159,34 @@ async def responses_events(response):
             raise ValueError("incomplete_output")
     except (ValueError, KeyError, TypeError, AttributeError):
         raise GatewayError("upstream_error", 502, "stream") from None
+
+
+async def compact_events(response):
+    """Turn a compact JSON result into the same metered lifecycle as generation."""
+    try:
+        value = await response.read_json(max_bytes=8_388_608)
+        if value.get("object") != "response.compaction" or not isinstance(value.get("output"), list):
+            raise ValueError("invalid_compaction")
+        yield InferenceEvent(kind="started", response_id=value["id"])
+        for index, item in enumerate(value["output"]):
+            kind = item.get("type")
+            if kind == "compaction":
+                block = Compaction.model_validate(item)
+            elif kind == "reasoning":
+                block = reasoning_item(item)
+            elif kind == "message":
+                # Compaction retains user messages too; preserve these verbatim
+                # in the compact codec, not as generated assistant text.
+                from ..contracts import Opaque
+                if item.get("role") not in {"system", "developer", "user", "assistant"}:
+                    raise ValueError("invalid_message")
+                block = Opaque(provider="codex_oauth", payload=item)
+            else:
+                raise ValueError("invalid_compaction_item")
+            identity = item.get("id", "compact_item_"+str(index))
+            yield InferenceEvent(kind="block_started", item_id=identity, index=index, block=block)
+            yield InferenceEvent(kind="block_finished", item_id=identity)
+        usage = normalize_responses_usage(value["usage"]) if value.get("usage") is not None else None
+        yield InferenceEvent(kind="finished", finish_reason="stop", usage=usage)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise GatewayError("upstream_error", 502, "upstream") from None

@@ -9,7 +9,10 @@ def validate_request(request, route):
     from ..protocols.ollama import OllamaCodec
     from .codex import codex_body
 
-    request.validate_provider(route.adapter)
+    try:
+        request.validate_provider(route.adapter)
+    except ValueError:
+        raise GatewayError("unsupported_feature") from None
     if route.adapter == "codex_oauth":
         codex_body(request, route.upstream_model)
     else:

@@ -18,6 +18,40 @@ class Image(StrictRecord):
     type: Literal["image"] = "image"
     source: str = Field(repr=False)
     media_type: str
+    detail: Literal["auto", "low", "high", "original"] = "auto"
+
+
+class Compaction(StrictRecord):
+    type: Literal["compaction"] = "compaction"
+    id: str = Field(min_length=1, max_length=512)
+    encrypted_content: str = Field(min_length=1, max_length=4_194_304, repr=False)
+
+
+class GeneratedImage(StrictRecord):
+    type: Literal["generated_image"] = "generated_image"
+    id: str = Field(min_length=1, max_length=512)
+    result: str | None = Field(default=None, max_length=33_554_432, repr=False)
+    status: Literal["in_progress", "generating", "completed", "failed"] = "in_progress"
+    revised_prompt: str | None = Field(default=None, max_length=32768, repr=False)
+    output_format: Literal["png", "jpeg", "webp"] | None = None
+    size: str | None = None
+    background: str | None = None
+    quality: str | None = None
+
+
+class ImageGenerationTool(StrictRecord):
+    type: Literal["image_generation"] = "image_generation"
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    action: Literal["auto", "generate", "edit"] = "auto"
+    quality: Literal["auto", "low", "medium", "high"] | None = None
+    size: Literal["auto", "1024x1024", "1536x1024", "1024x1536"] | None = None
+    background: Literal["auto", "transparent", "opaque"] | None = None
+    output_format: Literal["png", "jpeg", "webp"] | None = None
+    output_compression: int | None = Field(default=None, strict=True, ge=0, le=100)
+    partial_images: int | None = Field(default=None, strict=True, ge=0, le=3)
+    moderation: Literal["auto", "low"] | None = None
+    input_fidelity: Literal["low", "high"] | None = None
+    input_image_mask: dict | None = Field(default=None, repr=False)
 
 
 class ToolCall(StrictRecord):
@@ -80,7 +114,7 @@ class Opaque(StrictRecord):
     payload: dict = Field(repr=False)
 
 
-Block = Annotated[Text | Image | ToolCall | ToolResult | Reasoning | Opaque, Field(discriminator="type")]
+Block = Annotated[Text | Image | ToolCall | ToolResult | Reasoning | Compaction | GeneratedImage | Opaque, Field(discriminator="type")]
 
 
 class Message(StrictRecord):
@@ -117,6 +151,8 @@ class InferenceRequest(StrictRecord):
     options: GenerationOptions = Field(default_factory=GenerationOptions)
     stream: bool = False
     continuation: str | None = None
+    operation: Literal["responses", "compact", "websocket"] = "responses"
+    image_tool: ImageGenerationTool | None = None
 
     @property
     def required_capabilities(self):
@@ -128,9 +164,15 @@ class InferenceRequest(StrictRecord):
             capabilities.add("vision")
         if self.continuation:
             capabilities.add("continuation")
+        if self.operation != "responses":
+            capabilities.add(self.operation)
+        if self.image_tool:
+            capabilities.add("images")
         return frozenset(capabilities)
 
     def validate_provider(self, adapter):
+        if (self.operation != "responses" or self.image_tool) and adapter != "codex_oauth":
+            raise ValueError("unsupported_feature")
         for message in self.messages:
             for block in message.blocks:
                 if isinstance(block, Opaque) and block.provider != adapter:
@@ -142,7 +184,7 @@ FinishReason = Literal["stop", "length", "tool_calls", "content_filter"]
 
 class InferenceEvent(StrictRecord):
     kind: Literal["started", "block_started", "text_delta", "tool_delta", "reasoning_summary_started",
-                  "reasoning_summary_delta", "reasoning_summary_finished", "block_finished", "usage", "finished", "error"]
+                  "reasoning_summary_delta", "reasoning_summary_finished", "image_partial", "block_finished", "usage", "finished", "error"]
     item_id: str | None = None
     index: int = Field(default=0, ge=0)
     summary_index: int = Field(default=0, strict=True, ge=0, lt=REASONING_PART_LIMIT)

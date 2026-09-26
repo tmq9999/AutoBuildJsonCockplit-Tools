@@ -11,6 +11,7 @@ SAFE_CODES = frozenset({
     "operation_conflict", "claim_lost", "operation_cancelled", "operation_expired",
     "codex_usage_unavailable", "codex_credits_unavailable", "codex_credits_stale", "codex_no_credits",
     "codex_reset_uncertain", "codex_refresh_failed", "codex_reset_applied", "codex_reset_not_applied",
+    "image_accounts_required",
 })
 SAFE_STAGES = frozenset({"auth", "policy", "storage", "quota", "proxy", "upstream", "stream", "request", "refresh"})
 

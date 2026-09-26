@@ -5,6 +5,29 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ## [Unreleased] — 2026-09-24
 
+### Codex transport parity — 2026-09-26
+
+- Hardened WebSocket handshake validation, safe per-turn error/stream-ID correlation,
+  duplicate Origin rejection, idle/deadline closure and cancellation-safe cleanup.
+  Added RFC6455 and real httpcore CONNECT/upgrade tests through direct/fixed/pool/
+  synthetic Kiot egress, with PostgreSQL cached-token settlement and disconnect holds.
+- Verification: full Python suite **1,612 passed** (Python 3.14, temporary
+  PostgreSQL 18; two dependency deprecation warnings), **43 Node tests**, Ruff,
+  compileall/diff check and Codex browser smoke passed. The browser run had one
+  transient fixture socket hangup; rerun passed. No live provider inference used.
+- Documented current sequential WebSocket/warmup/connection-cache limitations;
+  these tests do not certify full Cockpit or Codex CLI parity.
+- Added a local Codex model catalog and `/v1/models` projection, with admin
+  capability metadata for compact, image generation/edit and Responses WebSocket.
+- Added `/v1/responses/compact`, OpenAI-compatible `/v1/images/generations` and
+  multipart `/v1/images/edits`, plus the Responses WebSocket beta bridge with
+  configured direct/proxy egress and `responses_websockets=2026-02-06`.
+- Added image inputs, image-generation calls, compaction items and partial image
+  events to the internal Responses contract; quota settlement remains on the
+  existing input/cache/output accounting path.
+- Removed non-Codex product labels from the admin shell; Codex model, binding,
+  proxy, OAuth, key and usage controls remain available on mobile navigation.
+
 ### Codex parity and proxy follow-up — 2026-09-26
 
 - Added private Codex service proxy selector with direct/fixed/list/pool/KiotProxy
@@ -50,7 +73,8 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
   Provider Catalog UI vẫn pending, không nằm trong handoff này.
 - Ghi rõ ba quota tiers độc lập (customer weighted-token, upstream windows, reset
   credits), proxy precedence credential → provider → direct và private routes.
-  compact/images/WebSocket/profile takeover chưa được hỗ trợ; không hứa full CLI parity.
+  Tại checkpoint này compact/images/WebSocket/profile takeover chưa được hỗ trợ;
+  không hứa full CLI parity.
 - Sửa `admin/usage.py`: year-0001/default-window và UTC offset overflow trả safe 422
   thay vì 500, có authenticated regressions.
 

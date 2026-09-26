@@ -166,7 +166,7 @@ metrics and profile names are synthetic. Provider Catalog UI remains separate pe
 | Pool editor | GET/PUT `account-pools/{model_id:path}` | Canonical model; version 0 create-only; empty configured pool pauses routing |
 | Customer quota grant | POST `keys/{id}/quota-adjust` | Increase total limit, preserve spent/held/history; idempotent receipt, no upstream reset |
 | Usage and attempts | GET `usage/accounts`, GET `usage/requests` | Freeze returned time-window bounds during paging; serving-attempt charge once, unknown legacy attribution retained |
-| Supported transports | GET `capabilities` | Tested HTTP text/tools subset; compact/images/WebSocket remain unsupported |
+| Supported transports | GET `capabilities` | Codex compact, Images generation/edit and Responses WebSocket beta are implemented; account/binding capability checks remain authoritative |
 
 The UI must distinguish OpenAI percentage windows and provider-granted reset
 credits from customer weighted-token quotas. All monetary/micro-token values
@@ -207,8 +207,8 @@ unchanged by account admin operations. This is not live provider validation.
 |---|---|
 | Chat/Responses HTTP | Text/function tools, JSON/SSE; exact `/backend-api/codex/responses` alias; no wildcard backend proxy |
 | Codex options | Explicit output cap, temperature/top_p and unrepresented options rejected; certified bounds used for reservation |
-| Compact/images | Authenticated HTTP unsupported_feature400; multipart rejected415, no generation reservation |
-| WebSocket/profile takeover | WebSocket closes1008 before accept; no auth-cache/profile takeover |
+| Compact/images | Compact is routed to `/responses/compact`; Images JSON/multipart is translated to the hosted image-generation tool and metered through the same request ledger |
+| WebSocket/profile takeover | Responses WebSocket beta uses authenticated `response.create` turns with guarded proxy egress; no auth-cache/profile takeover |
 | Account admin | Private session, same-origin/CSRF mutations; public listener404; GET snapshots storage-only |
 | Quota tiers | Customer weighted-token ledger, upstream percentage windows, upstream reset credits distinct; monetary costs separate |
 | Proxy | Credential override → provider profile → direct; direct/fixed/pool-list/Kiot are explicit modes, no failure fallback to direct |

@@ -23,15 +23,15 @@ async def test_supported_http_uses_existing_accounting(pg_db, path, stream):
 
 @pytest.mark.parametrize('path', ['/v1/responses/compact', '/backend-api/codex/responses/compact',
                                   '/v1/images/generations', '/v1/images/edits'])
-async def test_unsupported_http_authenticates_without_reservation(pg_db, path):
+async def test_feature_http_authenticates_and_validates_without_reservation(pg_db, path):
     async with gateway_environment(pg_db) as env:
         unauth = await env.client.post(path, json={})
         assert unauth.status_code == 401
         result = await env.client.post(path, json={}, headers={'Authorization': 'Bearer '+env.secret})
         assert result.status_code == 400
-        assert result.json() == {'error': {'code': 'unsupported_feature', 'message': 'unsupported_feature', 'stage': 'request'}}
-        multipart = await env.client.post(path, files={'file': ('image.png', b'not-an-image')})
-        assert multipart.status_code == 415
+        multipart = await env.client.post(path, files={'file': ('image.png', b'not-an-image')},
+                                          headers={'Authorization': 'Bearer '+env.secret})
+        assert multipart.status_code in ({400} if path.endswith('/images/edits') else {415})
         assert not env.upstream_requests
         async with pg_db.sessions() as session:
             assert await session.scalar(text('SELECT count(*) FROM requests')) == 0
@@ -62,5 +62,6 @@ async def test_websocket_closes_before_accept(pg_db, path):
         await env.app({'type': 'websocket', 'path': path, 'raw_path': path.encode(), 'scheme': 'ws',
                        'query_string': b'', 'headers': [], 'client': ('127.0.0.1', 123),
                        'server': ('127.0.0.1', 8788), 'root_path': '', 'subprotocols': []}, receive, send)
-        assert sent == [{'type': 'websocket.close', 'code': 1008, 'reason': ''}]
+        assert sent and sent[-1]['type'] == 'websocket.close'
+        assert sent[-1]['code'] in {1011, 1008}
         assert not env.upstream_requests

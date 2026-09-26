@@ -19,12 +19,24 @@ before claiming that support.
 
 ## Current limits
 
+- Responses WebSocket is a sequential beta bridge, not a transparent persistent
+  upstream tunnel. Wait for a terminal event before the next `response.create`.
+  It authenticates every turn, echoes valid `stream_id` on events/errors and uses
+  configured guarded egress. Multiplexed lanes, `generate:false` warmup and native
+  socket-cache continuity are not implemented. A new upstream socket per turn
+  means an encrypted local continuation handle alone cannot ensure the upstream
+  still has the prior response; provide full context where necessary. The local
+  connection limit is 30 minutes, idle 5 minutes, inbound message 16 MiB.
+  Validation of stream IDs and error correlation was checked against the
+  [official Responses WebSocket guide](https://developers.openai.com/api/docs/guides/websocket-mode).
 - Text and basic function/tool calls are the implemented core. Native Responses
   reasoning summaries and opaque encrypted replay are preserved only on Responses;
   raw chain-of-thought is never exposed or translated to another protocol. Vision,
   provider-specific tool features and unsupported combinations fail closed with a
   regression test rather than being silently translated.
-- Responses background/store=true/compact/retrieval/WebSocket are unsupported.
+- Responses background/store=true/retrieval remain unsupported. Codex OAuth compact
+  uses `/v1/responses/compact`; image generation/edit and Responses WebSocket beta
+  are available only when the selected Codex binding advertises the capability.
   Continuation handles are tenant/key/model/route/credential scoped, encrypted and
   enabled only for a native route with that capability. Chat-backed Responses
   requires complete history in each request.
@@ -46,6 +58,14 @@ before claiming that support.
   now also offers explicit direct/fixed/pool/Kiot selections; old default payloads work.
 
 ## Verification snapshot
+
+2026-09-26 transport checkpoint: **1,612 Python tests passed** on Python 3.14
+with disposable PostgreSQL 18, **43 Node tests**, Codex Chrome smoke, Ruff,
+compileall and diff checks passed. One browser fixture socket hangup occurred;
+the rerun passed. WebSocket tests exercise ASGI auth/boundaries, two turns,
+cached-token accounting, policy changes, cancellation/unknown usage, malformed
+handshakes and real httpcore HTTP upgrade/CONNECT with synthetic network I/O.
+They make no real Codex, KiotProxy or third-party inference call.
 
 Rate-limit final local checkpoint: **549 Python tests on both 3.10 and 3.14**, 12
 Node tests, both Chrome E2E suites, Ruff/compileall/package build passed. Independent

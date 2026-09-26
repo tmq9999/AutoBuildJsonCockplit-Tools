@@ -2,7 +2,8 @@ import json
 import time
 from uuid import uuid4
 
-from ..contracts import InferenceRequest, Message, Text, Tool, ToolCall, ToolResult, Reasoning, GenerationOptions
+from ..contracts import (InferenceRequest, Message, Text, Tool, ToolCall, ToolResult, Reasoning,
+                         GenerationOptions, Image, Compaction, GeneratedImage, ImageGenerationTool, Opaque)
 from ..errors import GatewayError
 from .common import EventCollector
 from .responses_options import TextOptions
@@ -18,6 +19,12 @@ def response_usage(usage):
 
 
 def output_item(block, item_id, status="completed"):
+    if isinstance(block, Compaction):
+        return block.model_dump()
+    if isinstance(block, Opaque):
+        return block.payload
+    if isinstance(block, GeneratedImage):
+        return dict(block.model_dump(exclude_none=True), type="image_generation_call")
     if isinstance(block, Reasoning):
         value = {"id": block.id, "type": "reasoning", "summary": [
             {"type": "summary_text", "text": part} for part in block.summary]}
@@ -74,6 +81,11 @@ class ResponsesCodec:
                     messages.append(Message(role="tool", blocks=(ToolResult(call_id=item["call_id"], content=item["output"]),)))
                 elif kind == "reasoning":
                     messages.append(Message(role="assistant", blocks=(reasoning_item(item),)))
+                elif kind == "compaction":
+                    messages.append(Message(role="assistant", blocks=(Compaction.model_validate(item),)))
+                elif kind == "image_generation_call":
+                    messages.append(Message(role="assistant", blocks=(GeneratedImage.model_validate(
+                        dict(item, type="generated_image")),)))
                 elif kind == "message":
                     content = item["content"]
                     if isinstance(content, str):
@@ -81,14 +93,30 @@ class ResponsesCodec:
                     else:
                         blocks = []
                         for block in content:
+                            if block["type"] == "input_image":
+                                if set(block)-{"type", "image_url", "detail"}:
+                                    raise GatewayError("unsupported_feature")
+                                source = image_source(block["image_url"])
+                                blocks.append(Image(source=source, media_type=source[5:].split(";", 1)[0]
+                                    if source.startswith("data:") else "image/*", detail=block.get("detail", "auto")))
+                                continue
                             if block["type"] not in {"input_text", "output_text"} or set(block)-{"type", "text", "annotations"}:
                                 raise GatewayError("unsupported_feature")
                             blocks.append(Text(text=block["text"]))
                     messages.append(Message(role=item["role"], blocks=blocks))
                 else:
                     raise GatewayError("unsupported_feature")
-            tools = []
+            tools, image_tool = [], None
             for tool in body.get("tools", []):
+                if tool.get("type") == "image_generation":
+                    if image_tool is not None:
+                        raise GatewayError("invalid_request")
+                    image_tool = ImageGenerationTool.model_validate(tool)
+                    if image_tool.input_image_mask is not None:
+                        if set(image_tool.input_image_mask) != {"image_url"}:
+                            raise GatewayError("invalid_request")
+                        image_source(image_tool.input_image_mask["image_url"])
+                    continue
                 if tool.get("type") != "function":
                     raise GatewayError("unsupported_feature")
                 tools.append(Tool(**{k: v for k, v in tool.items() if k != "type"}))
@@ -99,7 +127,7 @@ class ResponsesCodec:
             if not isinstance(include, (list, tuple)) or any(not isinstance(item, str) or not item for item in include):
                 raise GatewayError("invalid_request")
             request = InferenceRequest(model=body["model"], messages=messages, instructions=body.get("instructions"),
-                tools=tools, stream=body.get("stream", False), continuation=body.get("previous_response_id"),
+                tools=tools, image_tool=image_tool, stream=body.get("stream", False), continuation=body.get("previous_response_id"),
                 options=GenerationOptions(max_output_tokens=body.get("max_output_tokens"), temperature=body.get("temperature"),
                     top_p=body.get("top_p"), tool_choice=body.get("tool_choice", "auto"), parallel_tool_calls=body.get("parallel_tool_calls"),
                     reasoning=reasoning, include=tuple(include),
@@ -120,6 +148,10 @@ class ResponsesCodec:
             for block in message.blocks:
                 if isinstance(block, Text):
                     text_blocks.append({"type": "output_text" if message.role == "assistant" else "input_text", "text": block.text})
+                elif isinstance(block, Image):
+                    text_blocks.append({"type": "input_image", "image_url": image_source(block.source), "detail": block.detail})
+                elif isinstance(block, (Compaction, GeneratedImage)):
+                    items.append(output_item(block, block.id))
                 elif isinstance(block, ToolCall):
                     items.append({"type": "function_call", "call_id": block.call_id, "name": block.name, "arguments": block.arguments})
                 elif isinstance(block, ToolResult):
@@ -139,6 +171,9 @@ class ResponsesCodec:
             body["previous_response_id"] = request.continuation
         if request.tools:
             body["tools"] = [dict(type="function", **tool.model_dump(exclude_none=True)) for tool in request.tools]
+            body["tool_choice"] = request.options.tool_choice
+        if request.image_tool is not None:
+            body.setdefault("tools", []).append(request.image_tool.model_dump(exclude_none=True))
             body["tool_choice"] = request.options.tool_choice
         if request.options.reasoning is not None:
             body["reasoning"] = request.options.reasoning.model_dump(exclude_none=True)
@@ -179,6 +214,10 @@ class ResponsesCodec:
             self.response_id = event.response_id or self.response_id
             self.collector = EventCollector(self.response_id, self.model)
         self.collector.feed(event)
+        if event.kind == "image_partial":
+            return [self._event("response.image_generation_call.partial_image", item_id=event.item_id,
+                output_index=event.index, partial_image_index=event.summary_index,
+                partial_image_b64=event.block.result)]
         if event.kind == "started":
             return [self._event("response.created", response=self._base("in_progress")),
                     self._event("response.in_progress", response=self._base("in_progress"))]
@@ -233,3 +272,25 @@ class ResponsesCodec:
         if event.kind == "error":
             return [self._event("error", code=event.error_code or "upstream_error", message=event.error_code or "upstream_error", param=None)]
         return []
+
+
+def image_source(value):
+    """Validate without fetching user URLs (the provider handles image inputs)."""
+    from urllib.parse import urlsplit
+    if not isinstance(value, str) or not value or len(value) > 16_777_216:
+        raise GatewayError("invalid_request")
+    if value.startswith("data:image/") and ";base64," in value:
+        import base64
+        try:
+            header, payload = value.split(",", 1)
+            if header not in {"data:image/png;base64", "data:image/jpeg;base64", "data:image/webp;base64", "data:image/gif;base64"}:
+                raise ValueError()
+            if not base64.b64decode(payload, validate=True):
+                raise ValueError()
+        except ValueError:
+            raise GatewayError("invalid_request") from None
+        return value
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or any(ord(c) < 33 for c in value):
+        raise GatewayError("invalid_request")
+    return value

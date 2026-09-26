@@ -248,6 +248,11 @@ class Catalog:
                     or not model.router_model and binding["identity"] != model.identity):
                 continue
             caps = frozenset(binding["capabilities"])
+            # Compact and Responses WebSocket are transport capabilities of the
+            # Codex adapter, unlike vision/images which remain account/binding
+            # specific and must be explicitly granted by the admin.
+            if provider.adapter == "codex_oauth":
+                caps = caps | {"compact", "websocket"}
             if not request.required_capabilities <= caps:
                 mismatch = True
                 continue

@@ -29,7 +29,7 @@ async def test_status_is_private_storage_only_and_does_not_claim_running(pg_db, 
             "keys": {"total": 0, "enabled": 0},
             "usage": {"requests": 0, "completed": 0, "failed": 0, "pending": 0,
                       "input_tokens": "0", "cached_read": "0", "cached_write": "0", "output_tokens": "0", "charged_micro": "0"},
-            "version": "codex-http-v1"}
+            "version": "codex-http-v2"}
         assert "no-store" in result.headers["cache-control"].split(", ")
         bad = await client.get(PATH + "?token=DO-NOT-ECHO")
         assert bad.status_code == 400 and "DO-NOT-ECHO" not in bad.text

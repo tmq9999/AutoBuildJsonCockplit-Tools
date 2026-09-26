@@ -10,7 +10,7 @@ from ...oauth import ISSUER
 from ..accounts.imports import CODEX_PROVIDER
 from ..accounts import quota_storage as storage
 from ..errors import GatewayError
-from ..providers.codex_capabilities import codex_capabilities
+from ..providers.codex_capabilities import codex_runtime_capabilities
 from ..routing.records import ProviderConfig
 from ..settings import ServiceSettings
 from .codex_schemas import AccountUpdate, CodexProxyInput, PoolInput, QuotaAdjustInput, RefreshInput, ResetConsumeInput, ResetResolveInput
@@ -79,7 +79,7 @@ class ServiceStatus:
                 FROM settled"""))).mappings().one()
             usage.update({name: str(value) if value is not None else None for name, value in totals.items()})
         return {"status": status, "base_url": base_url, "accounts": accounts, "keys": keys,
-                "usage": usage, "version": codex_capabilities()["version"]}
+                "usage": usage, "version": codex_runtime_capabilities()["version"]}
 
 
 class CodexProxy:
@@ -317,11 +317,15 @@ def mount_codex_routes(router, services):
 
     @router.get("/capabilities")
     async def capabilities():
-        return {"codex_oauth": codex_capabilities(),
+        from ..providers.codex_model_catalog import codex_model_catalog
+        return {"codex_oauth": codex_runtime_capabilities(), "model_catalog": codex_model_catalog(),
                 "openai_compatible": {"wire_apis": ["chat", "responses"], "text": True, "tools": True},
                 "anthropic": {"wire_apis": ["messages"], "text": True, "tools": True},
                 "gemini": {"wire_apis": ["generateContent"], "text": True, "tools": True},
                 "ollama": {"wire_apis": ["chat"], "text": True, "tools": True}}
+
+    from .codex_models import mount_codex_models
+    mount_codex_models(router, services)
 
     @router.get("/usage/requests")
     async def requests(credential_id: UUID | None = None, model_id: str | None = Query(None, min_length=1, max_length=200),

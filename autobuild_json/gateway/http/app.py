@@ -39,6 +39,8 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
     async def unavailable(request, error):
         return JSONResponse(GatewayError("storage_unavailable").to_dict(), status_code=503)
 
+    @app.get("/models")
+    @app.get("/backend-api/codex/models")
     @app.get("/v1/models")
     async def models(request: Request):
         anthropic = request.headers.get("anthropic-version") is not None
@@ -46,6 +48,9 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
             raise GatewayError("unsupported_feature")
         principal = await identity.authenticate(client_secret(request), "anthropic" if anthropic else "openai")
         values = await catalog.list_model_names(principal)
+        if not anthropic and "client_version" in request.query_params:
+            from ..providers.codex_model_catalog import client_model
+            return {"models": [client_model(value) for value in values]}
         if anthropic:
             rows = [{"id": model, "type": "model", "display_name": model, "created_at": "2026-01-01T00:00:00Z"} for model in values]
             return {"data": rows, "has_more": False, "first_id": rows[0]["id"] if rows else None, "last_id": rows[-1]["id"] if rows else None}
@@ -98,7 +103,7 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts):
             return GatewayStreamResponse(prepared, codec)
         return JSONResponse(codec.encode_result(await prepared.collect()), headers={"Cache-Control": "no-store"})
 
-    app.include_router(codex_router(identity, responses))
+    app.include_router(codex_router(identity, responses, engine, allowed_hosts=allowed_hosts))
 
     @app.post("/v1/messages")
     async def messages(request: Request):

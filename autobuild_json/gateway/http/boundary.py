@@ -22,7 +22,7 @@ class GatewayBoundary:
         async def reject(status, code):
             await JSONResponse({"error": {"code": code, "message": code}}, status_code=status)(scope, receive, send)
         if scope['path'].startswith('/backend-api/codex/') and scope['path'] not in {
-                '/backend-api/codex/responses', '/backend-api/codex/responses/compact'}:
+                '/backend-api/codex/responses', '/backend-api/codex/responses/compact', '/backend-api/codex/models'}:
             return await reject(404, 'not_found')
         if host not in self.allowed_hosts or sum(k == b"host" for k, _ in pairs) != 1:
             return await reject(400, "invalid_host")
@@ -39,13 +39,16 @@ class GatewayBoundary:
             self.clients.popitem(last=False)
         if origin and origin != scope.get("scheme", "http")+"://"+host:
             return await reject(403, "invalid_origin")
-        if scope["method"] in {"POST", "PUT", "PATCH"} and headers.get(b"content-type", b"").split(b";", 1)[0].strip() != b"application/json":
+        content_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip()
+        multipart_images_edit = scope["path"] == "/v1/images/edits" and content_type == b"multipart/form-data"
+        if scope["method"] in {"POST", "PUT", "PATCH"} and content_type != b"application/json" and not multipart_images_edit:
             return await reject(415, "json_required")
         try:
             query = parse_qsl(scope.get("query_string", b"").decode("ascii"), keep_blank_values=True)
         except (ValueError, UnicodeError):
             return await reject(400, "invalid_request")
-        if any(k not in {"alt", "limit", "after_id", "before_id", "pageSize", "pageToken"} for k, _ in query):
+        model_query = {"client_version"} if scope['path'] in {'/models', '/v1/models', '/backend-api/codex/models'} else set()
+        if any(k not in {"alt", "limit", "after_id", "before_id", "pageSize", "pageToken"} | model_query for k, _ in query):
             return await reject(400, "query_not_allowed")
         body = bytearray()
         body_deadline = time.monotonic()+10
