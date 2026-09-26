@@ -252,3 +252,24 @@ Final live status: **72 requests / 54 completed / 4 failed / 14 pending**;
 tokens within output. All 14 previous pending holds remain unchanged.
 Service is active and `/health` returns `{"status":"ok"}`. Database/keyring and
 existing unrelated changes were preserved; no commit or push was performed.
+
+### Continued frontend/backend review — 2026-09-27
+
+After the preceding checkpoint was pushed as `ababff8`, an independent review
+found and reproduced three runtime issues: the bulk refresh worker used a
+Python 3.11-only API despite Python 3.10 support; public WebSocket handshakes
+did not consume the HTTP pre-authentication IP limit; and admin fetches lost
+status when an upstream/reverse proxy returned HTML instead of JSON. Regression
+tests were written failing first, then fixed. A fresh Python 3.10 environment
+initially passed 36 targeted tests; the clean Python 3.14 environment initially
+exposed the separate missing-`greenlet` packaging issue, now fixed with
+`sqlalchemy[asyncio]`. Full clean-environment suites then passed **1,784 Python
+tests on Python 3.10 and 3.14**; the Node suite passed **57 tests**, with Ruff,
+compileall, JavaScript syntax, diff checks and a clean wheel build also passing.
+A scoped second review found no Critical/Important issue.
+
+Read-only real browser verification after those fixes returned `API_OK` from
+Playground (11 input / 6 output), retained the selected account across report
+pagination, showed 13,290 total dashboard tokens, and reported zero JavaScript
+errors. No OAuth login, account edit, quota refresh/reset, or proxy mutation was
+performed by that check.

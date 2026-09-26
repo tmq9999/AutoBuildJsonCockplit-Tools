@@ -13,6 +13,35 @@ from ...oauth import ISSUER
 from ..errors import GatewayError
 
 
+async def _join_workers(worker, count):
+    """Run bounded workers on every supported Python version.
+
+    ``asyncio.TaskGroup`` was added in Python 3.11, while this package still
+    supports 3.10.  ``gather`` plus explicit sibling cancellation preserves
+    the failure/cancellation semantics needed by the refresh lock without
+    making the feature silently fail on 3.10.
+    """
+    tasks = [asyncio.create_task(worker()) for _ in range(count)]
+    group = asyncio.gather(*tasks)
+    try:
+        await asyncio.shield(group)
+    except BaseException as exc:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        cleanup = asyncio.gather(group, *tasks, return_exceptions=True)
+        cancelled = isinstance(exc, asyncio.CancelledError)
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
+        raise
+
+
 class QuotaRefreshJobs:
     def __init__(self, services):
         self.services, self.db = services, services.db
@@ -170,10 +199,8 @@ class QuotaRefreshJobs:
                                 ELSE errors END WHERE id=:id AND state='running'"""),
                                 {"id": identity, "account": str(row["id"]), "email": row["email"], "error": error})
 
-            # TaskGroup joins/cancels both workers before releasing the DB lock.
-            async with asyncio.TaskGroup() as group:
-                for _ in range(2):
-                    group.create_task(worker())
+            # Join/cancel both workers before releasing the DB lock.
+            await _join_workers(worker, 2)
             async with self.db.sessions() as session:
                 stopped = await session.scalar(text("SELECT stop_requested FROM codex_quota_refresh_runs WHERE id=:id"), {"id": identity})
             await self._finish(identity, "stopped" if stopped or rate_limited else "completed",

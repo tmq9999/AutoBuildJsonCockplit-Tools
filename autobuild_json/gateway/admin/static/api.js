@@ -40,9 +40,26 @@ export function createApi(fetcher=globalThis.fetch.bind(globalThis)) {
           headers:{'Content-Type':'application/json',...(csrf?{'X-CSRF-Token':csrf}:{})},
           ...(body===undefined?{}:{body:JSON.stringify(body)})});
         if(generation!==epoch)throw new Error('STALE_SESSION');
-        const data=response.status===204?null:await response.json();
+        let data=null;
+        if(response.status!==204){
+          try{data=await response.json();}
+          catch(error){
+            if(generation!==epoch)throw new Error('STALE_SESSION');
+            if(error.name==='AbortError')throw error;
+            if(!response.ok){
+              const failure=new Error('REQUEST_FAILED');failure.status=response.status;throw failure;
+            }
+            throw error;
+          }
+        }
         if(generation!==epoch)throw new Error('STALE_SESSION');
-        if(!response.ok){const error=new Error(typeof data?.error==='string'?data.error:data?.error?.message||data?.error?.code||'REQUEST_FAILED');error.status=response.status;throw error;}
+        if(!response.ok){
+          const detail=[data?.error,data?.error?.message,data?.error?.code,data?.detail].find(value=>typeof value==='string'&&value)||'REQUEST_FAILED';
+          const error=new Error(detail);error.status=response.status;
+          if(typeof data?.error?.code==='string')error.code=data.error.code;
+          if(typeof data?.error?.stage==='string')error.stage=data.error.stage;
+          throw error;
+        }
         return data;
       } finally {active.delete(controller);}
     }

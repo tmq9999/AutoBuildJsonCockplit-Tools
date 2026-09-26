@@ -12,7 +12,38 @@ class GatewayBoundary:
         self.ingress_rpm, self.max_body = ingress_rpm, max_body
         self.clients = OrderedDict()
 
+    def _admit_peer(self, scope):
+        peer = (scope.get("client") or ("unknown", 0))[0]
+        now = time.monotonic()
+        queue = self.clients.setdefault(peer, deque())
+        self.clients.move_to_end(peer)
+        while queue and queue[0] <= now - 60:
+            queue.popleft()
+        allowed = len(queue) < self.ingress_rpm
+        if allowed:
+            queue.append(now)
+        while len(self.clients) > 10000:
+            self.clients.popitem(last=False)
+        return allowed
+
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            pairs = scope["headers"]
+            headers = dict(pairs)
+            host = headers.get(b"host", b"").decode("latin1")
+            origin = headers.get(b"origin", b"").decode("latin1")
+            scheme = "https" if scope.get("scheme") == "wss" else "http"
+
+            async def close(code):
+                await send({"type": "websocket.close", "code": code})
+
+            if host not in self.allowed_hosts or sum(k == b"host" for k, _ in pairs) != 1:
+                return await close(1008)
+            if sum(k == b"origin" for k, _ in pairs) > 1 or origin and origin != f"{scheme}://{host}":
+                return await close(1008)
+            if not self._admit_peer(scope):
+                return await close(1013)
+            return await self.app(scope, receive, send)
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         pairs = scope["headers"]
@@ -33,17 +64,8 @@ class GatewayBoundary:
             return await reject(404, 'not_found')
         if host not in self.allowed_hosts or sum(k == b"host" for k, _ in pairs) != 1:
             return await reject(400, "invalid_host")
-        peer = (scope.get("client") or ("unknown", 0))[0]
-        now = time.monotonic()
-        queue = self.clients.setdefault(peer, deque())
-        self.clients.move_to_end(peer)
-        while queue and queue[0] <= now-60:
-            queue.popleft()
-        if len(queue) >= self.ingress_rpm:
+        if not self._admit_peer(scope):
             return await reject(429, "rate_limited")
-        queue.append(now)
-        while len(self.clients) > 10000:
-            self.clients.popitem(last=False)
         if sum(k == b"origin" for k, _ in pairs) > 1 or origin and origin != scope.get("scheme", "http")+"://"+host:
             return await reject(403, "invalid_origin")
         content_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip()

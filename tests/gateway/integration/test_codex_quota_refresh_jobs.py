@@ -38,7 +38,10 @@ async def test_persistent_interval_cas_validation_and_default_off(pg_db, setting
         assert off.json()["settings"] == {"version": 2, "interval_minutes": 0, "next_run_at": None}
 
 
-async def test_manual_all_refresh_partial_success_disabled_and_idempotent(pg_db, settings):
+async def test_manual_all_refresh_partial_success_disabled_and_idempotent(pg_db, settings, monkeypatch):
+    # The package/CI contract still includes Python 3.10, where TaskGroup is
+    # absent.  Bulk refresh must retain its bounded worker behavior there.
+    monkeypatch.delattr(asyncio, "TaskGroup", raising=False)
     calls = []
 
     def respond(request):

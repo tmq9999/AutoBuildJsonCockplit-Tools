@@ -1,5 +1,27 @@
 # Implementation status
 
+## Push and continued review — 2026-09-27
+
+Checkpoint `ababff8` is pushed to private `tmq9999/AutoBuildJsonCockplit-Tools`
+on `main`; the remote SHA was checked. The pre-push Python run passed 1,779
+tests (two dependency warnings), 55 Node tests passed, and Gitleaks reported
+no findings in staged files or history after exact documentation false-positive
+exclusions. Real account/token/config files remain ignored.
+
+The continued review fixes are verified: Python 3.10-compatible bulk
+quota-refresh workers with cancellation-safe joins, shared HTTP/WebSocket
+pre-authentication ingress limits, and safe frontend non-JSON HTTP error handling
+with session-generation fencing. Full clean-environment suites passed **1,784
+Python tests on Python 3.10 and 3.14**; **57 Node tests**, Ruff, compileall,
+JavaScript syntax, diff checks and a clean wheel build also passed. A scoped
+independent review found no concrete remaining issue in those changes.
+
+CI for `ababff8` exposed a clean-install packaging defect on Python 3.14:
+the service extra omitted SQLAlchemy's `asyncio` extra and therefore `greenlet`.
+The fix is now in the working tree as `sqlalchemy[asyncio]>=2.0,<3`; a clean
+Python 3.14 virtualenv imports the async database layer successfully. The full
+post-fix suite is included in the counts above.
+
 ## Live gateway follow-up — 2026-09-26
 
 Current checkpoint: [real HTTP/browser evidence](live-verification-2026-09-26.md).

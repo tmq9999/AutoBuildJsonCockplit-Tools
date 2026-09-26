@@ -5,6 +5,31 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ## [Unreleased] — 2026-09-24
 
+### Push and frontend/backend review — 2026-09-27
+
+- Published the previous Codex dashboard/gateway review checkpoint as `ababff8`
+  on the existing private repository's `main` branch. Tracked history and staged
+  changes were secret-scanned; runtime account/token/config data remain ignored.
+- Bulk quota refresh no longer requires Python 3.11's `asyncio.TaskGroup` on the
+  supported Python 3.10 runtime. The two workers cancel/join safely, including
+  repeated cancellation while a sibling is cleaning up, before releasing the
+  cross-process refresh lock.
+- Public WebSocket handshakes now share the HTTP pre-authentication IP limiter;
+  denied upgrades never reach database authentication. Host/Origin guards and
+  per-peer expiry remain in place. This local guard does not replace a global
+  reverse-proxy limit across multiple gateway processes.
+- Admin API errors retain their HTTP status and structured domain code/stage.
+  Non-JSON error pages no longer surface raw parser/body details; late parse
+  failures from a previous login cannot invalidate a replacement admin session.
+- The gateway service extra explicitly installs `sqlalchemy[asyncio]`, including
+  `greenlet`. A clean Python 3.14 installation with SQLAlchemy 2.1 otherwise
+  could not import the async database layer; reproduced outside the preinstalled
+  developer environment after CI exposed the missing dependency.
+- Final follow-up verification: **1,784 Python tests passed on clean Python 3.10
+  and 3.14 environments**, **57 Node tests**, Ruff, compileall, JavaScript syntax,
+  diff checks and a clean wheel build passed. Existing dependency deprecation
+  warnings remain only in the Python 3.14 run.
+
 ### Full gateway review repairs — 2026-09-26
 
 - Follow-up recovery/report review: maintenance no longer spends its bounded

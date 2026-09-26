@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {createServer} from 'node:http';
 import {decimalToMicro, microToDecimal, parseQuotaInput, maskedSecret, createApi} from '../../autobuild_json/gateway/admin/static/api.js';
 import {keyPayload} from '../../autobuild_json/gateway/admin/static/keys.js';
 
@@ -62,4 +63,33 @@ test('logout invalidates an in-flight response',async()=>{
   api.clear();
   finish({ok:true,status:200,json:async()=>[{name:'stale'}]});
   await assert.rejects(pending,/STALE_SESSION/);
+});
+
+test('API preserves status and domain codes from real HTTP errors without displaying HTML',async t=>{
+  const server=createServer((request,response)=>{
+    if(request.url==='/domain'){
+      response.writeHead(503,{'Content-Type':'application/json'});
+      return response.end(JSON.stringify({error:{code:'reauth_required',message:'reauth_required',stage:'refresh'}}));
+    }
+    response.writeHead(Number(request.url.slice(1)),{'Content-Type':'text/html'});
+    response.end('<h1>PRIVATE-PROXY-DIAGNOSTIC</h1>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+  const api=createApi((path,options)=>fetch(`http://127.0.0.1:${server.address().port}${path}`,options));
+  await assert.rejects(api.request('/domain'),error=>error.status===503&&error.code==='reauth_required'&&error.stage==='refresh');
+  for(const status of [401,502])await assert.rejects(api.request('/'+status),error=>error.status===status&&error.message==='REQUEST_FAILED');
+});
+
+test('old non-JSON response cannot invalidate a replacement admin session',async()=>{
+  let failBody,bodyStarted;
+  const started=new Promise(resolve=>{bodyStarted=resolve;});
+  // Only the fetch boundary is controlled; exercise the API's real epoch/error handling.
+  const api=createApi(async()=>({ok:false,status:401,json:()=>{bodyStarted();return new Promise((resolve,reject)=>{failBody=reject;});}}));
+  api.setSession('old');
+  const pending=api.request('/api/service/keys');
+  await started;
+  api.clear();api.setSession('replacement');
+  failBody(new SyntaxError('PRIVATE-OLD-RESPONSE'));
+  await assert.rejects(pending,error=>error.message==='STALE_SESSION'&&error.status===undefined);
 });
