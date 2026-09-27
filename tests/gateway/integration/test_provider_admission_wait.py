@@ -89,16 +89,19 @@ async def test_deadline_is_rechecked_after_a_provider_row_lock(pg_db):
         )
         context = limits.acquire(route, deadline, wait=True)
         pending = asyncio.create_task(context.__aenter__())
-        await asyncio.sleep(0.15)
-        assert not pending.done()
-
-    try:
-        await pending
-    except GatewayError as error:
-        assert error.code == "deadline_exceeded"
-    else:
-        await context.__aexit__(None, None, None)
-        pytest.fail("Admission must not be inserted after its deadline")
+        try:
+            await asyncio.sleep(0.15)
+            # The transaction-local lock_timeout is tied to the 50ms request
+            # deadline, so the blocked SELECT must finish before the blocker
+            # exits rather than retaining a session past the deadline.
+            assert pending.done()
+            with pytest.raises(GatewayError, match="deadline_exceeded") as error:
+                await pending
+            assert error.value.status == 504
+        finally:
+            if not pending.done():
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
     assert await active_admissions(pg_db) == 0
 
 

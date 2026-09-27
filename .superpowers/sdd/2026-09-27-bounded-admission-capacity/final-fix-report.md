@@ -62,6 +62,23 @@ pytest ...test_provider_admission_wait.py ...test_codex_service_status.py
 12 errors during fixture setup (ValueError: Provide --postgres-bin or a dedicated test database URL)
 ```
 
+The targeted PostgreSQL 18 verification was subsequently run with the
+available bundled binaries:
+
+```text
+AUTOBUILD_TEST_POSTGRES_BIN=$PGROOT/usr/lib/postgresql/18/bin \
+LD_LIBRARY_PATH=$PGROOT/usr/lib/x86_64-linux-gnu \
+../../.venv/bin/python -m pytest -q \
+  tests/gateway/integration/test_provider_admission_wait.py \
+  tests/gateway/integration/test_codex_service_status.py
+12 passed in 5.30s
+```
+
+The provider row-lock regression now expects the deadline-bound lock timeout
+to complete while the blocker is still held (`pending.done()`), awaits the
+`deadline_exceeded` error, and verifies no admission row remains after blocker
+rollback.
+
 The required `data` symlink was preserved. Commits for this wave are recorded
 in the branch history with subjects `fix: close final bounded admission review
 gaps`, `test: preserve local gateway capacity configuration`, and `fix: make
