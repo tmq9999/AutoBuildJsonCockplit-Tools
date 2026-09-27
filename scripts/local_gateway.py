@@ -58,6 +58,14 @@ def command(args):
     return subprocess.run([str(a) for a in args], check=True, capture_output=True, timeout=60)
 
 
+def preserve_gateway_capacity(environment, source=None):
+    """Carry the configured inference capacity into child gateway processes."""
+    configured = (os.environ if source is None else source).get("AUTOBUILD_GATEWAY_INFERENCE_CAPACITY")
+    if configured is not None:
+        environment["AUTOBUILD_GATEWAY_INFERENCE_CAPACITY"] = configured
+    return environment
+
+
 async def import_records(path, environment):
     from autobuild_json.gateway.__main__ import build_services
     from autobuild_json.gateway.settings import ServiceSettings
@@ -154,7 +162,6 @@ def main():
         require_private_regular(keyring)
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("AUTOBUILD_")}
-        configured_capacity = os.environ.get("AUTOBUILD_GATEWAY_INFERENCE_CAPACITY")
         environment.update(
             AUTOBUILD_GATEWAY_DATABASE_URL=f"postgresql+psycopg://autobuild_local:{password}@127.0.0.1:55433/autobuild_local",
             AUTOBUILD_GATEWAY_MASTER_KEY_FILE=str(keyring), AUTOBUILD_GATEWAY_HOST="127.0.0.1",
@@ -162,8 +169,7 @@ def main():
             AUTOBUILD_GATEWAY_ALLOWED_NETWORKS=json.dumps(args.allowed_network),
             AUTOBUILD_GATEWAY_TRUSTED_EGRESS_PROXIES=json.dumps(args.trusted_egress_proxy),
             AUTOBUILD_HOST="127.0.0.1", AUTOBUILD_PORT="8787", AUTOBUILD_DATA_DIR=str(root / "admin-data"))
-        if configured_capacity is not None:
-            environment["AUTOBUILD_GATEWAY_INFERENCE_CAPACITY"] = configured_capacity
+        preserve_gateway_capacity(environment)
         command_args = [sys.executable, "-m", "autobuild_json.gateway"]
         subprocess.run(command_args + ["migrate"], env=environment, cwd=ROOT, check=True, timeout=60)
         if args.import_json:
