@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
@@ -73,7 +74,7 @@ class PgLeaseStore:
                 raise GatewayError("deadline_exceeded", 504, "proxy") from None
             raise
 
-    async def release(self, token):
+    async def _release(self, token):
         cleanup_deadline = datetime.now(timezone.utc) + timedelta(seconds=self._CLEANUP_GRACE_SECONDS)
         try:
             async with self.db.sessions.begin() as session:
@@ -88,6 +89,28 @@ class PgLeaseStore:
             if pgcode == "55P03" or "lock timeout" in message:
                 raise GatewayError("deadline_exceeded", 504, "proxy") from None
             raise
+
+    async def release(self, token):
+        owned = asyncio.create_task(self._release(token))
+        cancelled = False
+        cleanup_error = None
+        while not owned.done():
+            try:
+                await asyncio.shield(owned)
+            except asyncio.CancelledError:
+                cancelled = True
+            except BaseException:
+                # The owned task has completed with its cleanup result; the
+                # final await below records the error without abandoning it.
+                break
+        try:
+            await owned
+        except BaseException as exc:
+            cleanup_error = exc
+        if cancelled:
+            raise asyncio.CancelledError from cleanup_error
+        if cleanup_error is not None:
+            raise cleanup_error
 
     async def assert_owner(self, token):
         async with self.db.sessions() as session:

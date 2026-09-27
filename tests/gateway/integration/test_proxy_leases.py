@@ -114,3 +114,33 @@ async def test_release_lock_timeout_is_bounded_and_redacted(pg_db):
     finally:
         await blocker.rollback()
         await blocker.close()
+
+
+async def test_release_joins_bounded_cleanup_when_cancelled(pg_db):
+    from autobuild_json.gateway.proxy.pg_leases import PgLeaseStore
+
+    store = PgLeaseStore(pg_db)
+    resource = "cancelled-release-fingerprint"
+    token = await store.claim(
+        resource,
+        uuid4(),
+        datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+    blocker = pg_db.sessions()
+    await blocker.begin()
+    try:
+        await blocker.execute(
+            text("SELECT resource FROM proxy_leases WHERE resource=:resource FOR UPDATE"),
+            {"resource": resource},
+        )
+        pending = asyncio.create_task(store.release(token))
+        await asyncio.sleep(0.05)
+        started = asyncio.get_running_loop().time()
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert asyncio.get_running_loop().time() - started < 0.8
+        assert pending.done()
+    finally:
+        await blocker.rollback()
+        await blocker.close()
