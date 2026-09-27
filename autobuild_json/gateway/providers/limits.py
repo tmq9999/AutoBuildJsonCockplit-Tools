@@ -36,7 +36,7 @@ class ProviderLimits:
             return lock
         if len(self._provider_locks) >= self._PROVIDER_LOCK_CAPACITY:
             for key, candidate in tuple(self._provider_locks.items()):
-                if not candidate.locked():
+                if not candidate.locked() and not getattr(candidate, "_waiters", None):
                     del self._provider_locks[key]
                     break
         if len(self._provider_locks) >= self._PROVIDER_LOCK_CAPACITY:

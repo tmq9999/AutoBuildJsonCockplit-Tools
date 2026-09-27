@@ -76,7 +76,7 @@ class ProxyManager:
             return lock
         if len(self._resource_locks) >= self._RESOURCE_LOCK_CAPACITY:
             for key, candidate in tuple(self._resource_locks.items()):
-                if not candidate.locked():
+                if not candidate.locked() and not getattr(candidate, "_waiters", None):
                     del self._resource_locks[key]
                     break
         if len(self._resource_locks) >= self._RESOURCE_LOCK_CAPACITY:
