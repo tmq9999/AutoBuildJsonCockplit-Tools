@@ -35,3 +35,17 @@ The full provider/proxy/review command reached **20 passed, 1 failed**. The revi
 
 - The review-regression expectation for immediate engine-level provider rejection conflicts with the task-1 engine path that intentionally calls `ProviderLimits.acquire(..., wait=True)`. No engine/provider policy change was made here.
 - The existing 50 ms provider-lock regression can be flaky under combined PostgreSQL fixture startup/load; it passed when rerun alone.
+
+## Review fix round 1
+
+- Bounded provider-admission and proxy-lease cleanup updates with a documented 250 ms independent cleanup grace. Lock timeouts map to redacted `deadline_exceeded`; provider cleanup runs in an owned shielded task so cancellation cannot abandon it mid-query.
+- Added cleanup-row lock regressions: **2 passed**.
+- Added bounded provider wait samples (`wait_p50_ms`, `wait_p95_ms`, `last_wait_ms`) to `ProviderLimits.snapshot()` using a capped deque.
+- Targeted ruff and diff checks: passed.
+- Task-1's unrelated `ProxyCapacityError` public-message regression was intentionally not changed.
+
+## Review fix round 2
+
+- `PgLeaseStore.release` now owns its bounded cleanup task and shields/joins it through cancellation, propagating cancellation only after the 250 ms lock-timeout grace completes.
+- Added cancellation-during-held-lease-row regression; cleanup timeout and cancellation regressions passed (**2 passed**).
+- Targeted provider cleanup regression plus lease cancellation regression: **2 passed**; ruff passed.
