@@ -223,6 +223,29 @@ async def test_wait_true_reports_retryable_capacity_after_bounded_wait():
 
 
 @pytest.mark.asyncio
+async def test_capacity_wait_records_one_total_episode_after_delayed_release():
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from autobuild_json.gateway.proxy.config import ProxySelection
+    from autobuild_json.models import ProxyConfig
+
+    store = MemoryLeaseStore()
+    manager = ProxyManager(store, acquisition_timeout=.2)
+    selection = ProxySelection("fixed", runtime_entries=(ProxyConfig("http://proxy.invalid:80"),))
+    held = await store.claim("endpoint:" + __import__("hashlib").sha256(
+        "http://proxy.invalid:80".encode()).hexdigest(), uuid4(), deadline())
+    release = asyncio.create_task(asyncio.sleep(.05))
+    async def release_later():
+        await release
+        await store.release(held)
+    asyncio.create_task(release_later())
+    await manager.wait_for_capacity(selection, uuid4(), deadline())
+    snapshot = manager.snapshot()
+    assert snapshot["wait_p50_ms"] >= 40
+    assert snapshot["wait_attempts"] >= 1
+
+
+@pytest.mark.asyncio
 async def test_wait_false_makes_one_claim_without_sleeping():
     from autobuild_json.gateway.proxy.manager import ProxyManager
     from autobuild_json.gateway.proxy.leases import MemoryLeaseStore

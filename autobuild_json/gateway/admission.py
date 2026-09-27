@@ -9,6 +9,14 @@ from time import monotonic
 from .errors import GatewayError
 
 
+class _ResourceWait:
+    def __init__(self, admission, resource):
+        self.admission = admission
+        self.resource = resource
+        self.started = monotonic()
+        self.ended = False
+
+
 class _Ticket:
     def __init__(self, admission, wait_ms):
         self._admission = admission
@@ -60,9 +68,42 @@ class InferenceAdmission:
         # recent wait sample is retained for percentiles.
         self._waits = deque(maxlen=2048)
         self._last_wait_ms = 0.0
+        self._resource_waits = deque(maxlen=2048)
+        self._resource_waiting = 0
+        self._resource_waiting_by_type = {"provider": 0, "proxy": 0}
+        self._resource_wait_episodes = 0
+        self._resource_wait_expired = 0
+        self._resource_wait_cancelled = 0
+        self._resource_wait_success = 0
+        self._last_resource_wait_ms = 0.0
 
     def enter(self, deadline):
         return _AdmissionContext(self, deadline)
+
+    def begin_resource_wait(self, resource):
+        self._resource_waiting += 1
+        self._resource_waiting_by_type[resource] = self._resource_waiting_by_type.get(resource, 0) + 1
+        self._emit_metrics()
+        return _ResourceWait(self, resource)
+
+    def end_resource_wait(self, episode, outcome="success"):
+        if episode is None or episode.ended:
+            return
+        episode.ended = True
+        self._resource_waiting = max(0, self._resource_waiting - 1)
+        self._resource_waiting_by_type[episode.resource] = max(
+            0, self._resource_waiting_by_type.get(episode.resource, 0) - 1)
+        elapsed = (monotonic() - episode.started) * 1000
+        self._resource_waits.append(elapsed)
+        self._last_resource_wait_ms = elapsed
+        self._resource_wait_episodes += 1
+        if outcome == "expired":
+            self._resource_wait_expired += 1
+        elif outcome == "cancelled":
+            self._resource_wait_cancelled += 1
+        else:
+            self._resource_wait_success += 1
+        self._emit_metrics()
 
     async def _acquire(self, deadline):
         now = datetime.now(deadline.tzinfo or timezone.utc)
@@ -132,11 +173,17 @@ class InferenceAdmission:
 
     def snapshot(self):
         waits = sorted(self._waits)
+        resource_waits = sorted(self._resource_waits)
 
         def percentile(percent):
             if not waits:
                 return 0.0
             return waits[max(0, ceil(len(waits) * percent) - 1)]
+
+        def resource_percentile(percent):
+            if not resource_waits:
+                return 0.0
+            return resource_waits[max(0, ceil(len(resource_waits) * percent) - 1)]
 
         return {
             "capacity": self.capacity,
@@ -149,4 +196,14 @@ class InferenceAdmission:
             "wait_p50_ms": percentile(0.50),
             "wait_p95_ms": percentile(0.95),
             "last_wait_ms": self._last_wait_ms,
+            "resource_waiting": self._resource_waiting,
+            "provider_waiting": self._resource_waiting_by_type.get("provider", 0),
+            "proxy_waiting": self._resource_waiting_by_type.get("proxy", 0),
+            "resource_wait_episodes": self._resource_wait_episodes,
+            "resource_wait_success": self._resource_wait_success,
+            "resource_wait_expired": self._resource_wait_expired,
+            "resource_wait_cancelled": self._resource_wait_cancelled,
+            "resource_wait_p50_ms": resource_percentile(.50),
+            "resource_wait_p95_ms": resource_percentile(.95),
+            "last_resource_wait_ms": self._last_resource_wait_ms,
         }

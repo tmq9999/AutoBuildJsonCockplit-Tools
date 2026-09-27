@@ -20,8 +20,18 @@ class ProviderLimits:
         self._released = asyncio.Condition()
         self._wait_attempts = 0
         self._expired_waits = 0
+        self._cancelled_waits = 0
         self._waits = deque(maxlen=2048)
         self._last_wait_ms = 0.0
+
+    async def _try_acquire_bounded(self, route, deadline, identity):
+        remaining = self._remaining(deadline)
+        if remaining <= 0:
+            raise GatewayError("deadline_exceeded", 504, "upstream")
+        try:
+            return await asyncio.wait_for(self._try_acquire(route, deadline, identity), remaining)
+        except asyncio.TimeoutError:
+            raise GatewayError("deadline_exceeded", 504, "upstream") from None
 
     async def _set_lock_timeout(self, session, deadline):
         remaining = self._remaining(deadline)
@@ -101,40 +111,38 @@ class ProviderLimits:
         return {
             "wait_attempts": self._wait_attempts,
             "expired_waits": self._expired_waits,
+            "cancelled_waits": self._cancelled_waits,
             "wait_p50_ms": percentile(.50),
             "wait_p95_ms": percentile(.95),
             "last_wait_ms": self._last_wait_ms,
         }
 
     async def _wait_for_release(self, deadline):
-        started = time.monotonic()
         remaining = self._remaining(deadline)
         if remaining <= 0:
             self._expired_waits += 1
             raise GatewayError("deadline_exceeded", 504, "upstream")
-        try:
-            async with self._released:
-                try:
-                    await asyncio.wait_for(self._released.wait(), min(0.05, remaining))
-                except asyncio.TimeoutError:
-                    pass
-        finally:
-            wait_ms = min((time.monotonic() - started) * 1000, self._CLEANUP_GRACE_SECONDS * 1000)
-            self._waits.append(wait_ms)
-            self._last_wait_ms = wait_ms
-
+        async with self._released:
+            try:
+                await asyncio.wait_for(self._released.wait(), min(0.05, remaining))
+            except asyncio.TimeoutError:
+                pass
     async def _notify_release(self):
         async with self._released:
             self._released.notify_all()
 
     async def _release_admission(self, identity):
         cleanup_deadline = datetime.now(timezone.utc) + timedelta(seconds=self._CLEANUP_GRACE_SECONDS)
-        try:
+        async def operation():
             async with self.db.sessions.begin() as session:
                 await self._set_lock_timeout(session, cleanup_deadline)
                 await session.execute(
                     text("UPDATE provider_admissions SET active=false WHERE id=:id"), {"id": identity}
                 )
+        try:
+            await asyncio.wait_for(operation(), self._CLEANUP_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            raise GatewayError("deadline_exceeded", 504, "upstream") from None
         except (OperationalError, DBAPIError) as exc:
             original = getattr(exc, "orig", None)
             pgcode = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
@@ -146,35 +154,54 @@ class ProviderLimits:
     @asynccontextmanager
     async def acquire(self, route, deadline, *, wait=False):
         identity = uuid4()
-        while True:
-            if wait and self._remaining(deadline) <= 0:
-                self._expired_waits += 1
-                raise GatewayError("deadline_exceeded", 504, "upstream")
-            try:
-                acquired = await self._try_acquire(route, deadline, identity)
-            except GatewayError as exc:
-                if wait and exc.code == "deadline_exceeded":
+        wait_started = None
+        try:
+            while True:
+                if wait and self._remaining(deadline) <= 0:
                     self._expired_waits += 1
-                raise
-            if acquired:
-                break
-            if not wait:
-                raise GatewayError("upstream_unavailable", 503, "upstream", 1)
-            self._wait_attempts += 1
-            await self._wait_for_release(deadline)
+                    raise GatewayError("deadline_exceeded", 504, "upstream")
+                try:
+                    acquired = await self._try_acquire_bounded(route, deadline, identity)
+                except GatewayError as exc:
+                    if wait and exc.code == "deadline_exceeded":
+                        self._expired_waits += 1
+                    raise
+                if acquired:
+                    break
+                if not wait:
+                    raise GatewayError("upstream_unavailable", 503, "upstream", 1)
+                if wait_started is None:
+                    wait_started = time.monotonic()
+                self._wait_attempts += 1
+                await self._wait_for_release(deadline)
+        except asyncio.CancelledError:
+            if wait and wait_started is not None:
+                self._cancelled_waits += 1
+            raise
+        finally:
+            if wait_started is not None:
+                wait_ms = (time.monotonic() - wait_started) * 1000
+                self._waits.append(wait_ms)
+                self._last_wait_ms = wait_ms
         try:
             yield identity
         finally:
             try:
                 owned = asyncio.create_task(self._release_admission(identity))
                 cancelled = False
+                cleanup_error = None
                 while not owned.done():
                     try:
                         await asyncio.shield(owned)
                     except asyncio.CancelledError:
                         cancelled = True
-                await owned
+                try:
+                    await owned
+                except BaseException as exc:
+                    cleanup_error = exc
                 if cancelled:
-                    raise asyncio.CancelledError
+                    raise asyncio.CancelledError from cleanup_error
+                if cleanup_error is not None:
+                    raise cleanup_error
             finally:
                 await self._notify_release()

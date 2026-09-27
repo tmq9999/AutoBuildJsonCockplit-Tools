@@ -39,33 +39,41 @@ class PgLeaseStore:
             return bool(await session.scalar(text("SELECT disabled FROM proxy_health WHERE resource=:resource"),
                                              {"resource": resource}))
 
+    async def _claim_transaction(self, resource, owner, deadline):
+        async with self.db.sessions.begin() as session:
+            now = await self._now(session)
+            if deadline <= now or deadline > now+timedelta(seconds=600):
+                raise GatewayError("deadline_exceeded", 504, "proxy")
+            await self._set_lock_timeout(session, deadline)
+            await session.execute(text("INSERT INTO proxy_leases(resource,generation) VALUES (:resource,0) "
+                                       "ON CONFLICT DO NOTHING"), {"resource": resource})
+            await self._set_lock_timeout(session, deadline)
+            row = (await session.execute(text(
+                "SELECT * FROM proxy_leases WHERE resource=:resource FOR UPDATE"),
+                {"resource": resource})).mappings().one()
+            now = await self._now(session)
+            if deadline <= now:
+                raise GatewayError("deadline_exceeded", 504, "proxy")
+            if row["owner"] is not None and row["hard_deadline"] + timedelta(seconds=15) > now:
+                return None
+            generation = row["generation"] + 1
+            await self._set_lock_timeout(session, deadline)
+            updated = await session.execute(text(
+                "UPDATE proxy_leases SET owner=:owner,generation=:generation,hard_deadline=:deadline "
+                "WHERE resource=:resource AND clock_timestamp()<:deadline RETURNING generation"),
+                {"owner": owner, "generation": generation, "deadline": deadline, "resource": resource})
+            if updated.first() is None or self._remaining(deadline) <= 0:
+                raise GatewayError("deadline_exceeded", 504, "proxy")
+            return LeaseToken(resource, owner, generation, deadline)
+
     async def claim(self, resource, owner, deadline):
         try:
-            async with self.db.sessions.begin() as session:
-                now = await self._now(session)
-                if deadline <= now or deadline > now+timedelta(seconds=600):
-                    raise ValueError("invalid_deadline")
-                await self._set_lock_timeout(session, deadline)
-                await session.execute(text("INSERT INTO proxy_leases(resource,generation) VALUES (:resource,0) "
-                                           "ON CONFLICT DO NOTHING"), {"resource": resource})
-                await self._set_lock_timeout(session, deadline)
-                row = (await session.execute(text(
-                    "SELECT * FROM proxy_leases WHERE resource=:resource FOR UPDATE"),
-                    {"resource": resource})).mappings().one()
-                now = await self._now(session)
-                if deadline <= now:
-                    raise GatewayError("deadline_exceeded", 504, "proxy")
-                if row["owner"] is not None and row["hard_deadline"] + timedelta(seconds=15) > now:
-                    return None
-                generation = row["generation"] + 1
-                await self._set_lock_timeout(session, deadline)
-                updated = await session.execute(text(
-                    "UPDATE proxy_leases SET owner=:owner,generation=:generation,hard_deadline=:deadline "
-                    "WHERE resource=:resource AND clock_timestamp()<:deadline RETURNING generation"),
-                    {"owner": owner, "generation": generation, "deadline": deadline, "resource": resource})
-                if updated.first() is None or self._remaining(deadline) <= 0:
-                    raise GatewayError("deadline_exceeded", 504, "proxy")
-                return LeaseToken(resource, owner, generation, deadline)
+            remaining = self._remaining(deadline)
+            if remaining <= 0 or remaining > 600:
+                raise GatewayError("deadline_exceeded", 504, "proxy")
+            return await asyncio.wait_for(self._claim_transaction(resource, owner, deadline), remaining)
+        except asyncio.TimeoutError:
+            raise GatewayError("deadline_exceeded", 504, "proxy") from None
         except (OperationalError, DBAPIError) as exc:
             original = getattr(exc, "orig", None)
             pgcode = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
@@ -74,14 +82,19 @@ class PgLeaseStore:
                 raise GatewayError("deadline_exceeded", 504, "proxy") from None
             raise
 
+    async def _release_transaction(self, token, cleanup_deadline):
+        async with self.db.sessions.begin() as session:
+            await self._set_lock_timeout(session, cleanup_deadline)
+            await session.execute(text("UPDATE proxy_leases SET owner=NULL WHERE resource=:resource "
+                "AND owner=:owner AND generation=:generation"),
+                {"resource": token.resource, "owner": token.owner, "generation": token.generation})
+
     async def _release(self, token):
         cleanup_deadline = datetime.now(timezone.utc) + timedelta(seconds=self._CLEANUP_GRACE_SECONDS)
         try:
-            async with self.db.sessions.begin() as session:
-                await self._set_lock_timeout(session, cleanup_deadline)
-                await session.execute(text("UPDATE proxy_leases SET owner=NULL WHERE resource=:resource "
-                    "AND owner=:owner AND generation=:generation"),
-                    {"resource": token.resource, "owner": token.owner, "generation": token.generation})
+            await asyncio.wait_for(self._release_transaction(token, cleanup_deadline), self._CLEANUP_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            raise GatewayError("deadline_exceeded", 504, "proxy") from None
         except (OperationalError, DBAPIError) as exc:
             original = getattr(exc, "orig", None)
             pgcode = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)

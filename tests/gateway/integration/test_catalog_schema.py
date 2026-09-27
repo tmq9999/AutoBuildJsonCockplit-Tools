@@ -70,7 +70,8 @@ async def test_catalog_upgrade_from_revision_nine_preserves_existing_rows(postgr
         async with db.engine.begin() as connection:
             await connection.run_sync(lambda sync: command.upgrade(_bind_config(config, sync), "head"))
         async with db.sessions() as session:
-            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0015_model_cooldown"
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0016_capacity_snapshots"
+            assert await session.scalar(text("SELECT count(*) FROM information_schema.tables WHERE table_name='gateway_capacity_snapshots'")) == 1
             assert await session.scalar(text("SELECT count(*) FROM information_schema.columns WHERE table_name='provider_operations' AND column_name='schedule_completed_at'")) == 1
             assert await session.scalar(text("SELECT count(*) FROM providers WHERE id=:id"),
                                         {"id": provider_id}) == 1

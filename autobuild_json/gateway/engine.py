@@ -67,6 +67,7 @@ class Engine:
         self._capacity_dirty = False
         self._capacity_stopping = False
         self._capacity_interval = 0.05
+        self._capacity_heartbeat = 10.0
 
     def capacity_snapshot(self):
         proxy = self.proxies.snapshot() if hasattr(self.proxies, "snapshot") else {}
@@ -93,8 +94,13 @@ class Engine:
         """Coalescing, single-writer capacity publisher."""
         event = self._capacity_event
         while event is not None:
-            await event.wait()
-            event.clear()
+            try:
+                await asyncio.wait_for(event.wait(), getattr(self, "_capacity_heartbeat", 10.0))
+                event.clear()
+            except asyncio.TimeoutError:
+                # Keep a healthy idle serving process fresh for admin readers;
+                # this remains below the 30-second stale threshold.
+                self._capacity_dirty = True
             if self._capacity_interval:
                 await asyncio.sleep(self._capacity_interval)
             if not self._capacity_dirty and self._capacity_stopping:
@@ -211,31 +217,86 @@ class Engine:
                 # provider admission rather than holding it while sleeping.
                 provider_args = {"wait": True} if "wait" in inspect.signature(self.provider_limits.acquire).parameters else {}
                 proxy_args = {"wait": True} if "wait" in inspect.signature(self.proxies.acquire).parameters else {}
-                async with self.provider_limits.acquire(route, deadline, **provider_args):
-                    try:
-                        # Never let proxy-capacity polling pin a provider slot.
-                        # A non-waiting claim is enough to preserve the safe
-                        # provider-before-proxy ordering for this attempt.
-                        async with self.proxies.acquire(selection, owner, deadline,
-                                                         **({"wait": False} if proxy_args else {})) as lease:
-                            await self.transport._validate(route, lease.proxy)
-                            yield lease
-                        return
-                    except ProxyCapacityError:
-                        proxy_capacity = True
+                admission = getattr(self, "admission", None)
+                provider_episode = (admission.begin_resource_wait("provider")
+                                    if admission is not None and hasattr(admission, "begin_resource_wait") else None)
+                provider_outcome = "success"
+                try:
+                    provider_context = self.provider_limits.acquire(route, deadline, **provider_args)
+                    async with provider_context:
+                        if provider_episode is not None:
+                            admission.end_resource_wait(provider_episode, "success")
+                            provider_episode = None
+                        publish = getattr(self, "request_capacity_publish", None)
+                        if publish is not None:
+                            publish()
+                        proxy_episode = (admission.begin_resource_wait("proxy")
+                                         if admission is not None and hasattr(admission, "begin_resource_wait") else None)
+                        try:
+                            # Never let proxy-capacity polling pin a provider slot.
+                            # A non-waiting claim is enough to preserve the safe
+                            # provider-before-proxy ordering for this attempt.
+                            async with self.proxies.acquire(selection, owner, deadline,
+                                                             **({"wait": False} if proxy_args else {})) as lease:
+                                if proxy_episode is not None:
+                                    admission.end_resource_wait(proxy_episode, "success")
+                                    proxy_episode = None
+                                await self.transport._validate(route, lease.proxy)
+                                yield lease
+                            return
+                        except asyncio.CancelledError:
+                            if proxy_episode is not None:
+                                admission.end_resource_wait(proxy_episode, "cancelled")
+                            raise
+                        except GatewayError as error:
+                            if proxy_episode is not None:
+                                admission.end_resource_wait(proxy_episode, "expired" if error.code == "deadline_exceeded" else "success")
+                            raise
+                        finally:
+                            if proxy_episode is not None:
+                                admission.end_resource_wait(proxy_episode, "success")
+
+                except asyncio.CancelledError:
+                    provider_outcome = "cancelled"
+                    raise
+                except GatewayError as error:
+                    provider_outcome = "expired" if error.code == "deadline_exceeded" else "success"
+                    raise
+                finally:
+                    if provider_episode is not None:
+                        admission.end_resource_wait(provider_episode, provider_outcome)
+
             except ProxyCapacityError:
                 proxy_capacity = True
             if proxy_capacity:
                 if isinstance(deadline, datetime) and datetime.now(timezone.utc) >= deadline:
                     raise GatewayError("deadline_exceeded", 504, "request") from None
                 waiter = getattr(self.proxies, "wait_for_capacity", None)
-                if waiter is not None:
-                    await waiter(selection, owner, deadline)
-                else:
-                    # Compatibility fallback for test/dialect proxy stores
-                    # predating the explicit wait path.  No resource is held
-                    # during this bounded sleep.
-                    await asyncio.sleep(min(0.05, max(0, (deadline - datetime.now(timezone.utc)).total_seconds())))
+                admission = getattr(self, "admission", None)
+                wait_episode = (admission.begin_resource_wait("proxy")
+                                if admission is not None and hasattr(admission, "begin_resource_wait") else None)
+                try:
+                    if waiter is not None:
+                        await waiter(selection, owner, deadline)
+                    else:
+                        # Compatibility fallback for test/dialect proxy stores
+                        # predating the explicit wait path.  No resource is held
+                        # during this bounded sleep.
+                        await asyncio.sleep(min(0.05, max(0, (deadline - datetime.now(timezone.utc)).total_seconds())))
+                    if wait_episode is not None:
+                        admission.end_resource_wait(wait_episode, "success")
+                        wait_episode = None
+                except asyncio.CancelledError:
+                    if wait_episode is not None:
+                        admission.end_resource_wait(wait_episode, "cancelled")
+                    raise
+                except GatewayError as error:
+                    if wait_episode is not None:
+                        admission.end_resource_wait(wait_episode, "expired" if error.code == "deadline_exceeded" else "success")
+                    raise
+                finally:
+                    if wait_episode is not None:
+                        admission.end_resource_wait(wait_episode, "success")
 
     def meta(self, body, idempotency_key=None, *, protocol="openai", session_digest=None):
         now = datetime.now(timezone.utc)
@@ -484,6 +545,9 @@ class Engine:
                         await stack.aclose()
                     finally:
                         await admission_stack.aclose()
+                        publish = getattr(self, "request_capacity_publish", None)
+                        if publish is not None:
+                            publish()
             owned = asyncio.create_task(asyncio.wait_for(cleanup(), 5))
             cancelled = isinstance(error, asyncio.CancelledError)
             try:

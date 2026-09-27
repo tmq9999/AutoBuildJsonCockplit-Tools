@@ -125,3 +125,38 @@ async def test_wait_history_is_bounded():
         ticket.release()
     assert len(admission._waits) == 2048
     assert admission.snapshot()["accepted"] == 2100
+
+
+@pytest.mark.asyncio
+async def test_resource_wait_episode_records_total_elapsed_and_terminal_state():
+    admission = InferenceAdmission(capacity=2)
+    ticket = await admission.enter(future())
+    episode = admission.begin_resource_wait("provider")
+    await asyncio.sleep(0.02)
+    admission.end_resource_wait(episode, "success")
+    snapshot = admission.snapshot()
+    assert snapshot["resource_waiting"] == 0
+    assert snapshot["resource_wait_episodes"] == 1
+    assert snapshot["resource_wait_p50_ms"] >= 15
+    assert snapshot["resource_wait_p95_ms"] >= snapshot["resource_wait_p50_ms"]
+    assert snapshot["resource_wait_expired"] == 0
+    assert snapshot["resource_wait_cancelled"] == 0
+    ticket.release()
+
+
+@pytest.mark.asyncio
+async def test_resource_wait_cancel_and_expiry_are_counted_once_with_bounded_history():
+    admission = InferenceAdmission(capacity=1)
+    ticket = await admission.enter(future())
+    cancelled = admission.begin_resource_wait("proxy")
+    admission.end_resource_wait(cancelled, "cancelled")
+    expired = admission.begin_resource_wait("provider")
+    admission.end_resource_wait(expired, "expired")
+    for _ in range(3000):
+        episode = admission.begin_resource_wait("provider")
+        admission.end_resource_wait(episode, "success")
+    snapshot = admission.snapshot()
+    assert snapshot["resource_wait_cancelled"] == 1
+    assert snapshot["resource_wait_expired"] == 1
+    assert len(admission._resource_waits) == 2048
+    ticket.release()

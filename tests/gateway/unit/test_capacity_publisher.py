@@ -64,3 +64,21 @@ async def test_stop_reports_cancellation_resistant_publisher_without_detaching_i
     release.set()
     engine._capacity_task.cancel()
     await asyncio.gather(engine._capacity_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_capacity_publisher_refreshes_idle_snapshot_with_heartbeat():
+    engine = Engine.__new__(Engine)
+    engine._capacity_interval = 0
+    engine._capacity_heartbeat = 0.01
+    writes = []
+
+    async def publish():
+        writes.append(time.monotonic())
+
+    engine._publish_capacity = publish
+    await engine.start_capacity_publisher()
+    await asyncio.sleep(0.035)
+    count_while_idle = len(writes)
+    await engine.stop_capacity_publisher()
+    assert count_while_idle >= 2
