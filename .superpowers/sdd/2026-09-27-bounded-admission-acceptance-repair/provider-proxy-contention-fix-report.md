@@ -31,7 +31,9 @@ remain authoritative.
   lease after transient contention; no owner row remains and proxy cleanup
   failures stay zero.
 - Focused provider, proxy, final-capacity, and proxy-manager tests passed after
-  the fix; Ruff passed on changed files.
+  the fix: **53 passed in 23.37s**. The full `tests/gateway` suite then passed
+  **1699 tests in 551.34s**, with one dependency deprecation warning. Ruff,
+  compileall, and `git diff --check` passed.
 
 No live inference, gateway restart, live database write, data symlink change,
 push, or merge was performed.
