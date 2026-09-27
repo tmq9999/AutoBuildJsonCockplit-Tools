@@ -68,6 +68,29 @@ class Engine:
         self._capacity_stopping = False
         self._capacity_interval = 0.05
         self._capacity_heartbeat = 10.0
+        # Prepared calls remain owned by the engine after a request task is
+        # cancelled or its bounded close caller times out.  This set is the
+        # lifecycle drain path; it is deliberately not a detached fire-and-
+        # forget cleanup queue.
+        self._prepared_cleanup_tasks = set()
+
+    async def drain_prepared_cleanup(self, timeout=5.0):
+        """Join all retained request cleanup supervisors during shutdown."""
+        registry = getattr(self, "_prepared_cleanup_tasks", set())
+        for task in tuple(registry):
+            if task.done():
+                registry.discard(task)
+        tasks = tuple(registry)
+        if not tasks:
+            return
+        try:
+            await asyncio.wait_for(asyncio.gather(*(asyncio.shield(task) for task in tasks)),
+                                   timeout=max(0.01, timeout))
+        except asyncio.TimeoutError:
+            # Keep ownership and let a later lifecycle drain retry; no child
+            # is cancelled here because cancellation-resistant dependencies
+            # must retain route/provider/proxy ownership until they unwind.
+            raise TimeoutError("prepared cleanup did not drain") from None
 
     def capacity_snapshot(self):
         proxy = self.proxies.snapshot() if hasattr(self.proxies, "snapshot") else {}
@@ -704,19 +727,25 @@ class PreparedCall:
         # never cancels or detaches the supervisor; a later close can drain it.
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close_once(), name="prepared-call-cleanup")
+            tasks = getattr(self.engine, "_prepared_cleanup_tasks", None)
+            if tasks is None:
+                tasks = self.engine._prepared_cleanup_tasks = set()
+            tasks.add(self._close_task)
             self._close_task.add_done_callback(self._observe_cleanup)
         try:
             await asyncio.wait_for(asyncio.shield(self._close_task), self.cleanup_grace)
         except asyncio.TimeoutError:
             raise TimeoutError("interrupted cleanup exceeded bounded grace") from None
 
-    @staticmethod
-    def _observe_cleanup(task):
+    def _observe_cleanup(self, task):
         # A caller may time out before the owned supervisor finishes. Retrieve
         # its terminal exception to avoid an unhandled-task warning; awaiting
         # the same task later still propagates that exact exception.
         if not task.cancelled():
             task.exception()
+        registry = getattr(self.engine, "_prepared_cleanup_tasks", None)
+        if registry is not None:
+            registry.discard(task)
 
     async def _close_once(self):
         async def accounting_cleanup():
@@ -739,23 +768,26 @@ class PreparedCall:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.cleanup_grace
 
-        stream_cleanup = asyncio.create_task(self.stream.cancel(), name="prepared-stream-cleanup")
-        route_cleanup = asyncio.create_task(self.stack.aclose(), name="prepared-route-cleanup")
-        resource_children = (stream_cleanup, route_cleanup)
+        async def resource_cleanup():
+            # The provider stream and transport stack own the same underlying
+            # response in normal operation.  Never close them concurrently:
+            # cancellation must complete before the AsyncExitStack releases
+            # its adapter/response and route resources. Admission is released
+            # last, and remains held when a cancellation-resistant child does
+            # not unwind.
+            try:
+                await self.stream.cancel()
+            finally:
+                try:
+                    await self.stack.aclose()
+                finally:
+                    if self.admission_stack is not None:
+                        await self.admission_stack.aclose()
 
-        async def admission_cleanup():
-            # Preserve normal stream/route-before-admission ordering. If a
-            # resource refuses cancellation, reserve a small slice of the same
-            # monotonic budget so admission release is still attempted before
-            # the caller's bounded deadline.
-            reserve = min(0.01, self.cleanup_grace / 5)
-            await asyncio.wait(resource_children, timeout=max(0, deadline - loop.time() - reserve))
-            if self.admission_stack is not None:
-                await self.admission_stack.aclose()
+        resource_child = asyncio.create_task(resource_cleanup(), name="prepared-resource-cleanup")
 
         children = [asyncio.create_task(accounting_cleanup(), name="prepared-accounting-cleanup"),
-                    stream_cleanup, route_cleanup,
-                    asyncio.create_task(admission_cleanup(), name="prepared-admission-cleanup")]
+                    resource_child]
         self._cleanup_children.update(children)
         for child in children:
             child.add_done_callback(self._cleanup_children.discard)

@@ -173,7 +173,7 @@ async def test_prepared_close_retains_and_later_joins_cancellation_resistant_cle
 
 
 @pytest.mark.asyncio
-async def test_resistant_stream_cleanup_cannot_block_admission_release():
+async def test_resistant_stream_cleanup_retains_admission_until_drained():
     admission = InferenceAdmission(1)
     admission_stack = AsyncExitStack()
     await admission_stack.enter_async_context(admission.enter(datetime.now(timezone.utc) + timedelta(seconds=2)))
@@ -201,11 +201,14 @@ async def test_resistant_stream_cleanup_cannot_block_admission_release():
     with pytest.raises(TimeoutError):
         await prepared.close()
     assert entered.is_set() and not finished.is_set()
-    assert admission.snapshot()["inflight"] == 0
-    assert prepared._cleanup_children and not prepared.closed
-    release.set()
+    try:
+        assert admission.snapshot()["inflight"] == 1
+        assert prepared._cleanup_children and not prepared.closed
+    finally:
+        release.set()
     await prepared.close()
     assert finished.is_set() and not prepared._cleanup_children and prepared.closed
+    assert admission.snapshot()["inflight"] == 0
 
 
 @pytest.mark.asyncio
@@ -233,7 +236,7 @@ async def test_normal_cleanup_releases_admission_after_stream_and_route():
                             __import__("uuid").uuid4(), SimpleNamespace(public_model_id="m", adapter="x"),
                             __import__("uuid").uuid4(), admission_stack=admission_stack)
     await prepared.close()
-    assert events[-1] == "admission" and set(events[:2]) == {"stream", "route"}
+    assert events == ["stream", "route", "admission"]
     assert admission.snapshot()["inflight"] == 0
 
 

@@ -153,3 +153,91 @@ async def test_concurrent_close_waits_for_accounting_and_lease_cleanup(pg_db, mo
         assert not returned_early and not closed_early
         assert prepared.closed and prepared.stream.response.raw.is_closed
         assert len(calls) == 1
+
+
+@pytest.mark.parametrize("cancel_caller", [False, True])
+async def test_response_cleanup_retains_route_ownership_until_lifecycle_drain(pg_db, monkeypatch, cancel_caller):
+    import asyncio
+    from contextlib import asynccontextmanager
+    from sqlalchemy import text
+    from autobuild_json.gateway.identity.policy import Principal
+    from autobuild_json.gateway.protocols.openai_chat import OpenAIChatCodec
+    from autobuild_json.gateway.proxy.config import ProxySelection
+    from autobuild_json.models import ProxyConfig
+
+    async with gateway_environment(pg_db) as env:
+        # Keep real route/provider/proxy/adapter/transport ownership. Only the
+        # external response close is delayed, as a slow network close can be.
+        resources = env.engine.route_resources
+        proxy = ProxyConfig("http://proxy.invalid:80")
+        env.engine.transport.policy.trusted_proxy_origins = frozenset({proxy.server})
+
+        @asynccontextmanager
+        async def proxied(route, selection, owner, deadline):
+            async with resources(route, ProxySelection("fixed", runtime_entries=(proxy,)), owner, deadline) as lease:
+                yield lease
+
+        monkeypatch.setattr(env.engine, "route_resources", proxied)
+        async with pg_db.sessions() as session:
+            row = (await session.execute(text("SELECT customer_id,version FROM api_keys WHERE id=:id"),
+                                         {"id": env.key_id})).one()
+        prepared = await env.engine.prepare(Principal(row[0], env.key_id, row[1]),
+                                            OpenAIChatCodec().decode(BODY, {}), env.engine.meta(BODY))
+        prepared.cleanup_grace = 0.05
+        raw = prepared.stream.response.raw
+        original_close = raw.aclose
+        entered, release = asyncio.Event(), asyncio.Event()
+        active, maximum = 0, 0
+
+        async def delayed_close():
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            try:
+                if not entered.is_set():
+                    entered.set()
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        await release.wait()
+                await original_close()
+            finally:
+                active -= 1
+
+        monkeypatch.setattr(raw, "aclose", delayed_close)
+        caller = asyncio.create_task(prepared.close())
+        await asyncio.wait_for(entered.wait(), 1)
+        try:
+            if cancel_caller:
+                caller.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await caller
+            else:
+                with pytest.raises(TimeoutError):
+                    await caller
+            assert maximum == 1, "stream cancellation raced the transport context's response close"
+            assert env.engine.admission.snapshot()["inflight"] == 1
+            async with pg_db.sessions() as session:
+                assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 1
+                assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 1
+            assert not prepared.closed and prepared._cleanup_children
+            assert prepared._close_task in env.engine._prepared_cleanup_tasks
+            with pytest.raises(TimeoutError):
+                await env.engine.drain_prepared_cleanup(timeout=0.01)
+            assert prepared._close_task in env.engine._prepared_cleanup_tasks
+        finally:
+            release.set()
+            await asyncio.gather(caller, return_exceptions=True)
+            await prepared.close()
+
+        # Shutdown must join the retained owner, without needing the request
+        # handler's PreparedCall reference or replaying accounting.
+        await env.engine.drain_prepared_cleanup(timeout=1)
+        assert prepared.closed and not prepared._cleanup_children
+        assert not env.engine._prepared_cleanup_tasks and maximum == 1
+        assert env.engine.admission.snapshot()["inflight"] == 0
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
+            assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 0
+            assert await session.scalar(text("SELECT state FROM requests")) == "usage_pending"
+            assert await session.scalar(text("SELECT count(*) FROM usage_ledger")) == 0

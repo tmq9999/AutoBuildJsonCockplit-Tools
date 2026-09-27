@@ -245,3 +245,45 @@ Passed (no output).
 git diff --check
 Passed (no output).
 ```
+
+## Review fix round 4
+
+Addressed the resource ownership finding by making `PreparedCall` resource
+cleanup one sequential supervisor child: provider stream cancellation completes
+before the route/adapter `AsyncExitStack` closes, and admission closes last.
+This prevents `ProviderStream.cancel()` and transport context teardown from
+concurrently calling the same raw response close or releasing proxy/provider
+ownership early. A cancellation-resistant stream therefore retains the gate,
+provider admission, and proxy lease until its owned supervisor drains.
+
+Prepared cleanup supervisors are now registered on the engine and drained by
+the application lifecycle. Request-task cancellation or a bounded caller
+timeout cannot abandon the route owner; lifecycle drain retries the same task
+and leaves `closed=False` until all resources complete. Accounting remains an
+independent idempotent child and no usage is inferred.
+
+The realistic PostgreSQL stream regression delays the actual transport raw
+response close while exercising the real provider admission, proxy lease,
+adapter, and route stack. It proves no concurrent response closes, ownership
+remains active after both normal timeout and caller cancellation, and lifecycle
+drain releases all resources with the request still `usage_pending` and no
+ledger settlement.
+
+```text
+pytest tests/gateway/unit/test_engine_admission.py \
+  tests/gateway/integration/test_stream_lifecycle.py \
+  tests/gateway/integration/test_recovery.py \
+  tests/gateway/integration/test_gateway.py \
+  tests/gateway/integration/test_codex_service_status.py -q
+44 passed in 12.08s
+
+ruff check autobuild_json/gateway/engine.py autobuild_json/gateway/http/app.py \
+  tests/gateway/unit/test_engine_admission.py tests/gateway/integration/test_stream_lifecycle.py
+All checks passed!
+
+git diff --check
+Passed (no output).
+```
+
+No production database was mutated. The untracked data symlink and handoff
+document remain untouched.

@@ -31,8 +31,11 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts, background_s
             try:
                 await engine.stop_capacity_publisher()
             finally:
-                if background_services is not None:
-                    await background_services.close()
+                try:
+                    await engine.drain_prepared_cleanup()
+                finally:
+                    if background_services is not None:
+                        await background_services.close()
 
     app = FastAPI(title="AutoBuild API Gateway", lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
