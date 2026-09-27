@@ -19,7 +19,7 @@ async def test_capacity_admits_and_release_allows_next_request():
     order = []
 
     async def worker(name):
-        async with admission.enter(future()) as ticket:
+        async with admission.enter(future()):
             order.append(name)
             await asyncio.sleep(0)
 

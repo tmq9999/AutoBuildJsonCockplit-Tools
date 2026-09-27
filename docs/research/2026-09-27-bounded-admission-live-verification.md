@@ -12,6 +12,12 @@ No credentials, API keys, OAuth material, account identities, proxy credentials,
 * `ruff check autobuild_json tests`: **1 error**, `tests/gateway/unit/test_admission.py:22` (`F841`, unused `ticket`).
 * `.venv/bin/python -m compileall -q autobuild_json`: exit **0**.
 
+After the initial gate, the unused admission context binding in
+`tests/gateway/unit/test_admission.py:22` was removed (test-only; no runtime
+behavior change). Fresh verification: `ruff check autobuild_json tests` reports
+**All checks passed!** and `pytest -q tests/gateway/unit/test_admission.py`
+reports **7 passed**.
+
 ## Real burst evidence
 
 `data/proxy_load_verify.py burst` used 100 distinct temporary API keys, the configured `gpt-6-astra` route, real `/v1/responses`, and no client retry. Raw output/artifact was deleted after redacted extraction.
