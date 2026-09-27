@@ -33,6 +33,7 @@ async def test_recovery_can_finalize_saved_authoritative_usage_once(pg_db, pendi
     request, attempt = admission(500), uuid4()
     await ledger.reserve(request)
     await ledger.mark_dispatched(request.request_id, attempt)
+    await ledger.mark_pending(request.request_id, "interrupted")
     if pending:
         await ledger.mark_pending(request.request_id, "interrupted")
     async with pg_db.sessions.begin() as session:
@@ -93,6 +94,7 @@ async def test_recovery_uses_authoritative_attempt_and_records_outcome_once(pg_d
     request, attempt = admission(500), uuid4()
     await ledger.reserve(request)
     await ledger.mark_dispatched(request.request_id, attempt)
+    await ledger.mark_pending(request.request_id, "interrupted")
     async with pg_db.sessions.begin() as session:
         await session.execute(text("UPDATE attempts SET usage=CAST(:usage AS jsonb),status='completed' WHERE id=:id"),
                               {"id": attempt, "usage": '{"input_tokens":10,"output_tokens":5}'})
@@ -104,3 +106,26 @@ async def test_recovery_uses_authoritative_attempt_and_records_outcome_once(pg_d
     assert await bucket(pg_db, issued.key_id) == (15, 0)
     snapshot = await maintenance.snapshot()
     assert snapshot["recovery_outcome"] == "clear"
+
+
+async def test_malformed_attempt_usage_is_not_recoverable(pg_db):
+    from sqlalchemy import text
+    from autobuild_json.gateway.maintenance import Maintenance
+    ledger, admission, issued, _ = await ledger_case(pg_db)
+    request, attempt = admission(100), uuid4()
+    await ledger.reserve(request)
+    await ledger.mark_dispatched(request.request_id, attempt)
+    await ledger.mark_pending(request.request_id, "interrupted")
+    async with pg_db.sessions.begin() as session:
+        await session.execute(text("UPDATE attempts SET status='completed',usage=CAST(:usage AS jsonb) WHERE id=:id"),
+                              {"id": attempt, "usage": '{"input_tokens":"bad","output_tokens":5}'})
+        await session.execute(text("UPDATE requests SET deadline=now()-interval '30 seconds' WHERE id=:id"),
+                              {"id": request.request_id})
+    maintenance = Maintenance(pg_db)
+    snapshot = await maintenance.snapshot()
+    assert snapshot["recoverable"] == 0
+    assert snapshot["recovery_outcome"] == "unknown_usage_pending"
+    assert await maintenance.tick() == 1
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text("SELECT state FROM requests WHERE id=:id"), {"id": request.request_id}) == "usage_pending"
+        assert await session.scalar(text("SELECT count(*) FROM usage_ledger WHERE request_id=:id"), {"id": request.request_id}) == 0

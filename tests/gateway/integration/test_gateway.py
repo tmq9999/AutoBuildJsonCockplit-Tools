@@ -1,3 +1,7 @@
+import asyncio
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
 import httpx
 import pytest
 
@@ -135,3 +139,27 @@ async def test_disconnect_then_late_authoritative_usage_settles_once(pg_db):
             assert await session.scalar(text("SELECT held FROM quota_buckets WHERE window_kind='total'")) == 0
             assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
             assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 0
+
+
+async def test_cancellation_after_dispatch_commit_keeps_hold_pending(pg_db, monkeypatch):
+    from sqlalchemy import text
+    from autobuild_json.gateway.identity.policy import Principal
+    from autobuild_json.gateway.protocols.openai_chat import OpenAIChatCodec
+    from autobuild_json.gateway.engine import RequestMeta
+
+    async with gateway_environment(pg_db) as env:
+        async with pg_db.sessions() as session:
+            owner, version = (await session.execute(text(
+                "SELECT customer_id,version FROM api_keys WHERE id=:id"), {"id": env.key_id})).one()
+        original = env.ledger.mark_dispatched
+        async def commit_then_cancel(*args, **kwargs):
+            await original(*args, **kwargs)
+            raise asyncio.CancelledError
+        monkeypatch.setattr(env.ledger, "mark_dispatched", commit_then_cancel)
+        now = datetime.now(timezone.utc)
+        with pytest.raises(asyncio.CancelledError):
+            await env.engine.prepare(Principal(owner, env.key_id, version),
+                OpenAIChatCodec().decode(BODY, {}), RequestMeta(uuid4(), now, now + timedelta(seconds=60)))
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT state FROM requests")) == "usage_pending"
+            assert await session.scalar(text("SELECT held FROM quota_buckets WHERE window_kind='total'")) > 0

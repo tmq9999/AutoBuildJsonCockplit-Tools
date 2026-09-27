@@ -343,6 +343,7 @@ class Engine:
         selection = ProxySelection("direct")
         dispatched = False
         known_rejection = None
+        attempt = None
         try:
             if route.proxy_profile_id is not None:
                 if self.proxy_resolver is None:
@@ -384,7 +385,11 @@ class Engine:
             elif dispatched:
                 await self.ledger.mark_pending(meta.request_id, "interrupted")
             else:
-                await self.ledger.release_unspent(meta.request_id, "not_dispatched")
+                state = await self.ledger.request_state(meta.request_id) if hasattr(self.ledger, "request_state") else None
+                if state == "dispatched":
+                    await self.ledger.reconcile_interrupted(meta.request_id, attempt)
+                else:
+                    await self.ledger.release_unspent(meta.request_id, "not_dispatched")
             raise
 
     async def prepare(self, principal, request, meta):
@@ -427,6 +432,7 @@ class Engine:
         hinted_providers = set()
         hinted_accounts = set()
         transport_retry_used = False
+        attempt = None
         try:
             # Keep admission across per-attempt retries; it is released only
             # when the prepared call (or preparation cleanup) fully closes.
@@ -580,7 +586,11 @@ class Engine:
                         if codex:
                             await self.catalog.credential_outcome(selected.provider_id, selected.credential_id, failure_code)
                     else:
-                        await self.ledger.release_unspent(meta.request_id, "not_dispatched")
+                        state = await self.ledger.request_state(meta.request_id) if hasattr(self.ledger, "request_state") else None
+                        if state == "dispatched":
+                            await self.ledger.reconcile_interrupted(meta.request_id, attempt)
+                        else:
+                            await self.ledger.release_unspent(meta.request_id, "not_dispatched")
                 finally:
                     # Admission is an independent resource.  Always release
                     # it even when provider/proxy/stream cleanup fails; a
@@ -616,7 +626,7 @@ class Engine:
 
 class PreparedCall:
     def __init__(self, engine, stack, stream, request_id, route, attempt_id, budget_attempt=None, scope=None,
-                 admission_stack=None):
+                 admission_stack=None, cleanup_grace=5.0):
         self.engine, self.stack, self.stream = engine, stack, stream
         self.admission_stack = admission_stack
         self.request_id, self.route, self.attempt_id = request_id, route, attempt_id
@@ -625,6 +635,8 @@ class PreparedCall:
         self.collector = EventCollector("chatcmpl-"+request_id.hex, route.public_model_id)
         self.closed = self.settled = self.started = False
         self._close_task = None
+        self.cleanup_grace = cleanup_grace
+        self._cleanup_children = set()
 
     async def _save_usage(self, usage):
         cost = estimate_cost(usage, self.route.cost_schedule)
@@ -704,10 +716,28 @@ class PreparedCall:
             raise asyncio.CancelledError()
 
     async def _close_once(self):
+        failures = []
+        async def bounded(awaitable):
+            task = asyncio.create_task(awaitable)
+            self._cleanup_children.add(task)
+            task.add_done_callback(self._cleanup_children.discard)
+            try:
+                await asyncio.wait_for(asyncio.shield(task), self.cleanup_grace)
+            except asyncio.TimeoutError as exc:
+                failures.append(exc)
+                task.cancel()
+                task.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), min(0.05, self.cleanup_grace))
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+            except BaseException as exc:
+                failures.append(exc)
+
         try:
             if not self.settled:
                 if self.budget_attempt is not None:
-                    await self.engine.budgets.settle(self.budget_attempt, None)
+                    await bounded(self.engine.budgets.settle(self.budget_attempt, None))
                 reconcile = getattr(self.engine.ledger, "reconcile_interrupted", None)
                 if reconcile is not None:
                     # Keep the interruption marker durable even when the
@@ -716,20 +746,20 @@ class PreparedCall:
                     # request exactly once if that receipt is already saved.
                     mark_pending = getattr(self.engine.ledger, "mark_pending", None)
                     if mark_pending is not None:
-                        await mark_pending(self.request_id, "interrupted")
-                    await reconcile(self.request_id, self.attempt_id)
+                        await bounded(mark_pending(self.request_id, "interrupted"))
+                    await bounded(reconcile(self.request_id, self.attempt_id))
                 else:
-                    await self.engine.ledger.mark_pending(self.request_id, "interrupted")
+                    await bounded(self.engine.ledger.mark_pending(self.request_id, "interrupted"))
         finally:
-            try:
-                await self.stream.cancel()
-            finally:
-                try:
-                    await self.stack.aclose()
-                finally:
-                    if self.admission_stack is not None:
-                        await self.admission_stack.aclose()
-                    publish = getattr(self.engine, "request_capacity_publish", None)
-                    if publish is not None:
-                        publish()
-                    self.closed = True
+            await bounded(self.stream.cancel())
+            await bounded(self.stack.aclose())
+            if self.admission_stack is not None:
+                await bounded(self.admission_stack.aclose())
+            publish = getattr(self.engine, "request_capacity_publish", None)
+            if publish is not None:
+                publish()
+            self.closed = not failures
+        if failures:
+            if next((failure for failure in failures if not isinstance(failure, asyncio.TimeoutError)), None) is not None:
+                raise next(failure for failure in failures if not isinstance(failure, asyncio.TimeoutError))
+            raise TimeoutError("interrupted cleanup exceeded bounded grace")

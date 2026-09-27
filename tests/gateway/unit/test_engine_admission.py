@@ -101,6 +101,37 @@ async def test_prepared_close_joins_one_recovery_cleanup_and_settles_saved_usage
     assert prepared.closed
 
 
+@pytest.mark.asyncio
+async def test_prepared_close_bounds_hanging_cleanup_and_does_not_claim_closed():
+    admission = InferenceAdmission(1)
+    admission_stack = AsyncExitStack()
+    await admission_stack.enter_async_context(admission.enter(datetime.now(timezone.utc) + timedelta(seconds=2)))
+    entered = asyncio.Event()
+
+    class Ledger:
+        async def mark_pending(self, *args):
+            entered.set()
+            await asyncio.Event().wait()
+
+    class Stream:
+        async def cancel(self):
+            pass
+
+    from autobuild_json.gateway.engine import PreparedCall
+    prepared = PreparedCall(SimpleNamespace(ledger=Ledger(), budgets=None), AsyncExitStack(), Stream(),
+                            __import__("uuid").uuid4(), SimpleNamespace(public_model_id="m", adapter="x"),
+                            __import__("uuid").uuid4(), admission_stack=admission_stack,
+                            cleanup_grace=0.05)
+    started = asyncio.get_running_loop().time()
+    outcomes = await asyncio.gather(prepared.close(), prepared.close(), return_exceptions=True)
+    assert all(isinstance(outcome, TimeoutError) for outcome in outcomes)
+    assert await asyncio.wait_for(entered.wait(), 0.1)
+    assert asyncio.get_running_loop().time() - started < 0.5
+    assert not prepared.closed
+    assert admission.snapshot()["inflight"] == 0
+    assert not prepared._cleanup_children
+
+
 class _Ledger:
     def __init__(self):
         self.released = []

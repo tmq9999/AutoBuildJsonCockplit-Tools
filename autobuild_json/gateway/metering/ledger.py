@@ -1,7 +1,7 @@
 """Serialize accounting by customer/key; never hold locks during provider I/O."""
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from uuid import uuid4
 
@@ -243,18 +243,15 @@ class Ledger:
         async with self._request(request_id) as (session, row, _):
             if row["state"] in TERMINAL:
                 return "already_settled"
+            if row["state"] == "reserved":
+                return "not_dispatched"
             evidence = (await session.execute(text(
                 "SELECT usage,status FROM attempts WHERE request_id=:request "
                 "AND (CAST(:attempt AS uuid) IS NULL OR id=CAST(:attempt AS uuid)) "
                 "AND status='completed' AND usage IS NOT NULL "
                 "ORDER BY started_at DESC,id DESC LIMIT 1"),
                 {"request": request_id, "attempt": attempt_id})).mappings().first()
-            usage = None
-            if evidence is not None:
-                try:
-                    usage = Usage(**dict(evidence["usage"]))
-                except (TypeError, ValueError):
-                    usage = None
+            usage = self._authoritative_usage(evidence["usage"] if evidence is not None else None)
             if usage is not None and row["state"] in {"dispatched", "usage_pending"}:
                 charge = weighted_usage_micro(usage, int(row["input_micro"]), int(row["output_micro"]),
                                               int(row["cache_read_micro"]), int(row["cache_write_micro"]))
@@ -268,20 +265,35 @@ class Ledger:
                                       {"id": request_id})
             return "unknown_usage_pending"
 
+    async def request_state(self, request_id):
+        async with self.db.sessions() as session:
+            return await session.scalar(text("SELECT state FROM requests WHERE id=:id"), {"id": request_id})
+
+    @staticmethod
+    def _authoritative_usage(value):
+        if not isinstance(value, dict):
+            return None
+        try:
+            return Usage(**dict(value))
+        except (TypeError, ValueError):
+            return None
+
     async def status_snapshot(self):
         """Return redacted settlement facts suitable for operator snapshots."""
         async with self.db.sessions() as session:
-            row = (await session.execute(text("""SELECT
-                count(*) FILTER (WHERE state='usage_pending') AS pending,
-                count(*) FILTER (WHERE state='usage_pending' AND EXISTS (
-                    SELECT 1 FROM attempts a WHERE a.request_id=requests.id
-                    AND a.status='completed' AND a.usage IS NOT NULL)) AS recoverable,
-                COALESCE(EXTRACT(EPOCH FROM (clock_timestamp()-min(admitted_at)
-                    FILTER (WHERE state='usage_pending'))),0) AS oldest_age
-                FROM requests"""))).mappings().one()
-        pending, recoverable = int(row["pending"]), int(row["recoverable"])
+            rows = (await session.execute(text("""SELECT r.admitted_at,
+                EXISTS (SELECT 1 FROM attempts a WHERE a.request_id=r.id
+                    AND a.status='completed' AND a.usage IS NOT NULL) AS has_evidence,
+                (SELECT a.usage FROM attempts a WHERE a.request_id=r.id
+                    AND a.status='completed' AND a.usage IS NOT NULL
+                    ORDER BY a.started_at DESC,a.id DESC LIMIT 1) AS usage
+                FROM requests r WHERE r.state='usage_pending'"""))).mappings().all()
+        pending = len(rows)
+        recoverable = sum(self._authoritative_usage(row["usage"]) is not None for row in rows)
+        oldest = min((row["admitted_at"] for row in rows), default=None)
+        oldest_age = 0 if oldest is None else int((datetime.now(timezone.utc) - oldest.astimezone(timezone.utc)).total_seconds())
         return {"pending": pending, "recoverable": recoverable,
-                "oldest_pending_age_seconds": max(0, int(row["oldest_age"] or 0)),
+                "oldest_pending_age_seconds": max(0, oldest_age),
                 "recovery_outcome": ("clear" if pending == 0 else
                                      "authoritative_usage_available" if recoverable else
                                      "unknown_usage_pending")}

@@ -234,8 +234,11 @@ async def test_configured_proxy_connection_failure_never_falls_back_direct(pg_db
         result = await env.client.post("/v1/responses", json=dict(BODY, stream=stream), headers=env.headers)
         assert result.status_code == 502, result.text
         assert result.json()["error"]["code"] == "proxy_error"
-        assert len(backend.connections) == 1
-        assert backend.connections[0][1] in {8101, 8102, 8103, 8104}
+        # Task 1 permits exactly one retry for a configured-proxy failure
+        # proven before response headers. Both attempts must still use a
+        # configured proxy; direct egress is never a fallback.
+        assert len(backend.connections) == 2
+        assert all(connection[1] in {8101, 8102, 8103, 8104} for connection in backend.connections)
         assert not any(name.lower().startswith("x-codex-proxy") for name in result.headers)
         assert "DO-NOT-ECHO" not in result.text
         assert all(str(identity) not in result.text for identity in profile_ids)
@@ -243,7 +246,7 @@ async def test_configured_proxy_connection_failure_never_falls_back_direct(pg_db
             # A failed call after the dispatch boundary is conservatively
             # pending, never falsely billed/refunded as a completed response.
             assert await session.scalar(text("SELECT state FROM requests")) == "usage_pending"
-            assert await session.scalar(text("SELECT count(*) FROM attempts")) == 1
+            assert await session.scalar(text("SELECT count(*) FROM attempts")) == 2
             assert await session.scalar(text("SELECT count(*) FROM usage_ledger")) == 0
         await assert_no_leases(pg_db)
 

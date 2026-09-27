@@ -128,3 +128,35 @@ for operators. `recovery_outcome` is reconstructed from durable request and
 attempt rows on each status read (`clear`, `authoritative_usage_available`, or
 `unknown_usage_pending`), so it survives maintenance-worker or admin-process
 restart and never contains identifiers or error strings.
+
+## Review fix round
+
+Addressed all review findings in the amended follow-up commit:
+
+- `PreparedCall` bounded every accounting/provider/stack/admission cleanup child,
+  cancels and boundedly joins timed-out children, shares one owned cleanup task
+  and final exception across concurrent callers, and leaves `closed=False` when
+  cleanup ownership could not be joined. Regression proves bounded return,
+  no detached child tasks, and no false closed claim.
+- Ledger snapshot validation now calls the same `Usage` structural validator as
+  reconciliation. A malformed completed-attempt receipt is not counted as
+  recoverable and remains pending without a usage-ledger row.
+- Prepare/count-token cleanup now reads durable request state after cancellation;
+  a committed dispatch is reconciled as pending, while a genuinely reserved
+  request still uses `not_dispatched`. PostgreSQL regression covers the commit-
+  then-cancel boundary.
+- Task 1 proxy retry expectations were updated in the existing Codex egress
+  regression: exactly two configured-proxy connections and two attempts are
+  expected; direct fallback remains forbidden.
+
+Review-focused matrix:
+
+```text
+129 passed in 41.28s
+```
+
+Full gateway suite after the fix:
+
+```text
+1712 passed, 1 warning in 443.38s (0:07:23)
+```
