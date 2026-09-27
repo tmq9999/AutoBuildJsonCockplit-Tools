@@ -426,6 +426,7 @@ class Engine:
         known_rejection = None
         hinted_providers = set()
         hinted_accounts = set()
+        transport_retry_used = False
         try:
             # Keep admission across per-attempt retries; it is released only
             # when the prepared call (or preparation cleanup) fully closes.
@@ -542,7 +543,7 @@ class Engine:
                     # acquired.  Close the per-attempt stack first so the
                     # provider admission and proxy lease cannot pin capacity
                     # while selecting the next untried route.
-                    if not (getattr(exc, "safe_retry", False)
+                    if not (not transport_retry_used and getattr(exc, "safe_retry", False)
                             and getattr(exc, "transport_phase", None) == "before_response"
                             and getattr(exc, "proxy_used", False)):
                         raise
@@ -554,6 +555,7 @@ class Engine:
                         budget_attempt = None
                     await stack.aclose()
                     stack = AsyncExitStack()
+                    transport_retry_used = True
                     if (number + 1 == len(dispatch_routes) or selection_state.pinned
                             or not codex and routes[1].provider_id == selected.provider_id):
                         raise

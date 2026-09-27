@@ -370,3 +370,95 @@ async def test_prepare_releases_attempt_resources_before_retrying_pre_response_p
         ("enter", "provider-a"), ("dispatched", "provider-a"), ("rejected", "rejected_before_generation"),
         ("exit", "provider-a"), ("enter", "provider-b"), ("dispatched", "provider-b"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_retries_pre_response_transport_failure_at_most_once(monkeypatch):
+    import autobuild_json.gateway.engine as engine_module
+    from autobuild_json.gateway.engine import Engine, RequestMeta
+    from autobuild_json.gateway.errors import GatewayError, TransportFailure
+    from autobuild_json.gateway.proxy.config import ProxySelection
+    from autobuild_json.gateway.routing.session import Selection
+
+    routes = [SimpleNamespace(
+        adapter="codex_oauth", provider_id="provider", credential_id=f"credential-{index}",
+        proxy_profile_id=None, public_model_id="public", binding_id=f"binding-{index}",
+        upstream_model="upstream", budget_id=None,
+        bounds=SimpleNamespace(input_tokens=1, output_tokens=2), input_micro=1, output_micro=1,
+        cache_read_micro=None, cache_write_micro=None, timeout=60,
+    ) for index in range(3)]
+    options = SimpleNamespace(max_output_tokens=None, model_copy=lambda **kwargs: options)
+    request = SimpleNamespace(options=options, model="public")
+    request.model_copy = lambda **kwargs: request
+    scope = SimpleNamespace(public_model_id="public")
+    meta = RequestMeta(uuid4(), datetime.now(timezone.utc), datetime.now(timezone.utc) + timedelta(seconds=30))
+    events = []
+
+    class Ledger:
+        async def reserve(self, admission): return "hold"
+        async def resize(self, hold, bounds): return hold
+        async def mark_dispatched(self, request_id, attempt, *, route): events.append(("dispatched", route.provider_id))
+        async def mark_rejected(self, request_id, attempt, reason): events.append(("rejected", reason))
+        async def reject_and_release(self, request_id, attempt): events.append(("released", attempt))
+
+    class Adapter:
+        def __init__(self): self.calls = 0
+
+        @asynccontextmanager
+        async def open(self, request, route, lease):
+            self.calls += 1
+            raise TransportFailure(before_response=True, proxy_used=True)
+            yield  # pragma: no cover
+
+    adapter = Adapter()
+    engine = Engine.__new__(Engine)
+    engine.catalog = SimpleNamespace(visible_model=lambda principal, model: asyncio.sleep(0, result=model))
+    engine.ledger = Ledger()
+    engine.admission = SimpleNamespace(enter=lambda deadline: _empty_context())
+    engine.budgets = SimpleNamespace(settle=lambda *args: asyncio.sleep(0))
+    engine.adapters = {"codex_oauth": adapter}
+    engine.db = None
+    engine.credentials = SimpleNamespace(
+        fresh_tokens=lambda credential_id, deadline: asyncio.sleep(0),
+        _record=lambda credential_id: asyncio.sleep(0),
+    )
+    engine.proxy_resolver = None
+    engine.credential = lambda route: asyncio.sleep(0)
+
+    @asynccontextmanager
+    async def resources(route, selection, owner, deadline):
+        events.append(("enter", route.provider_id))
+        try:
+            yield SimpleNamespace(proxy="proxy")
+        finally:
+            events.append(("exit", route.provider_id))
+
+    @asynccontextmanager
+    async def admission_context(deadline):
+        yield
+
+    engine.admission.enter = admission_context
+    engine.route_resources = resources
+    monkeypatch.setattr(engine_module, "validate_request", lambda request, route: None)
+    class ProxyPolicy:
+        def __init__(self, *args): pass
+        async def policy(self, credential_id): return ProxySelection("direct"), None
+    monkeypatch.setattr(engine_module, "AccountProxyResolver", ProxyPolicy)
+    monkeypatch.setattr(
+        engine_module.routing_session, "select",
+        lambda engine, principal, request, meta: asyncio.sleep(0, result=Selection(
+            request, tuple(routes), scope, False, 2)),
+    )
+    monkeypatch.setattr(engine_module.routing_session, "revalidate", lambda *args: asyncio.sleep(0))
+
+    with pytest.raises(GatewayError):
+        await engine.prepare(object(), request, meta)
+    assert adapter.calls == 2
+    assert [event for event in events if event[0] == "enter"] == [
+        ("enter", "provider"), ("enter", "provider"),
+    ]
+
+
+@asynccontextmanager
+async def _empty_context():
+    yield

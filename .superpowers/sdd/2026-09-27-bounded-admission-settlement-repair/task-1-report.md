@@ -48,3 +48,13 @@ closes the current route resource context before the next route is selected.
   required dedicated test database configuration/binary is unavailable.
 - Full unit execution also encountered pre-existing environment dependency
   gaps (`uvicorn`, `greenlet`) outside the touched gateway transport paths.
+
+## Follow-up review fix
+
+- Added a per-`prepare()` `transport_retry_used` fence. A pre-response proxied
+  transport failure can now consume at most one route retry; a later failure
+  surfaces without walking the remainder of a Codex pool.
+- Added a three-route regression asserting only two adapter opens and complete
+  first-attempt resource cleanup before the single retry.
+- Follow-up verification: focused transport/resource tests **14 passed**;
+  Ruff and compileall **passed**.
