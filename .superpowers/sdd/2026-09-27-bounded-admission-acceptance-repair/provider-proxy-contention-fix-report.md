@@ -51,5 +51,10 @@ zero. This prevents an untracked overflow key from migrating to a new dedicated
 lock while its shard entry is still held; the migration regression covers keys
 that exceed the dedicated map capacity.
 
+The overflow assignment registry intentionally retains every active overflow
+key, rather than applying a second cap. Active reservations are bounded by the
+process admission gate; entries are deleted by the unlock helper when users
+reaches zero.
+
 No live inference, gateway restart, live database write, data symlink change,
 push, or merge was performed.

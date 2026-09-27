@@ -99,8 +99,9 @@ class ProxyManager:
             if entry is None:
                 digest = hashlib.sha256(resource.encode()).digest()
                 entry = self._resource_lock_overflow[int.from_bytes(digest[:4]) % len(self._resource_lock_overflow)]
-                if len(self._resource_overflow_keys) < self._RESOURCE_LOCK_CAPACITY:
-                    self._resource_overflow_keys[resource] = entry
+                # Active overflow assignments are bounded by process admission;
+                # retain every key until its reservation is released.
+                self._resource_overflow_keys[resource] = entry
         else:
             entry = _ResourceLockEntry()
             self._resource_locks[resource] = entry

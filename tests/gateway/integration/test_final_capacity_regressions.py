@@ -188,6 +188,18 @@ async def test_provider_lock_reservation_prevents_duplicate_same_key_lock(pg_db)
     assert limits._provider_lock("overflow") is overflow
     limits._provider_unlock("overflow", overflow)
     limits._provider_unlock("new", new_entry)
+    limits._provider_locks.clear()
+    anchor = limits._provider_lock("anchor2")
+    one = limits._provider_lock("one")
+    two = limits._provider_lock("two")
+    limits._provider_unlock("anchor2", anchor)
+    limits._provider_lock("three")
+    assert limits._provider_lock("one") is one
+    assert limits._provider_lock("two") is two
+    limits._provider_unlock("one", one)
+    limits._provider_unlock("one", one)
+    limits._provider_unlock("two", two)
+    limits._provider_unlock("two", two)
     first.users -= 2
     other.users -= 1
 
@@ -226,6 +238,18 @@ async def test_proxy_lock_reservation_prevents_duplicate_same_key_lock(pg_db):
     assert manager._resource_lock("overflow") is overflow
     manager._resource_unlock("overflow", overflow)
     manager._resource_unlock("new", new_entry)
+    manager._resource_locks.clear()
+    anchor = manager._resource_lock("anchor2")
+    one = manager._resource_lock("one")
+    two = manager._resource_lock("two")
+    manager._resource_unlock("anchor2", anchor)
+    manager._resource_lock("three")
+    assert manager._resource_lock("one") is one
+    assert manager._resource_lock("two") is two
+    manager._resource_unlock("one", one)
+    manager._resource_unlock("one", one)
+    manager._resource_unlock("two", two)
+    manager._resource_unlock("two", two)
     first.users -= 2
     other.users -= 1
 

@@ -58,8 +58,9 @@ class ProviderLimits:
             entry = self._provider_overflow_keys.get(provider_id)
             if entry is None:
                 entry = self._provider_lock_overflow[hash(str(provider_id)) % len(self._provider_lock_overflow)]
-                if len(self._provider_overflow_keys) < self._PROVIDER_LOCK_CAPACITY:
-                    self._provider_overflow_keys[provider_id] = entry
+                # Active overflow assignments are bounded by process admission;
+                # retain every key until its reservation is released.
+                self._provider_overflow_keys[provider_id] = entry
         else:
             entry = _ProviderLockEntry()
             self._provider_locks[provider_id] = entry
