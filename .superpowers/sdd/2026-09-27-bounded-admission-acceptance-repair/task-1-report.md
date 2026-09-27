@@ -36,3 +36,9 @@
 - Focused command (with the bundled PostgreSQL 18 runtime and required library path):
   `LD_LIBRARY_PATH=/home/mquangprovip0503/Work/Code/AutoBuildJsonCockplit-Tools/.deps/gateway-pg18/root/usr/lib/x86_64-linux-gnu AUTOBUILD_TEST_POSTGRES_BIN=/home/mquangprovip0503/Work/Code/AutoBuildJsonCockplit-Tools/.deps/gateway-pg18/root/usr/lib/postgresql/18/bin /home/mquangprovip0503/Work/Code/AutoBuildJsonCockplit-Tools/.venv/bin/pytest tests/gateway/unit/test_proxy_manager.py tests/gateway/unit/test_engine_resource_order.py tests/gateway/integration/test_proxy_engine_capacity.py tests/gateway/integration/test_codex_quota.py -q`
 - Result: `45 passed in 10.24s`.
+
+## Preflight cleanup
+
+- Removed the unused `SimpleNamespace` import from the real-composition integration test.
+- `ruff check autobuild_json tests --output-format concise` — `All checks passed!`
+- Re-ran the Task 1 focused suite with bundled PostgreSQL runtime — `45 passed in 8.86s`.
