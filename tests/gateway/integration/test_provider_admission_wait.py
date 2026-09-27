@@ -174,13 +174,14 @@ async def test_admission_cleanup_lock_timeout_is_bounded_and_redacted(pg_db):
         )
         started = asyncio.get_running_loop().time()
         with pytest.raises(GatewayError, match="deadline_exceeded") as error:
-            await asyncio.wait_for(context.__aexit__(None, None, None), 1)
+            await asyncio.wait_for(limits._release_admission(identity), 1)
         assert error.value.status == 504
         assert error.value.stage == "upstream"
         assert asyncio.get_running_loop().time() - started < 0.8
     finally:
         await blocker.rollback()
         await blocker.close()
+    await context.__aexit__(None, None, None)
 
 
 @pytest.mark.parametrize("rejection", ["disabled", "cooldown", "rpm"])

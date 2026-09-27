@@ -78,15 +78,36 @@ async def test_cleanup_pool_checkout_has_independent_bounded_grace(pg_db, postgr
             await asyncio.sleep(.02)
             if cancel:
                 pending.cancel()
-            await asyncio.sleep(.4)
+            await asyncio.sleep(limits._CLEANUP_RETRY_SECONDS + .1 if kind == "provider" else .4)
             completed_on_time = pending.done()
         result = (await asyncio.gather(pending, return_exceptions=True))[0]
-        assert completed_on_time, "owned cleanup escaped its 250ms grace"
+        assert completed_on_time, "owned cleanup escaped its bounded retry window"
         if cancel:
             assert isinstance(result, (asyncio.CancelledError, GatewayError))
+        elif kind == "provider":
+            assert result is False
+            assert limits.snapshot()["cleanup_failures"] == 1
         else:
             assert isinstance(result, GatewayError) and result.code == "deadline_exceeded"
         assert db.engine.pool.checkedout() == 0
+
+
+async def test_provider_cleanup_retries_after_transient_pool_contention(pg_db, postgres_url):
+    """A settled request must survive one pool-starved admission cleanup attempt."""
+    route, _, _ = await limited_route(pg_db)
+    async with small_pool(pg_db, postgres_url) as db:
+        limits = ProviderLimits(db)
+        context = limits.acquire(route, future())
+        await context.__aenter__()
+        blockers = [await db.engine.connect() for _ in range(3)]
+        pending = asyncio.create_task(context.__aexit__(None, None, None))
+        await asyncio.sleep(limits._CLEANUP_GRACE_SECONDS + 0.05)
+        await blockers[0].close()
+        assert await asyncio.wait_for(pending, 1) is False
+        for blocker in blockers[1:]:
+            await blocker.close()
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
 
 
 async def test_expired_proxy_claim_is_redacted_deadline_error(pg_db):

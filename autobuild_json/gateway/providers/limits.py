@@ -14,6 +14,8 @@ from ..errors import GatewayError
 
 class ProviderLimits:
     _CLEANUP_GRACE_SECONDS = 0.25
+    _CLEANUP_RETRY_SECONDS = 0.5
+    _CLEANUP_RETRY_ATTEMPTS = 2
 
     def __init__(self, db):
         self.db = db
@@ -23,6 +25,7 @@ class ProviderLimits:
         self._cancelled_waits = 0
         self._waits = deque(maxlen=2048)
         self._last_wait_ms = 0.0
+        self._cleanup_failures = 0
 
     async def _try_acquire_bounded(self, route, deadline, identity):
         remaining = self._remaining(deadline)
@@ -115,6 +118,7 @@ class ProviderLimits:
             "wait_p50_ms": percentile(.50),
             "wait_p95_ms": percentile(.95),
             "last_wait_ms": self._last_wait_ms,
+            "cleanup_failures": self._cleanup_failures,
         }
 
     async def _wait_for_release(self, deadline):
@@ -150,6 +154,26 @@ class ProviderLimits:
             if pgcode == "55P03" or "lock timeout" in message:
                 raise GatewayError("deadline_exceeded", 504, "upstream") from None
             raise
+
+    async def _cleanup_with_retry(self, identity, *, seconds, attempts, raise_failure):
+        """Retry a transient pool/lock failure without extending request work."""
+        end = time.monotonic() + seconds
+        failure = None
+        for _ in range(attempts):
+            if time.monotonic() >= end:
+                break
+            try:
+                await self._release_admission(identity)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failure = exc
+                await asyncio.sleep(0)
+        if failure is not None:
+            self._cleanup_failures += 1
+            if raise_failure:
+                raise failure
 
     @asynccontextmanager
     async def acquire(self, route, deadline, *, wait=False):
@@ -187,7 +211,15 @@ class ProviderLimits:
             yield identity
         finally:
             try:
-                owned = asyncio.create_task(self._release_admission(identity))
+                # The response/ledger result is already authoritative here.
+                # Join bounded recovery, but never replace that result with a
+                # transient pool cleanup timeout; the failure is counted.
+                owned = asyncio.create_task(self._cleanup_with_retry(
+                    identity,
+                    seconds=self._CLEANUP_RETRY_SECONDS,
+                    attempts=self._CLEANUP_RETRY_ATTEMPTS,
+                    raise_failure=False,
+                ))
                 cancelled = False
                 cleanup_error = None
                 while not owned.done():
