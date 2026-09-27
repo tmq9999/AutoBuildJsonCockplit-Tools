@@ -69,16 +69,16 @@ class ServiceStatus:
         except Exception:
             # A rolling deployment may briefly serve from a pre-0016 schema.
             row = None
-        if row is not None:
-            age = (datetime.now(timezone.utc) - row["updated_at"]).total_seconds()
+        if row is not None and row.get("snapshot") is not None and row.get("updated_at") is not None:
+            updated_at = row["updated_at"]
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - updated_at).total_seconds()
             capacity = dict(row["snapshot"])
             if age > 30:
-                capacity = {"stale": True, "updated_at": row["updated_at"].isoformat()}
+                capacity = {"stale": True, "updated_at": updated_at.isoformat()}
         if capacity is None:
-            # Compatibility for databases upgraded before 0016; this fallback
-            # is removed once the migration has been applied everywhere.
-            engine = getattr(self.services, "engine", None)
-            capacity = engine.capacity_snapshot() if engine is not None and hasattr(engine, "capacity_snapshot") else {}
+            capacity = {"available": False, "reason": "serving_snapshot_unavailable"}
         return {"status": status, "base_url": base_url, "accounts": accounts, "keys": keys,
                 "usage": usage, "version": codex_runtime_capabilities()["version"], "capacity": capacity}
 

@@ -60,6 +60,13 @@ class Engine:
         self.adapters = {"openai_compatible": OpenAIAdapter(transport, self.credential),
                          "anthropic": AnthropicAdapter(transport, self.credential), "gemini": GeminiAdapter(transport, self.credential),
                          "ollama": OllamaAdapter(transport, self.credential), "codex_oauth": CodexAdapter(transport, self.codex_tokens)}
+        # Serving telemetry is owned by the app lifecycle. Request paths only
+        # mark a coalesced update; they never spawn detached publisher tasks.
+        self._capacity_task = None
+        self._capacity_event = None
+        self._capacity_dirty = False
+        self._capacity_stopping = False
+        self._capacity_interval = 0.05
 
     def capacity_snapshot(self):
         proxy = self.proxies.snapshot() if hasattr(self.proxies, "snapshot") else {}
@@ -82,13 +89,57 @@ class Engine:
             # Telemetry must never turn a successful inference into a 5xx.
             return
 
-    def _schedule_capacity_publish(self):
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
+    async def _capacity_publisher(self):
+        """Coalescing, single-writer capacity publisher."""
+        event = self._capacity_event
+        while event is not None:
+            await event.wait()
+            event.clear()
+            if self._capacity_interval:
+                await asyncio.sleep(self._capacity_interval)
+            if not self._capacity_dirty and self._capacity_stopping:
+                break
+            self._capacity_dirty = False
+            await self._publish_capacity()
+            if self._capacity_stopping and not self._capacity_dirty:
+                break
+
+    async def start_capacity_publisher(self):
+        """Start the lifecycle-owned publisher, idempotently."""
+        task = getattr(self, "_capacity_task", None)
+        if task is not None and not task.done():
             return
-        if not loop.is_closed():
-            loop.create_task(self._publish_capacity())
+        self._capacity_event = asyncio.Event()
+        self._capacity_stopping = False
+        self._capacity_dirty = True
+        self._capacity_task = asyncio.create_task(self._capacity_publisher(), name="gateway-capacity-publisher")
+        self._capacity_event.set()
+
+    def request_capacity_publish(self):
+        """Request a coalesced update without creating a task."""
+        self._capacity_dirty = True
+        event = getattr(self, "_capacity_event", None)
+        if event is not None:
+            event.set()
+
+    async def stop_capacity_publisher(self, timeout=2.0):
+        """Stop, flush best-effort, and join the publisher task."""
+        task = getattr(self, "_capacity_task", None)
+        if task is None:
+            return
+        self._capacity_stopping = True
+        self._capacity_dirty = True
+        if self._capacity_event is not None:
+            self._capacity_event.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.01, timeout))
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        finally:
+            self._capacity_task = None
+            self._capacity_event = None
+            self._capacity_dirty = False
 
     async def codex_tokens(self, route):
         row = await self.credentials._record(route.credential_id)
@@ -272,7 +323,7 @@ class Engine:
             # Keep admission across per-attempt retries; it is released only
             # when the prepared call (or preparation cleanup) fully closes.
             await admission_stack.enter_async_context(self.admission.enter(deadline))
-            publish = getattr(self, "_schedule_capacity_publish", None)
+            publish = getattr(self, "request_capacity_publish", None)
             if publish is not None:
                 publish()
             for number, selected in enumerate(dispatch_routes):
@@ -532,7 +583,7 @@ class PreparedCall:
                 finally:
                     if self.admission_stack is not None:
                         await self.admission_stack.aclose()
-                    publish = getattr(self.engine, "_schedule_capacity_publish", None)
+                    publish = getattr(self.engine, "request_capacity_publish", None)
                     if publish is not None:
                         publish()
                     self.closed = True

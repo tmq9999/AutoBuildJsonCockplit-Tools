@@ -20,11 +20,13 @@ from .codex_routes import codex_router
 def create_gateway_app(identity, catalog, engine, *, allowed_hosts, background_services=None):
     @asynccontextmanager
     async def lifespan(app):
+        await engine.start_capacity_publisher()
         if background_services is not None:
             background_services.quota_refresh_jobs.start()
         try:
             yield
         finally:
+            await engine.stop_capacity_publisher()
             if background_services is not None:
                 await background_services.close()
 
