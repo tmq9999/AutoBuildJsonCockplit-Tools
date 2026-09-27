@@ -62,9 +62,13 @@ class ServiceStatus:
         # idle admin-process engine as live inference capacity. Snapshots older
         # than 30s are explicitly marked stale.
         capacity = None
-        async with self.services.db.sessions() as session:
-            row = (await session.execute(text(
-                "SELECT snapshot,updated_at FROM gateway_capacity_snapshots WHERE id=1"))).mappings().first()
+        try:
+            async with self.services.db.sessions() as session:
+                row = (await session.execute(text(
+                    "SELECT snapshot,updated_at FROM gateway_capacity_snapshots WHERE id=1"))).mappings().first()
+        except Exception:
+            # A rolling deployment may briefly serve from a pre-0016 schema.
+            row = None
         if row is not None:
             age = (datetime.now(timezone.utc) - row["updated_at"]).total_seconds()
             capacity = dict(row["snapshot"])
