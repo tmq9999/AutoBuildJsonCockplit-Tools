@@ -29,6 +29,7 @@ from .proxy.config import ProxySelection
 from .secrets import Ciphertext
 from .routing.continuations import ContinuationStore, ContinuationBinding
 from .routing import session as routing_session
+from .admission import InferenceAdmission
 
 
 @dataclass(frozen=True)
@@ -43,11 +44,13 @@ class RequestMeta:
 
 
 class Engine:
-    def __init__(self, db, catalog, ledger, proxies, transport, vault, *, digest_key=None, proxy_resolver=None):
+    def __init__(self, db, catalog, ledger, proxies, transport, vault, *, digest_key=None, proxy_resolver=None,
+                 admission=None):
         self.db, self.catalog, self.ledger = db, catalog, ledger
         self.proxies, self.transport, self.vault = proxies, transport, vault
         self.digest_key = digest_key
         self.proxy_resolver = proxy_resolver
+        self.admission = admission if admission is not None else InferenceAdmission(100)
         self.budgets = BudgetService(db)
         self.provider_limits=ProviderLimits(db)
         self.continuations = ContinuationStore(db, vault)
@@ -55,6 +58,12 @@ class Engine:
         self.adapters = {"openai_compatible": OpenAIAdapter(transport, self.credential),
                          "anthropic": AnthropicAdapter(transport, self.credential), "gemini": GeminiAdapter(transport, self.credential),
                          "ollama": OllamaAdapter(transport, self.credential), "codex_oauth": CodexAdapter(transport, self.codex_tokens)}
+
+    def capacity_snapshot(self):
+        proxy = self.proxies.snapshot() if hasattr(self.proxies, "snapshot") else {}
+        return {"admission": self.admission.snapshot(),
+                "provider": self.provider_limits.snapshot(),
+                "proxy": proxy}
 
     async def codex_tokens(self, route):
         row = await self.credentials._record(route.credential_id)
@@ -196,12 +205,16 @@ class Engine:
             route.input_micro, route.output_micro, deadline, meta.idempotency_digest, meta.payload_digest, meta.protocol,
             cache_read_micro=route.cache_read_micro, cache_write_micro=route.cache_write_micro))
         stack = AsyncExitStack()
+        admission_stack = AsyncExitStack()
         dispatched = False
         budget_attempt = None
         known_rejection = None
         hinted_providers = set()
         hinted_accounts = set()
         try:
+            # Keep admission across per-attempt retries; it is released only
+            # when the prepared call (or preparation cleanup) fully closes.
+            await admission_stack.enter_async_context(self.admission.enter(deadline))
             for number, selected in enumerate(dispatch_routes):
                 known_rejection = None
                 if datetime.now(timezone.utc) >= deadline:
@@ -305,7 +318,8 @@ class Engine:
                         raise
                     known_rejection = None
                     continue
-                prepared = PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt, scope)
+                prepared = PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt, scope,
+                                        admission_stack=admission_stack)
                 prepared.collector.model = visible_model
                 return prepared
             raise GatewayError("upstream_unavailable", 503)
@@ -326,6 +340,7 @@ class Engine:
                         await self.ledger.release_unspent(meta.request_id, "not_dispatched")
                 finally:
                     await stack.aclose()
+                    await admission_stack.aclose()
             owned = asyncio.create_task(asyncio.wait_for(cleanup(), 5))
             cancelled = isinstance(error, asyncio.CancelledError)
             try:
@@ -349,8 +364,10 @@ class Engine:
 
 
 class PreparedCall:
-    def __init__(self, engine, stack, stream, request_id, route, attempt_id, budget_attempt=None, scope=None):
+    def __init__(self, engine, stack, stream, request_id, route, attempt_id, budget_attempt=None, scope=None,
+                 admission_stack=None):
         self.engine, self.stack, self.stream = engine, stack, stream
+        self.admission_stack = admission_stack
         self.request_id, self.route, self.attempt_id = request_id, route, attempt_id
         self.budget_attempt = budget_attempt
         self.scope = scope
@@ -448,4 +465,6 @@ class PreparedCall:
                 try:
                     await self.stack.aclose()
                 finally:
+                    if self.admission_stack is not None:
+                        await self.admission_stack.aclose()
                     self.closed = True

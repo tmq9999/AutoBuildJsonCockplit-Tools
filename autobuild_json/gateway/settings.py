@@ -15,6 +15,7 @@ class ServiceSettings(BaseSettings):
     database_url: SecretStr | None = None
     master_key_file: Path | None = None
     request_timeout: int = Field(default=180, ge=1, le=600)
+    inference_capacity: int = Field(default=100, ge=1, le=10_000)
     database_pool_size: int = Field(default=16, ge=1, le=100)
     database_max_overflow: int = Field(default=8, ge=0, le=100)
     database_pool_timeout: float = Field(default=30, ge=1, le=300)

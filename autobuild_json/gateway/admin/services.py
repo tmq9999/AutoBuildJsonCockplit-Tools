@@ -13,6 +13,7 @@ from ..proxy.manager import ProxyManager
 from ..transport.egress import EgressPolicy
 from ..transport.http import Transport
 from ..engine import Engine
+from ..admission import InferenceAdmission
 
 
 class AdminServices:
@@ -26,8 +27,10 @@ class AdminServices:
         self.profiles = ProfileStore(db, vault, pepper)
         self.proxies = ProxyManager(PgLeaseStore(db))
         self.transport = transport or Transport(egress or EgressPolicy())
+        settings = service_settings
+        admission = InferenceAdmission(settings.inference_capacity if settings is not None else 100)
         self.engine = Engine(db, self.catalog, self.ledger, self.proxies, self.transport, vault,
-                             digest_key=pepper, proxy_resolver=self.profiles.load)
+                             digest_key=pepper, proxy_resolver=self.profiles.load, admission=admission)
         from ..accounts.quota import CodexQuotaService
         from ..accounts.quota_store import QuotaStore
         self.quota_store = QuotaStore(db)
