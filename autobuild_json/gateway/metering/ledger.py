@@ -278,19 +278,23 @@ class Ledger:
         except (TypeError, ValueError):
             return None
 
-    async def status_snapshot(self):
+    async def status_snapshot(self, session=None):
         """Return redacted settlement facts suitable for operator snapshots."""
-        async with self.db.sessions() as session:
-            rows = (await session.execute(text("""SELECT r.admitted_at,
-                EXISTS (SELECT 1 FROM attempts a WHERE a.request_id=r.id
-                    AND a.status='completed' AND a.usage IS NOT NULL) AS has_evidence,
+        if session is None:
+            async with self.db.sessions() as owned:
+                return await self.status_snapshot(owned)
+        result = await session.stream(text("""SELECT r.admitted_at,
                 (SELECT a.usage FROM attempts a WHERE a.request_id=r.id
                     AND a.status='completed' AND a.usage IS NOT NULL
                     ORDER BY a.started_at DESC,a.id DESC LIMIT 1) AS usage
-                FROM requests r WHERE r.state='usage_pending'"""))).mappings().all()
-        pending = len(rows)
-        recoverable = sum(self._authoritative_usage(row["usage"]) is not None for row in rows)
-        oldest = min((row["admitted_at"] for row in rows), default=None)
+                FROM requests r WHERE r.state='usage_pending'"""))
+        pending = recoverable = 0
+        oldest = None
+        async for row in result.mappings():
+            pending += 1
+            recoverable += self._authoritative_usage(row["usage"]) is not None
+            if oldest is None or row["admitted_at"] < oldest:
+                oldest = row["admitted_at"]
         oldest_age = 0 if oldest is None else int((datetime.now(timezone.utc) - oldest.astimezone(timezone.utc)).total_seconds())
         return {"pending": pending, "recoverable": recoverable,
                 "oldest_pending_age_seconds": max(0, oldest_age),

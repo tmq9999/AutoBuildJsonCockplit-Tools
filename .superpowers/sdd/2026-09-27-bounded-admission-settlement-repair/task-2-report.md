@@ -160,3 +160,55 @@ Full gateway suite after the fix:
 ```text
 1712 passed, 1 warning in 443.38s (0:07:23)
 ```
+
+## Review fix round 2
+
+The cleanup lifecycle now uses one persistent `PreparedCall` supervisor with a
+single monotonic grace period shared by accounting and resource cleanup. At the
+deadline it cancels unfinished children once, remains their owner while they
+unwind, and keeps `closed=False`. A caller receives bounded `TimeoutError`, but
+later `close()` calls rejoin that same supervisor and drain cancellation-
+resistant work; no child is abandoned or replayed through a failed shell.
+Original non-timeout cleanup errors remain the terminal error. Provider/proxy/
+stream and admission cleanup run independently of accounting so each is
+attempted safely.
+
+The new controlled cancellation-resistant unit regression proves ownership is
+retained after the first timeout and empty after a later close drains the same
+supervisor. Existing stream lifecycle integration remains green, including
+disconnect cancellation and concurrent close joining.
+
+The private status read now reuses its existing repeatable-read database
+session rather than opening a nested connection. Settlement rows are streamed
+and validated incrementally, avoiding an unbounded in-memory `.all()` over
+historical pending requests. `oldest_pending_age_seconds` remains age since
+admission, and `recovery_outcome` is the current durable aggregate—not a
+historical last-operation value.
+
+```text
+pytest tests/gateway/unit/test_engine_admission.py -q
+9 passed in 0.51s
+
+pytest tests/gateway/unit/test_engine_admission.py \
+  tests/gateway/integration/test_recovery.py \
+  tests/gateway/integration/test_gateway.py \
+  tests/gateway/integration/test_stream_lifecycle.py \
+  tests/gateway/integration/test_codex_service_status.py -q
+40 passed in 14.92s
+
+ruff check <round-2 changed Python files>
+All checks passed!
+
+python -m compileall -q <round-2 changed Python files>
+Passed (no output).
+
+git diff --check
+Passed (no output).
+```
+
+An additional full-suite run was stopped after the controller confirmed the
+targeted matrix was sufficient; it had reached 188 passed with no failures in
+82.48s before interruption. The prior completed full-suite gate remains 1712
+passed. No production database was mutated. Operational observation supplied
+by the controller: the local runner does not launch maintenance, and historical
+interrupted rows will be handled by explicit Task 4 recovery verification.

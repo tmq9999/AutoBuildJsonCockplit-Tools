@@ -106,12 +106,12 @@ async def test_prepared_close_bounds_hanging_cleanup_and_does_not_claim_closed()
     admission = InferenceAdmission(1)
     admission_stack = AsyncExitStack()
     await admission_stack.enter_async_context(admission.enter(datetime.now(timezone.utc) + timedelta(seconds=2)))
-    entered = asyncio.Event()
+    entered, release = asyncio.Event(), asyncio.Event()
 
     class Ledger:
         async def mark_pending(self, *args):
             entered.set()
-            await asyncio.Event().wait()
+            await release.wait()
 
     class Stream:
         async def cancel(self):
@@ -129,7 +129,47 @@ async def test_prepared_close_bounds_hanging_cleanup_and_does_not_claim_closed()
     assert asyncio.get_running_loop().time() - started < 0.5
     assert not prepared.closed
     assert admission.snapshot()["inflight"] == 0
+    assert prepared._cleanup_children
+    release.set()
+    with pytest.raises(TimeoutError):
+        await prepared.close()
     assert not prepared._cleanup_children
+
+
+@pytest.mark.asyncio
+async def test_prepared_close_retains_and_later_joins_cancellation_resistant_cleanup():
+    admission = InferenceAdmission(1)
+    admission_stack = AsyncExitStack()
+    await admission_stack.enter_async_context(admission.enter(datetime.now(timezone.utc) + timedelta(seconds=2)))
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class Ledger:
+        async def mark_pending(self, *args):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            finally:
+                finished.set()
+
+    class Stream:
+        async def cancel(self):
+            pass
+
+    from autobuild_json.gateway.engine import PreparedCall
+    prepared = PreparedCall(SimpleNamespace(ledger=Ledger(), budgets=None), AsyncExitStack(), Stream(),
+                            __import__("uuid").uuid4(), SimpleNamespace(public_model_id="m", adapter="x"),
+                            __import__("uuid").uuid4(), admission_stack=admission_stack,
+                            cleanup_grace=0.05)
+    with pytest.raises(TimeoutError):
+        await prepared.close()
+    assert entered.is_set() and not finished.is_set()
+    assert prepared._cleanup_children and not prepared.closed
+    release.set()
+    await prepared.close()
+    assert finished.is_set() and not prepared._cleanup_children
+    assert prepared.closed and admission.snapshot()["inflight"] == 0
 
 
 class _Ledger:

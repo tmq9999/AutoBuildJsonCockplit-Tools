@@ -58,7 +58,7 @@ class ServiceStatus:
                     AND (k.expires_at IS NULL OR k.expires_at>now())) AS enabled
                 FROM api_keys k JOIN customers c ON c.id=k.customer_id"""))).mappings().one())
             usage = await usage_summary(session)
-            settlement = await Ledger(self.services.db).status_snapshot()
+            settlement = await Ledger(self.services.db).status_snapshot(session)
         # The serving and admin listeners are separate processes. Prefer the
         # redacted snapshot written by the serving engine; never present an
         # idle admin-process engine as live inference capacity. Snapshots older

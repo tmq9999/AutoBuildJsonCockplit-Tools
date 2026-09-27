@@ -700,44 +700,29 @@ class PreparedCall:
 
     async def close(self):
         # Generator finalization and HTTP disconnect may both call close. All
-        # callers must join the same cleanup, not return when it merely started.
+        # callers join the same persistent supervisor. A bounded caller timeout
+        # never cancels or detaches the supervisor; a later close can drain it.
         if self._close_task is None:
-            self._close_task = asyncio.create_task(self._close_once())
-        cancelled = False
-        while True:
-            try:
-                await asyncio.shield(self._close_task)
-                break
-            except asyncio.CancelledError:
-                if self._close_task.cancelled():
-                    raise
-                cancelled = True
-        if cancelled:
-            raise asyncio.CancelledError()
+            self._close_task = asyncio.create_task(self._close_once(), name="prepared-call-cleanup")
+            self._close_task.add_done_callback(self._observe_cleanup)
+        try:
+            await asyncio.wait_for(asyncio.shield(self._close_task), self.cleanup_grace)
+        except asyncio.TimeoutError:
+            raise TimeoutError("interrupted cleanup exceeded bounded grace") from None
+
+    @staticmethod
+    def _observe_cleanup(task):
+        # A caller may time out before the owned supervisor finishes. Retrieve
+        # its terminal exception to avoid an unhandled-task warning; awaiting
+        # the same task later still propagates that exact exception.
+        if not task.cancelled():
+            task.exception()
 
     async def _close_once(self):
-        failures = []
-        async def bounded(awaitable):
-            task = asyncio.create_task(awaitable)
-            self._cleanup_children.add(task)
-            task.add_done_callback(self._cleanup_children.discard)
-            try:
-                await asyncio.wait_for(asyncio.shield(task), self.cleanup_grace)
-            except asyncio.TimeoutError as exc:
-                failures.append(exc)
-                task.cancel()
-                task.cancel()
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), min(0.05, self.cleanup_grace))
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    pass
-            except BaseException as exc:
-                failures.append(exc)
-
-        try:
+        async def accounting_cleanup():
             if not self.settled:
                 if self.budget_attempt is not None:
-                    await bounded(self.engine.budgets.settle(self.budget_attempt, None))
+                    await self.engine.budgets.settle(self.budget_attempt, None)
                 reconcile = getattr(self.engine.ledger, "reconcile_interrupted", None)
                 if reconcile is not None:
                     # Keep the interruption marker durable even when the
@@ -746,20 +731,42 @@ class PreparedCall:
                     # request exactly once if that receipt is already saved.
                     mark_pending = getattr(self.engine.ledger, "mark_pending", None)
                     if mark_pending is not None:
-                        await bounded(mark_pending(self.request_id, "interrupted"))
-                    await bounded(reconcile(self.request_id, self.attempt_id))
+                        await mark_pending(self.request_id, "interrupted")
+                    await reconcile(self.request_id, self.attempt_id)
                 else:
-                    await bounded(self.engine.ledger.mark_pending(self.request_id, "interrupted"))
-        finally:
-            await bounded(self.stream.cancel())
-            await bounded(self.stack.aclose())
-            if self.admission_stack is not None:
-                await bounded(self.admission_stack.aclose())
-            publish = getattr(self.engine, "request_capacity_publish", None)
-            if publish is not None:
-                publish()
-            self.closed = not failures
+                    await self.engine.ledger.mark_pending(self.request_id, "interrupted")
+
+        async def resource_cleanup():
+            try:
+                await self.stream.cancel()
+            finally:
+                try:
+                    await self.stack.aclose()
+                finally:
+                    if self.admission_stack is not None:
+                        await self.admission_stack.aclose()
+
+        children = [asyncio.create_task(accounting_cleanup(), name="prepared-accounting-cleanup"),
+                    asyncio.create_task(resource_cleanup(), name="prepared-resource-cleanup")]
+        self._cleanup_children.update(children)
+        for child in children:
+            child.add_done_callback(self._cleanup_children.discard)
+        done, pending = await asyncio.wait(children, timeout=self.cleanup_grace)
+        for child in pending:
+            child.cancel()
+        # The supervisor deliberately remains live while cancellation-resistant
+        # dependencies unwind. PreparedCall retains this task and every child;
+        # later close calls rejoin the same ownership graph.
+        results = await asyncio.gather(*children, return_exceptions=True)
+        for child in children:
+            self._cleanup_children.discard(child)
+        publish = getattr(self.engine, "request_capacity_publish", None)
+        if publish is not None:
+            publish()
+        failures = [result for result in results if isinstance(result, BaseException)]
+        self.closed = not failures
         if failures:
-            if next((failure for failure in failures if not isinstance(failure, asyncio.TimeoutError)), None) is not None:
-                raise next(failure for failure in failures if not isinstance(failure, asyncio.TimeoutError))
+            original = next((failure for failure in failures if not isinstance(failure, asyncio.CancelledError)), None)
+            if original is not None:
+                raise original
             raise TimeoutError("interrupted cleanup exceeded bounded grace")
