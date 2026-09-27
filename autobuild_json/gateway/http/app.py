@@ -20,15 +20,19 @@ from .codex_routes import codex_router
 def create_gateway_app(identity, catalog, engine, *, allowed_hosts, background_services=None):
     @asynccontextmanager
     async def lifespan(app):
-        await engine.start_capacity_publisher()
-        if background_services is not None:
-            background_services.quota_refresh_jobs.start()
         try:
+            await engine.start_capacity_publisher()
+            if background_services is not None:
+                background_services.quota_refresh_jobs.start()
             yield
         finally:
-            await engine.stop_capacity_publisher()
-            if background_services is not None:
-                await background_services.close()
+            # Always join the owned publisher, including a failed background
+            # service startup; service cleanup must still run if a flush fails.
+            try:
+                await engine.stop_capacity_publisher()
+            finally:
+                if background_services is not None:
+                    await background_services.close()
 
     app = FastAPI(title="AutoBuild API Gateway", lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)

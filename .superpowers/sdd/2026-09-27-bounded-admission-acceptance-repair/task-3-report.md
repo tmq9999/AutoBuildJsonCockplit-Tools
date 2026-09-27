@@ -20,3 +20,10 @@ Implemented lifecycle-owned capacity telemetry for the serving gateway.
 ## Concerns
 
 Integration verification requires the repository's PostgreSQL 18/17 test environment. Existing checked-in status tests that expect an idle Engine fallback need to be updated to the new explicit-unavailable contract.
+
+## Fix round 1
+
+- Updated checked-in service-status integration coverage for fresh, stale, and unavailable serving snapshots, plus `/health` while an admission permit is held.
+- Hardened serving lifespan cleanup so publisher shutdown is attempted after startup failures and background service cleanup runs even when publisher flush/stop raises.
+- Prevented stale event signals from causing duplicate capacity writes and bounded cancellation/join during publisher shutdown.
+- Unit publisher tests still pass (2 passed); Ruff passes. PostgreSQL 18 binaries are present but cannot execute in this environment (dynamic-linker failure during `initdb`), so integration tests remain blocked.

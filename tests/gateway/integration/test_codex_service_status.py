@@ -33,9 +33,7 @@ async def test_status_is_private_storage_only_and_does_not_claim_running(pg_db, 
                               "reasoning": "0", "total_tokens": "0", "uncached_input_tokens": "0",
                               "charged_micro": "0", "held_micro": "0"},
             "version": "codex-http-v2",
-            "capacity": {"admission": services.engine.admission.snapshot(),
-                          "provider": services.engine.provider_limits.snapshot(),
-                          "proxy": services.engine.proxies.snapshot()}}
+                    "capacity": {"available": False, "reason": "serving_snapshot_unavailable"}}
         assert "no-store" in result.headers["cache-control"].split(", ")
         bad = await client.get(PATH + "?token=DO-NOT-ECHO")
         assert bad.status_code == 400 and "DO-NOT-ECHO" not in bad.text
@@ -60,6 +58,37 @@ async def test_status_reads_serving_process_capacity_snapshot(pg_db, settings):
         result = await client.get(PATH)
         assert result.status_code == 200
         assert result.json()["capacity"] == snapshot
+
+
+async def test_status_marks_old_snapshot_stale_and_missing_snapshot_unavailable(pg_db, settings):
+    async with private_env(pg_db, settings) as (client, services):
+        await client.post("/api/session", headers={"Origin": ORIGIN}, json={"token": "test-admin-token"})
+        snapshot = {"admission": {"capacity": 100, "inflight": 1}, "provider": {}, "proxy": {}}
+        async with pg_db.sessions.begin() as session:
+            await session.execute(text(
+                "INSERT INTO gateway_capacity_snapshots(id,snapshot,updated_at) VALUES "
+                "(1,CAST(:snapshot AS jsonb),clock_timestamp()-interval '31 seconds') "
+                "ON CONFLICT (id) DO UPDATE SET snapshot=EXCLUDED.snapshot,updated_at=EXCLUDED.updated_at"),
+                {"snapshot": json.dumps(snapshot)})
+        stale = (await client.get(PATH)).json()["capacity"]
+        assert stale["stale"] is True and "updated_at" in stale
+        async with pg_db.sessions.begin() as session:
+            await session.execute(text("DELETE FROM gateway_capacity_snapshots WHERE id=1"))
+        assert (await client.get(PATH)).json()["capacity"] == {
+            "available": False, "reason": "serving_snapshot_unavailable"}
+
+
+async def test_health_succeeds_while_inference_permit_is_held(pg_db, settings):
+    from autobuild_json.gateway.http.app import create_gateway_app
+    async with private_env(pg_db, settings) as (_, services):
+        app = create_gateway_app(services.identity, services.catalog, services.engine,
+                                 allowed_hosts=("public",))
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://public") as client:
+                deadline = datetime.now(timezone.utc) + timedelta(seconds=5)
+                async with services.engine.admission.enter(deadline):
+                    response = await client.get("/health")
+                    assert response.status_code == 200 and response.json() == {"status": "ok"}
 
 
 async def test_status_counts_accounts_and_usable_keys_without_revealing_identities(pg_db, settings):

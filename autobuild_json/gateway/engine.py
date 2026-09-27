@@ -99,6 +99,10 @@ class Engine:
                 await asyncio.sleep(self._capacity_interval)
             if not self._capacity_dirty and self._capacity_stopping:
                 break
+            if not self._capacity_dirty:
+                # An Event may remain set after a burst was consumed. Do not
+                # turn that stale signal into an extra database write.
+                continue
             self._capacity_dirty = False
             await self._publish_capacity()
             if self._capacity_stopping and not self._capacity_dirty:
@@ -112,7 +116,14 @@ class Engine:
         self._capacity_event = asyncio.Event()
         self._capacity_stopping = False
         self._capacity_dirty = True
-        self._capacity_task = asyncio.create_task(self._capacity_publisher(), name="gateway-capacity-publisher")
+        task = asyncio.create_task(self._capacity_publisher(), name="gateway-capacity-publisher")
+        self._capacity_task = task
+
+        def clear_finished(done):
+            if getattr(self, "_capacity_task", None) is done:
+                self._capacity_task = None
+
+        task.add_done_callback(clear_finished)
         self._capacity_event.set()
 
     def request_capacity_publish(self):
@@ -131,15 +142,26 @@ class Engine:
         self._capacity_dirty = True
         if self._capacity_event is not None:
             self._capacity_event.set()
+        bounded = max(0.01, timeout)
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.01, timeout))
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=bounded)
+        except asyncio.TimeoutError:
+            # Cancellation is bounded too: a broken writer must not hold up
+            # server shutdown indefinitely. The task remains owned until its
+            # done callback clears the reference if it resists cancellation.
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=bounded)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
         finally:
-            self._capacity_task = None
-            self._capacity_event = None
-            self._capacity_dirty = False
+            if task.done():
+                self._capacity_task = None
+                self._capacity_event = None
+                self._capacity_dirty = False
 
     async def codex_tokens(self, route):
         row = await self.credentials._record(route.credential_id)
