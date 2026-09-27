@@ -132,7 +132,7 @@ async def open_codex_websocket(transport, route, proxy, account_id, access_token
             rejected.received_at = time.monotonic()
             raise rejected
         if response.status_code != 101:
-            raise UpstreamRejected(response.status_code)
+            raise GatewayError("upstream_error", 502, "upstream", upstream_status=response.status_code)
         protocol.receive_data(b"HTTP/1.1 101 Switching Protocols\r\n" + b"".join(
             name+b": "+value+b"\r\n" for name, value in response.headers.raw)+b"\r\n")
         if not any(isinstance(event, AcceptConnection) for event in protocol.events()):

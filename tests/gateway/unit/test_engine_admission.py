@@ -29,12 +29,15 @@ def test_capacity_snapshot_records_each_upstream_http_status_once_and_ignores_tr
     engine._record_upstream_outcome = Engine._record_upstream_outcome.__get__(engine)
     engine.request_capacity_publish = lambda: None
     rejected = UpstreamRejected(429)
+    generic = GatewayError("upstream_error", 502, "upstream", upstream_status=503)
 
     engine._record_upstream_outcome("rate_limited", rejected)
     engine._record_upstream_outcome("rate_limited", rejected)
+    engine._record_upstream_outcome("failed", generic)
+    engine._record_upstream_outcome("failed", generic)
     engine._record_upstream_outcome("failed", TransportFailure(before_response=True, proxy_used=False))
 
-    assert engine.capacity_snapshot()["upstream"]["http_statuses"] == {"429": 1}
+    assert engine.capacity_snapshot()["upstream"]["http_statuses"] == {"429": 1, "503": 1}
 
 
 def test_capacity_snapshot_is_compatible_with_new_engine_objects_without_histogram_state():

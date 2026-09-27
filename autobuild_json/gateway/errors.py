@@ -19,7 +19,8 @@ SAFE_STAGES = frozenset({"auth", "policy", "storage", "quota", "provider", "prox
 
 class GatewayError(Exception):
     def __init__(self, code, status=400, stage="request", retry_after=None, *,
-                 safe_retry=False, transport_phase=None, proxy_used=False):
+                 safe_retry=False, transport_phase=None, proxy_used=False,
+                 upstream_status=None):
         self.code = code if code in SAFE_CODES else "internal_error"
         self.status = status if isinstance(status, int) and 400 <= status <= 599 else 500
         self.stage = stage if stage in SAFE_STAGES else "request"
@@ -32,6 +33,8 @@ class GatewayError(Exception):
         self.transport_phase = transport_phase if transport_phase in {"before_response", "after_response"} else None
         self.proxy_used = bool(proxy_used)
         self.safe_retry = bool(safe_retry)
+        self.upstream_status = (upstream_status if type(upstream_status) is int
+                                and 100 <= upstream_status <= 599 else None)
         super().__init__(self.code)
 
     def to_dict(self):

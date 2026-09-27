@@ -44,7 +44,7 @@ def test_non_codex_responses_keeps_generation_controls():
 @pytest.mark.asyncio
 async def test_codex_generic_http_non_200_preserves_upstream_status():
     from autobuild_json.gateway.contracts import InferenceRequest
-    from autobuild_json.gateway.errors import UpstreamRejected
+    from autobuild_json.gateway.errors import GatewayError, UpstreamRejected
     from autobuild_json.gateway.providers.codex import CodexAdapter
 
     class Response:
@@ -61,11 +61,12 @@ async def test_codex_generic_http_non_200_preserves_upstream_status():
     lease = SimpleNamespace(deadline=datetime.now(timezone.utc) + timedelta(seconds=5), proxy=None)
     adapter = CodexAdapter(Transport(), lambda route: ("account", {"access_token": "token"}))
 
-    with pytest.raises(UpstreamRejected) as caught:
+    with pytest.raises(GatewayError) as caught:
         async with adapter._open(request, route, lease, "account", {"access_token": "token"}):
             pytest.fail("generic HTTP rejection was accepted")
 
     assert caught.value.upstream_status == 502
+    assert not isinstance(caught.value, UpstreamRejected)
     assert caught.value.code == "upstream_error"
     assert caught.value.stage == "upstream"
     assert caught.value.status == 502

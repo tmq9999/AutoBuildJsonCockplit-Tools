@@ -118,7 +118,7 @@ class CodexAdapter:
                 rejected.received_at = received_at
                 raise rejected
             if response.status != 200:
-                raise UpstreamRejected(response.status)
+                raise GatewayError("upstream_error", 502, "upstream", upstream_status=response.status)
             yield ProviderStream(response, compact_events(response) if compact else responses_events(
                 response, images=request.image_tool is not None, allow_empty_terminal_output=True))
 

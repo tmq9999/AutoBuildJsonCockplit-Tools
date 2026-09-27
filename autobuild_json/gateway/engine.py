@@ -210,14 +210,13 @@ class Engine:
                 error._gateway_upstream_outcome_recorded = True
             except (AttributeError, TypeError):
                 pass
-            if isinstance(error, UpstreamRejected):
-                status = error.upstream_status
-                if type(status) is int and 100 <= status <= 599:
-                    statuses = getattr(self, "_upstream_http_statuses", None)
-                    if statuses is None:
-                        statuses = self._upstream_http_statuses = {}
-                    key = str(status)
-                    statuses[key] = statuses.get(key, 0) + 1
+            status = getattr(error, "upstream_status", None)
+            if type(status) is int and 100 <= status <= 599:
+                statuses = getattr(self, "_upstream_http_statuses", None)
+                if statuses is None:
+                    statuses = self._upstream_http_statuses = {}
+                key = str(status)
+                statuses[key] = statuses.get(key, 0) + 1
         self._record_stage_outcome("upstream", outcome)
 
     @staticmethod
