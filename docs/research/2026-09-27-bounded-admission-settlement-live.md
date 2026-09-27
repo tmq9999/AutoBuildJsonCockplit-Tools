@@ -78,7 +78,8 @@ telemetry reported zero `rate_limited_by_stage` deltas despite 9 and 22 HTTP
 the stage deltas do not establish the source of those HTTP 429 responses and
 are not evidence that throttling did not occur.
 
-The live evidence supports bounded admission and exact settlement for
-authoritative usage. It does not establish 100% upstream success or stability;
+The live evidence supports bounded admission, observed-usage matching, and
+exactly-once settlement for completed requests. It does not establish 100%
+upstream success or stability;
 the recorded HTTP 429/502 outcomes, their unproven origin, and pending unknown
 usage remain the operational result.
