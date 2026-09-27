@@ -40,7 +40,9 @@ The six 429s are upstream/provider rate-limit observations, not admission-capaci
 
 ## Streaming and settlement
 
-The 100-user burst exercised real non-streaming `/v1/responses` requests and verified non-empty output and usage for each successful response. A separate real streaming request was not run in this operational window; therefore streaming settlement and zero-leak evidence are **not claimed** here. Follow-up should run one temporary-key stream and inspect the persisted ledger plus admission/proxy snapshots before declaring streaming verified.
+The initial 100-user burst exercised real non-streaming `/v1/responses` requests and verified non-empty output and usage for each successful response. In the follow-up window, a separate temporary-key streaming request returned HTTP 200 (`text/event-stream`) with 11 SSE events, non-empty output, a usage event, and `response.completed`; temporary key/customer cleanup ran in `finally`.
+
+Post-cleanup SQL observed two active provider-admission rows and two owned proxy-lease rows at the first check. A later read-only check showed the provider rows had expired deadlines and one remaining endpoint lease had a future deadline, indicating background/pre-existing activity rather than a provable leak from the temporary stream. No rows were modified, and zero-leak is not claimed.
 
 ## Rollback/cleanup
 
@@ -50,6 +52,6 @@ The original configured proxy/provider profile was preserved. Temporary keys wer
 
 The subsequent review-window restart initially reported `{"status":"unavailable"}` because the worktree `data` link had been removed while its PostgreSQL cluster was running. After read-only validation of the original data target, the link was restored and the same service restarted without resetting or creating a database. `/health` then returned HTTP 200.
 
-A real temporary-key streaming `/v1/responses` request completed with HTTP 200 and `text/event-stream`; the redacted verifier observed 11 SSE events, non-empty output text, a usage event, and `response.completed`. Cleanup revoked the temporary key and deleted its temporary customer in `finally`. A direct post-cleanup database check reported 2 active provider-admission rows and 2 owned proxy-lease rows, so zero-leak cannot be claimed (these appear to be pre-existing/background service activity, not attributed to the temporary request).
+A real temporary-key streaming `/v1/responses` request completed with HTTP 200 and `text/event-stream`; the redacted verifier observed 11 SSE events, non-empty output text, a usage event, and `response.completed`. Cleanup revoked the temporary key and deleted its temporary customer in `finally`. A direct post-cleanup database check reported 2 active provider-admission rows and 2 owned proxy-lease rows. Read-only follow-up showed the provider deadlines were expired and one endpoint lease remained future-dated, consistent with background/pre-existing activity; no rows were modified and zero-leak cannot be claimed.
 
 The admin status process is separate from the serving engine, so its capacity counters remain zero/unsampled for request traffic; queue wait p50/p95, provider-active maximum, and proxy-lease maximum were therefore not available from that endpoint. They are not inferred or presented as zero. The earlier burst metrics remain the only acceptance measurement.
