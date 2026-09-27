@@ -86,3 +86,31 @@ async def test_claim_does_not_outlive_deadline_while_lease_row_is_locked(pg_db):
             {"resource": resource},
         )).one()
     assert row.owner is None
+
+
+async def test_release_lock_timeout_is_bounded_and_redacted(pg_db):
+    from autobuild_json.gateway.proxy.pg_leases import PgLeaseStore
+
+    store = PgLeaseStore(pg_db)
+    resource = "locked-release-fingerprint"
+    token = await store.claim(
+        resource,
+        uuid4(),
+        datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+    blocker = pg_db.sessions()
+    await blocker.begin()
+    try:
+        await blocker.execute(
+            text("SELECT resource FROM proxy_leases WHERE resource=:resource FOR UPDATE"),
+            {"resource": resource},
+        )
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(GatewayError, match="deadline_exceeded") as error:
+            await asyncio.wait_for(store.release(token), 1)
+        assert error.value.status == 504
+        assert error.value.stage == "proxy"
+        assert asyncio.get_running_loop().time() - started < 0.8
+    finally:
+        await blocker.rollback()
+        await blocker.close()

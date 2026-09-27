@@ -8,6 +8,8 @@ from .leases import LeaseToken
 
 
 class PgLeaseStore:
+    _CLEANUP_GRACE_SECONDS = 0.25
+
     def __init__(self, db, *, clock=None):
         self.db, self.clock = db, clock
 
@@ -72,10 +74,20 @@ class PgLeaseStore:
             raise
 
     async def release(self, token):
-        async with self.db.sessions.begin() as session:
-            await session.execute(text("UPDATE proxy_leases SET owner=NULL WHERE resource=:resource "
-                "AND owner=:owner AND generation=:generation"),
-                {"resource": token.resource, "owner": token.owner, "generation": token.generation})
+        cleanup_deadline = datetime.now(timezone.utc) + timedelta(seconds=self._CLEANUP_GRACE_SECONDS)
+        try:
+            async with self.db.sessions.begin() as session:
+                await self._set_lock_timeout(session, cleanup_deadline)
+                await session.execute(text("UPDATE proxy_leases SET owner=NULL WHERE resource=:resource "
+                    "AND owner=:owner AND generation=:generation"),
+                    {"resource": token.resource, "owner": token.owner, "generation": token.generation})
+        except (OperationalError, DBAPIError) as exc:
+            original = getattr(exc, "orig", None)
+            pgcode = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+            message = str(original or exc).lower()
+            if pgcode == "55P03" or "lock timeout" in message:
+                raise GatewayError("deadline_exceeded", 504, "proxy") from None
+            raise
 
     async def assert_owner(self, token):
         async with self.db.sessions() as session:

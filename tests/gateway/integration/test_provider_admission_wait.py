@@ -159,6 +159,30 @@ async def test_default_non_waiting_admission_still_fails_immediately(pg_db):
         assert asyncio.get_running_loop().time() - started < 0.1
 
 
+async def test_admission_cleanup_lock_timeout_is_bounded_and_redacted(pg_db):
+    route, _, _ = await limited_route(pg_db)
+    limits = ProviderLimits(pg_db)
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=60)
+    context = limits.acquire(route, deadline)
+    identity = await context.__aenter__()
+    blocker = pg_db.sessions()
+    await blocker.begin()
+    try:
+        await blocker.execute(
+            text("SELECT id FROM provider_admissions WHERE id=:id FOR UPDATE"),
+            {"id": identity},
+        )
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(GatewayError, match="deadline_exceeded") as error:
+            await asyncio.wait_for(context.__aexit__(None, None, None), 1)
+        assert error.value.status == 504
+        assert error.value.stage == "upstream"
+        assert asyncio.get_running_loop().time() - started < 0.8
+    finally:
+        await blocker.rollback()
+        await blocker.close()
+
+
 @pytest.mark.parametrize("rejection", ["disabled", "cooldown", "rpm"])
 async def test_wait_mode_does_not_retry_non_capacity_rejections(pg_db, rejection):
     route, provider, credential = await limited_route(pg_db, rpm=1)

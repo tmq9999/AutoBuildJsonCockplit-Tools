@@ -1,7 +1,9 @@
 import asyncio
+from collections import deque
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import ceil
+import time
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -11,11 +13,15 @@ from ..errors import GatewayError
 
 
 class ProviderLimits:
+    _CLEANUP_GRACE_SECONDS = 0.25
+
     def __init__(self, db):
         self.db = db
         self._released = asyncio.Condition()
         self._wait_attempts = 0
         self._expired_waits = 0
+        self._waits = deque(maxlen=2048)
+        self._last_wait_ms = 0.0
 
     async def _set_lock_timeout(self, session, deadline):
         remaining = self._remaining(deadline)
@@ -85,25 +91,57 @@ class ProviderLimits:
         return (deadline - now).total_seconds()
 
     def snapshot(self):
+        waits = sorted(self._waits)
+
+        def percentile(percent):
+            if not waits:
+                return 0.0
+            return waits[max(0, ceil(len(waits) * percent) - 1)]
+
         return {
             "wait_attempts": self._wait_attempts,
             "expired_waits": self._expired_waits,
+            "wait_p50_ms": percentile(.50),
+            "wait_p95_ms": percentile(.95),
+            "last_wait_ms": self._last_wait_ms,
         }
 
     async def _wait_for_release(self, deadline):
+        started = time.monotonic()
         remaining = self._remaining(deadline)
         if remaining <= 0:
             self._expired_waits += 1
             raise GatewayError("deadline_exceeded", 504, "upstream")
-        async with self._released:
-            try:
-                await asyncio.wait_for(self._released.wait(), min(0.05, remaining))
-            except asyncio.TimeoutError:
-                pass
+        try:
+            async with self._released:
+                try:
+                    await asyncio.wait_for(self._released.wait(), min(0.05, remaining))
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            wait_ms = min((time.monotonic() - started) * 1000, self._CLEANUP_GRACE_SECONDS * 1000)
+            self._waits.append(wait_ms)
+            self._last_wait_ms = wait_ms
 
     async def _notify_release(self):
         async with self._released:
             self._released.notify_all()
+
+    async def _release_admission(self, identity):
+        cleanup_deadline = datetime.now(timezone.utc) + timedelta(seconds=self._CLEANUP_GRACE_SECONDS)
+        try:
+            async with self.db.sessions.begin() as session:
+                await self._set_lock_timeout(session, cleanup_deadline)
+                await session.execute(
+                    text("UPDATE provider_admissions SET active=false WHERE id=:id"), {"id": identity}
+                )
+        except (OperationalError, DBAPIError) as exc:
+            original = getattr(exc, "orig", None)
+            pgcode = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+            message = str(original or exc).lower()
+            if pgcode == "55P03" or "lock timeout" in message:
+                raise GatewayError("deadline_exceeded", 504, "upstream") from None
+            raise
 
     @asynccontextmanager
     async def acquire(self, route, deadline, *, wait=False):
@@ -128,9 +166,15 @@ class ProviderLimits:
             yield identity
         finally:
             try:
-                async with self.db.sessions.begin() as session:
-                    await session.execute(
-                        text("UPDATE provider_admissions SET active=false WHERE id=:id"), {"id": identity}
-                    )
+                owned = asyncio.create_task(self._release_admission(identity))
+                cancelled = False
+                while not owned.done():
+                    try:
+                        await asyncio.shield(owned)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                await owned
+                if cancelled:
+                    raise asyncio.CancelledError
             finally:
                 await self._notify_release()
