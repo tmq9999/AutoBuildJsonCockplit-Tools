@@ -114,7 +114,12 @@ class InferenceAdmission:
                 self._condition.notify_all()
                 self._emit_metrics()
 
-        asyncio.create_task(notify())
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if not loop.is_closed():
+            loop.create_task(notify())
 
     def _emit_metrics(self):
         if self._metrics is not None:

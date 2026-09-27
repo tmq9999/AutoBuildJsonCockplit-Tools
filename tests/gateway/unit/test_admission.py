@@ -94,6 +94,14 @@ async def test_ticket_release_is_idempotent():
     next_ticket.release()
 
 
+def test_ticket_release_after_event_loop_shutdown_is_safe():
+    admission = InferenceAdmission(capacity=1)
+    ticket = asyncio.run(admission.enter(future()))
+    ticket.release()
+    ticket.release()
+    assert admission.snapshot()["inflight"] == 0
+
+
 @pytest.mark.asyncio
 async def test_snapshot_tracks_counters_and_wait_percentiles():
     admission = InferenceAdmission(capacity=1)
