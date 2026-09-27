@@ -50,6 +50,16 @@ def test_service_pool_limits_are_read_from_gateway_environment(monkeypatch):
     assert (settings.database_pool_size, settings.database_max_overflow, settings.database_pool_timeout) == (7, 5, 12.5)
 
 
+def test_service_inference_capacity_is_bounded_and_read_from_environment(monkeypatch):
+    from autobuild_json.gateway.settings import ServiceSettings
+    monkeypatch.setenv("AUTOBUILD_GATEWAY_INFERENCE_CAPACITY", "7")
+    assert ServiceSettings(_env_file=None).inference_capacity == 7
+    with pytest.raises(ValidationError):
+        ServiceSettings(inference_capacity=0, _env_file=None)
+    with pytest.raises(ValidationError):
+        ServiceSettings(inference_capacity=10_001, _env_file=None)
+
+
 def test_legacy_imports_without_service_dependencies():
     result = subprocess.run([sys.executable, "-c", """
 import sys

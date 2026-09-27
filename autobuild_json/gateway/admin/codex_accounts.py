@@ -57,8 +57,13 @@ class ServiceStatus:
                     AND (k.expires_at IS NULL OR k.expires_at>now())) AS enabled
                 FROM api_keys k JOIN customers c ON c.id=k.customer_id"""))).mappings().one())
             usage = await usage_summary(session)
+        # Capacity is process-local runtime telemetry.  The engine snapshot is
+        # deliberately limited to counters/percentiles and never includes
+        # provider credentials, prompts, customer identities, or proxy URLs.
+        engine = getattr(self.services, "engine", None)
+        capacity = engine.capacity_snapshot() if engine is not None and hasattr(engine, "capacity_snapshot") else {}
         return {"status": status, "base_url": base_url, "accounts": accounts, "keys": keys,
-                "usage": usage, "version": codex_runtime_capabilities()["version"]}
+                "usage": usage, "version": codex_runtime_capabilities()["version"], "capacity": capacity}
 
 
 class CodexProxy:
