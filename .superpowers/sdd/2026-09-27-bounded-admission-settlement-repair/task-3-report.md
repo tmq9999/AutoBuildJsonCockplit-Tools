@@ -88,3 +88,29 @@ actual `PreparedCall.events()` stream exception asserting exactly one upstream
 rate-limit sample. The PostgreSQL matrix includes provider row-lock deadline
 and cancellation tests asserting one wait sample/counter and zero active
 provider admission or owned proxy lease rows.
+
+## Review fix round 2
+
+The second review found that the broad `prepare()` `GatewayError` handler could
+label pre-I/O policy/configuration failures (for example the attribution
+`revalidate()` fence) as upstream failures. `upstream_io_started` now gates
+prepare-side outcome recording; only adapter/transport I/O and stream owners
+can increment upstream terminal counters. The original safe error code/stage is
+preserved for pre-I/O failures.
+
+```text
+pytest tests/gateway/unit/test_engine_resource_order.py \
+       tests/gateway/unit/test_engine_admission.py -q
+26 passed in 0.56s
+
+ruff check <changed files>
+All checks passed!
+python -m compileall -q <changed files>
+Passed (no output).
+git diff --check
+Passed (no output).
+```
+
+The new regression drives `Engine.prepare()` with a second-fence
+`invalid_state` policy failure, verifies the adapter was never opened, keeps the
+original `policy` stage, and asserts upstream terminal counters remain zero.

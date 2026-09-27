@@ -599,6 +599,7 @@ class Engine:
                 await routing_session.revalidate(self, principal, request, selected, stamp)
                 await self.ledger.mark_dispatched(meta.request_id, attempt, route=selected)
                 dispatched = True
+                upstream_io_started = False
                 try:
                     # Attribution may wait on FK/config writers. Fence again
                     # after its committed transaction and before provider I/O.
@@ -609,6 +610,7 @@ class Engine:
                         await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
                         dispatched = False
                         raise
+                    upstream_io_started = True
                     stream = await stack.enter_async_context(self.adapters[selected.adapter].open(request, selected, lease))
                 except UpstreamRejected as exc:
                     known_rejection = attempt
@@ -656,7 +658,7 @@ class Engine:
                     known_rejection = None
                     continue
                 except asyncio.CancelledError as exc:
-                    if known_rejection is None:
+                    if known_rejection is None and upstream_io_started:
                         self._record_upstream_outcome("cancelled", exc)
                     raise
                 except GatewayError as exc:
@@ -669,9 +671,10 @@ class Engine:
                                  and getattr(exc, "transport_phase", None) == "before_response"
                                  and getattr(exc, "proxy_used", False))
                     if not retryable:
-                        outcome = ("expired" if exc.code == "deadline_exceeded" else
-                                   "rate_limited" if exc.code == "rate_limited" else "failed")
-                        self._record_upstream_outcome(outcome, exc)
+                        if upstream_io_started:
+                            outcome = ("expired" if exc.code == "deadline_exceeded" else
+                                       "rate_limited" if exc.code == "rate_limited" else "failed")
+                            self._record_upstream_outcome(outcome, exc)
                         raise
                     known_rejection = attempt
                     await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
@@ -684,12 +687,13 @@ class Engine:
                     transport_retry_used = True
                     if (number + 1 == len(dispatch_routes) or selection_state.pinned
                             or not codex and routes[1].provider_id == selected.provider_id):
-                        self._record_upstream_outcome("failed", exc)
+                        if upstream_io_started:
+                            self._record_upstream_outcome("failed", exc)
                         raise
                     known_rejection = None
                     continue
                 except BaseException as exc:
-                    if known_rejection is None:
+                    if known_rejection is None and upstream_io_started:
                         self._record_upstream_outcome("failed", exc)
                     raise
                 prepared = PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt, scope,

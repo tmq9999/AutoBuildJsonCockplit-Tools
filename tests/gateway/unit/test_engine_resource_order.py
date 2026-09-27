@@ -605,6 +605,83 @@ async def test_prepare_retries_pre_response_transport_failure_at_most_once(monke
     }
 
 
+@pytest.mark.asyncio
+async def test_prepare_revalidate_failure_is_not_reported_as_upstream(monkeypatch):
+    import autobuild_json.gateway.engine as engine_module
+    from autobuild_json.gateway.engine import Engine, RequestMeta
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.gateway.routing.session import Selection
+    from autobuild_json.gateway.admission import InferenceAdmission
+
+    route = SimpleNamespace(
+        adapter="fake", provider_id="provider", credential_id="credential",
+        proxy_profile_id=None, public_model_id="public", binding_id="binding",
+        upstream_model="upstream", budget_id=None,
+        bounds=SimpleNamespace(input_tokens=1, output_tokens=2), input_micro=1, output_micro=1,
+        cache_read_micro=None, cache_write_micro=None, timeout=60,
+    )
+    options = SimpleNamespace(max_output_tokens=None, model_copy=lambda **kwargs: options)
+    request = SimpleNamespace(model="public", options=options)
+    request.model_copy = lambda **kwargs: request
+    meta = RequestMeta(uuid4(), datetime.now(timezone.utc), datetime.now(timezone.utc) + timedelta(seconds=30))
+    opened = []
+
+    class Ledger:
+        async def reserve(self, admission): return "hold"
+        async def mark_dispatched(self, *args, **kwargs): pass
+        async def mark_rejected(self, *args): pass
+        async def release_unspent(self, *args): pass
+        async def reject_and_release(self, *args): pass
+
+    class Adapter:
+        @asynccontextmanager
+        async def open(self, *args):
+            opened.append(True)
+            yield object()
+
+    engine = Engine.__new__(Engine)
+    engine.catalog = SimpleNamespace(visible_model=lambda *args: asyncio.sleep(0, result="public"))
+    engine.ledger = Ledger()
+    engine.admission = InferenceAdmission(1)
+    engine.budgets = SimpleNamespace()
+    engine.adapters = {"fake": Adapter()}
+    engine.credentials = SimpleNamespace(_record=lambda *args: asyncio.sleep(0), fresh_tokens=lambda *args: asyncio.sleep(0))
+    engine.credential = lambda *args: asyncio.sleep(0)
+    engine.proxy_resolver = None
+    engine.db = None
+    engine._record_stage_outcome = Engine._record_stage_outcome.__get__(engine)
+    engine._record_upstream_outcome = Engine._record_upstream_outcome.__get__(engine)
+
+    @asynccontextmanager
+    async def resources(*args):
+        yield SimpleNamespace(proxy=None)
+
+    engine.route_resources = resources
+    monkeypatch.setattr(engine_module, "validate_request", lambda *args: None)
+    monkeypatch.setattr(engine_module.routing_session, "select", lambda *args: asyncio.sleep(0, result=Selection(
+        request, (route,), SimpleNamespace(public_model_id="public"), False, 0)))
+    monkeypatch.setattr(engine_module.routing_session, "revalidate",
+                        lambda *args: asyncio.sleep(0, result=None) if len(args) < 5 else
+                        asyncio.sleep(0, result=None))
+    # The second fence is a pre-I/O policy/config failure.
+    calls = 0
+    async def revalidate(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise GatewayError("invalid_state", 409, "policy")
+    monkeypatch.setattr(engine_module.routing_session, "revalidate", revalidate)
+
+    with pytest.raises(GatewayError) as caught:
+        await engine.prepare(object(), request, meta)
+    assert caught.value.code == "invalid_state"
+    assert caught.value.stage == "policy"
+    assert opened == []
+    assert engine.admission.snapshot()["failed_by_stage"] == {
+        "provider": 0, "proxy": 0, "upstream": 0,
+    }
+
+
 @asynccontextmanager
 async def _empty_context():
     yield
