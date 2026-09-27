@@ -7,7 +7,7 @@ SAFE_CODES = frozenset({
     "invalid_keyring", "secret_unavailable", "reauth_required", "refresh_uncertain", "egress_denied",
     "payload_mismatch", "budget_exceeded", "catalog_incomplete", "catalog_snapshot_stale",
     "catalog_limit_exceeded", "catalog_conflict", "probe_budget_required",
-    "kiot_key_invalid", "kiot_unavailable", "kiot_allocation_uncertain",
+    "kiot_key_invalid", "kiot_unavailable", "kiot_allocation_uncertain", "gateway_busy",
     "operation_conflict", "claim_lost", "operation_cancelled", "operation_expired",
     "codex_usage_unavailable", "codex_credits_unavailable", "codex_credits_stale", "codex_no_credits",
     "codex_reset_uncertain", "codex_refresh_failed", "codex_reset_applied", "codex_reset_not_applied",

@@ -1,0 +1,109 @@
+from datetime import datetime, timedelta, timezone
+
+import asyncio
+
+import pytest
+
+from autobuild_json.gateway.errors import GatewayError
+from autobuild_json.gateway.admission import InferenceAdmission
+
+
+def future(seconds=30):
+    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+
+@pytest.mark.asyncio
+async def test_waiters_are_woken_in_fifo_order():
+    admission = InferenceAdmission(capacity=1)
+    first = await admission.enter(future())
+    order = []
+
+    async def worker(name):
+        async with admission.enter(future()) as ticket:
+            order.append(name)
+            await asyncio.sleep(0)
+
+    second = asyncio.create_task(worker("second"))
+    await asyncio.sleep(0)
+    assert admission.snapshot()["queued"] == 1
+
+    first.release()
+    await asyncio.sleep(0)
+    assert order == ["second"]
+    await second
+
+    third = asyncio.create_task(worker("third"))
+    await asyncio.sleep(0)
+    assert admission.snapshot()["queued"] == 0
+    assert order == ["second", "third"]
+    await third
+
+
+@pytest.mark.asyncio
+async def test_combined_capacity_rejects_third_request():
+    admission = InferenceAdmission(capacity=2)
+    first = await admission.enter(future())
+    second = await admission.enter(future())
+    with pytest.raises(GatewayError) as caught:
+        await admission.enter(future())
+    assert caught.value.code == "gateway_busy"
+    assert caught.value.status == 429
+    assert caught.value.stage == "request"
+    assert caught.value.retry_after == 1
+    first.release()
+    second.release()
+
+
+@pytest.mark.asyncio
+async def test_deadline_expiry_removes_waiter():
+    admission = InferenceAdmission(capacity=1)
+    running = await admission.enter(future())
+    with pytest.raises(GatewayError, match="deadline_exceeded"):
+        await admission.enter(datetime.now(timezone.utc) - timedelta(seconds=1))
+    snapshot = admission.snapshot()
+    assert snapshot["queued"] == 0
+    assert snapshot["expired"] == 1
+    running.release()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiter_is_removed():
+    admission = InferenceAdmission(capacity=1)
+    running = await admission.enter(future())
+    waiter = asyncio.create_task(admission.enter(future()))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert admission.snapshot()["queued"] == 0
+    assert admission.snapshot()["cancelled"] == 1
+    running.release()
+
+
+@pytest.mark.asyncio
+async def test_ticket_release_is_idempotent():
+    admission = InferenceAdmission(capacity=1)
+    ticket = await admission.enter(future())
+    ticket.release()
+    ticket.release()
+    assert admission.snapshot()["inflight"] == 0
+    next_ticket = await admission.enter(future())
+    next_ticket.release()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_tracks_counters_and_wait_percentiles():
+    admission = InferenceAdmission(capacity=1)
+    ticket = await admission.enter(future())
+    ticket.release()
+    snapshot = admission.snapshot()
+    assert snapshot["capacity"] == 1
+    assert snapshot["inflight"] == 0
+    assert snapshot["queued"] == 0
+    assert snapshot["accepted"] == 1
+    assert snapshot["queue_full"] == 0
+    assert snapshot["expired"] == 0
+    assert snapshot["cancelled"] == 0
+    assert snapshot["wait_p50_ms"] >= 0
+    assert snapshot["wait_p95_ms"] >= snapshot["wait_p50_ms"]
+    assert snapshot["last_wait_ms"] == snapshot["wait_p50_ms"]
