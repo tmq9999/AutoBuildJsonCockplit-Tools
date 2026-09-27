@@ -51,6 +51,30 @@ async def test_prepared_call_holds_ticket_until_stream_close():
     assert prepared.closed
 
 
+@pytest.mark.asyncio
+async def test_prepared_cleanup_releases_admission_when_resource_cleanup_fails():
+    admission = InferenceAdmission(1)
+    admission_stack = AsyncExitStack()
+    await admission_stack.enter_async_context(admission.enter(datetime.now(timezone.utc) + timedelta(seconds=2)))
+
+    class BrokenStack:
+        async def aclose(self):
+            raise RuntimeError("resource cleanup failed")
+
+    class Stream:
+        async def cancel(self):
+            pass
+
+    from autobuild_json.gateway.engine import PreparedCall
+    prepared = PreparedCall(SimpleNamespace(ledger=SimpleNamespace(mark_pending=lambda *a: _async_value(None)), budgets=None),
+                            BrokenStack(), Stream(), __import__("uuid").uuid4(),
+                            SimpleNamespace(public_model_id="m", adapter="x"), __import__("uuid").uuid4(),
+                            admission_stack=admission_stack)
+    with pytest.raises(RuntimeError, match="resource cleanup failed"):
+        await prepared.close()
+    assert admission.snapshot()["inflight"] == 0
+
+
 class _Ledger:
     def __init__(self):
         self.released = []

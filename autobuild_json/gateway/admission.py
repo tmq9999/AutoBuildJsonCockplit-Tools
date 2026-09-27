@@ -55,7 +55,10 @@ class InferenceAdmission:
         self._queue_full = 0
         self._expired = 0
         self._cancelled = 0
-        self._waits = []
+        # Keep telemetry bounded even for a long-lived gateway process.  The
+        # gate is an accepted-counter (not an unbounded FIFO), so only the
+        # recent wait sample is retained for percentiles.
+        self._waits = deque(maxlen=2048)
         self._last_wait_ms = 0.0
 
     def enter(self, deadline):

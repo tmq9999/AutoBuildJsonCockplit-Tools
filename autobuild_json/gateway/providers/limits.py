@@ -5,6 +5,7 @@ from math import ceil
 from uuid import uuid4
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from ..errors import GatewayError
 
@@ -17,89 +18,66 @@ class ProviderLimits:
         self._expired_waits = 0
 
     async def _try_acquire(self, route, deadline, identity):
-        async with self.db.sessions.begin() as session:
-            provider = (
-                (
-                    await session.execute(
-                        text("SELECT config,version,cooldown_until FROM providers WHERE id=:id FOR UPDATE"),
-                        {"id": route.provider_id},
-                    )
+        try:
+            async with self.db.sessions.begin() as session:
+                remaining = (deadline - datetime.now(deadline.tzinfo or timezone.utc)).total_seconds()
+                if remaining <= 0:
+                    raise GatewayError("deadline_exceeded", 504, "upstream")
+                # PostgreSQL row locks otherwise have no relationship to the
+                # request deadline.  Set a transaction-local timeout before
+                # either FOR UPDATE so a blocked waiter cannot outlive it.
+                timeout_ms = max(1, int(remaining * 1000))
+                await session.execute(
+                    text("SELECT set_config('lock_timeout', :timeout, true)"),
+                    {"timeout": f"{timeout_ms}ms"},
                 )
-                .mappings()
-                .first()
-            )
-            credential = (
-                (
-                    await session.execute(
-                        text("SELECT * FROM credentials WHERE id=:id AND provider_id=:provider FOR UPDATE"),
-                        {"id": route.credential_id, "provider": route.provider_id},
-                    )
-                )
-                .mappings()
-                .first()
-            )
-            if (
-                not provider
-                or not credential
-                or not provider["config"]["enabled"]
-                or not credential["enabled"]
-            ):
-                raise GatewayError("upstream_unavailable", 503)
-            now = await session.scalar(text("SELECT clock_timestamp()"))
-            until = max((record["cooldown_until"] for record in (provider, credential)
-                         if record["cooldown_until"] is not None), default=now)
-            if until > now:
-                raise GatewayError("rate_limited", 429, "upstream",
-                                   min(86400, ceil((until - now).total_seconds())))
-            limits = []
-            for column, record_id, rpm, concurrency in (
-                (
-                    "provider_id",
-                    route.provider_id,
-                    provider["config"].get("rpm_limit", 600),
-                    provider["config"].get("concurrency_limit", 16),
-                ),
-                (
-                    "credential_id",
-                    route.credential_id,
-                    credential["rpm_limit"],
-                    credential["concurrency_limit"],
-                ),
-            ):
-                counts = (
-                    (
-                        await session.execute(
-                            text(
-                                f"SELECT count(*) FILTER(WHERE admitted_at>now()-interval '60 seconds') AS rpm, "
-                                f"count(*) FILTER(WHERE active AND deadline>now()) AS concurrent FROM provider_admissions WHERE {column}=:id"
-                            ),
-                            {"id": record_id},
-                        )
-                    )
-                    .mappings()
-                    .one()
-                )
-                limits.append((counts, rpm, concurrency))
-            if any(counts["rpm"] >= rpm for counts, rpm, _ in limits):
-                raise GatewayError("upstream_unavailable", 503, "upstream", 1)
-            if any(counts["concurrent"] >= concurrency for counts, _, concurrency in limits):
-                return False
-            inserted = await session.execute(
-                text(
+                provider = (await session.execute(
+                    text("SELECT config,version,cooldown_until FROM providers WHERE id=:id FOR UPDATE"),
+                    {"id": route.provider_id})).mappings().first()
+                credential = (await session.execute(
+                    text("SELECT * FROM credentials WHERE id=:id AND provider_id=:provider FOR UPDATE"),
+                    {"id": route.credential_id, "provider": route.provider_id})).mappings().first()
+                if (not provider or not credential or not provider["config"]["enabled"]
+                        or not credential["enabled"]):
+                    raise GatewayError("upstream_unavailable", 503)
+                now = await session.scalar(text("SELECT clock_timestamp()"))
+                until = max((record["cooldown_until"] for record in (provider, credential)
+                             if record["cooldown_until"] is not None), default=now)
+                if until > now:
+                    raise GatewayError("rate_limited", 429, "upstream",
+                                       min(86400, ceil((until - now).total_seconds())))
+                limits = []
+                for column, record_id, rpm, concurrency in (
+                    ("provider_id", route.provider_id, provider["config"].get("rpm_limit", 600),
+                     provider["config"].get("concurrency_limit", 16)),
+                    ("credential_id", route.credential_id, credential["rpm_limit"],
+                     credential["concurrency_limit"]),
+                ):
+                    counts = (await session.execute(text(
+                        f"SELECT count(*) FILTER(WHERE admitted_at>now()-interval '60 seconds') AS rpm, "
+                        f"count(*) FILTER(WHERE active AND deadline>now()) AS concurrent "
+                        f"FROM provider_admissions WHERE {column}=:id"), {"id": record_id})).mappings().one()
+                    limits.append((counts, rpm, concurrency))
+                if any(counts["rpm"] >= rpm for counts, rpm, _ in limits):
+                    raise GatewayError("upstream_unavailable", 503, "upstream", 1)
+                if any(counts["concurrent"] >= concurrency for counts, _, concurrency in limits):
+                    return False
+                inserted = await session.execute(text(
                     "INSERT INTO provider_admissions(id,provider_id,credential_id,deadline) "
                     "SELECT :id,:provider,:credential,:deadline "
-                    "WHERE clock_timestamp() < :deadline RETURNING id"
-                ),
-                {
-                    "id": identity,
-                    "provider": route.provider_id,
-                    "credential": route.credential_id,
-                    "deadline": deadline,
-                },
-            )
-            if inserted.first() is None:
-                raise GatewayError("deadline_exceeded", 504, "upstream")
-        return True
+                    "WHERE clock_timestamp() < :deadline RETURNING id"), {
+                        "id": identity, "provider": route.provider_id,
+                        "credential": route.credential_id, "deadline": deadline})
+                if inserted.first() is None:
+                    raise GatewayError("deadline_exceeded", 504, "upstream")
+            return True
+        except (OperationalError, DBAPIError) as exc:
+            original = getattr(exc, "orig", None)
+            pgcode = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+            message = str(original or exc).lower()
+            if pgcode == "55P03" or "lock timeout" in message:
+                raise GatewayError("deadline_exceeded", 504, "upstream") from None
+            raise
 
     def _remaining(self, deadline):
         now = datetime.now(deadline.tzinfo or timezone.utc)

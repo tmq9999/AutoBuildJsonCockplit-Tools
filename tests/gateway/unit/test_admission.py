@@ -115,3 +115,13 @@ async def test_snapshot_tracks_counters_and_wait_percentiles():
     assert snapshot["wait_p50_ms"] >= 0
     assert snapshot["wait_p95_ms"] >= snapshot["wait_p50_ms"]
     assert snapshot["last_wait_ms"] == snapshot["wait_p50_ms"]
+
+
+@pytest.mark.asyncio
+async def test_wait_history_is_bounded():
+    admission = InferenceAdmission(capacity=1)
+    for _ in range(2100):
+        ticket = await admission.enter(future())
+        ticket.release()
+    assert len(admission._waits) == 2048
+    assert admission.snapshot()["accepted"] == 2100

@@ -50,6 +50,21 @@ class ProxyManager:
     def snapshot(self):
         return {"wait_attempts": self._wait_attempts, "capacity_signals": self._capacity_signals}
 
+    async def wait_for_capacity(self, selection, owner, deadline):
+        """Wait for a local lease without retaining any provider admission.
+
+        A successful probe claims and immediately releases one lease.  The
+        caller must still perform a fresh claim after acquiring provider
+        capacity because another request may win the race.
+        """
+        while datetime.now(timezone.utc) < deadline:
+            try:
+                async with self.acquire(selection, owner, deadline, wait=True):
+                    return
+            except ProxyCapacityError:
+                continue
+        raise GatewayError("deadline_exceeded", 504, "proxy")
+
     async def _kiot_proxy(self, entry, selection, deadline, acquire_end):
         required = max(0, (deadline-datetime.now(timezone.utc)).total_seconds())
         current = await self.kiot.current(entry.secret, protocol=selection.protocol, deadline=acquire_end)

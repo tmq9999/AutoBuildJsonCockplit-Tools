@@ -57,11 +57,24 @@ class ServiceStatus:
                     AND (k.expires_at IS NULL OR k.expires_at>now())) AS enabled
                 FROM api_keys k JOIN customers c ON c.id=k.customer_id"""))).mappings().one())
             usage = await usage_summary(session)
-        # Capacity is process-local runtime telemetry.  The engine snapshot is
-        # deliberately limited to counters/percentiles and never includes
-        # provider credentials, prompts, customer identities, or proxy URLs.
-        engine = getattr(self.services, "engine", None)
-        capacity = engine.capacity_snapshot() if engine is not None and hasattr(engine, "capacity_snapshot") else {}
+        # The serving and admin listeners are separate processes. Prefer the
+        # redacted snapshot written by the serving engine; never present an
+        # idle admin-process engine as live inference capacity. Snapshots older
+        # than 30s are explicitly marked stale.
+        capacity = None
+        async with self.services.db.sessions() as session:
+            row = (await session.execute(text(
+                "SELECT snapshot,updated_at FROM gateway_capacity_snapshots WHERE id=1"))).mappings().first()
+        if row is not None:
+            age = (datetime.now(timezone.utc) - row["updated_at"]).total_seconds()
+            capacity = dict(row["snapshot"])
+            if age > 30:
+                capacity = {"stale": True, "updated_at": row["updated_at"].isoformat()}
+        if capacity is None:
+            # Compatibility for databases upgraded before 0016; this fallback
+            # is removed once the migration has been applied everywhere.
+            engine = getattr(self.services, "engine", None)
+            capacity = engine.capacity_snapshot() if engine is not None and hasattr(engine, "capacity_snapshot") else {}
         return {"status": status, "base_url": base_url, "accounts": accounts, "keys": keys,
                 "usage": usage, "version": codex_runtime_capabilities()["version"], "capacity": capacity}
 

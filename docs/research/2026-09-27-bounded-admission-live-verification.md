@@ -54,4 +54,12 @@ The subsequent review-window restart initially reported `{"status":"unavailable"
 
 A real temporary-key streaming `/v1/responses` request completed with HTTP 200 and `text/event-stream`; the redacted verifier observed 11 SSE events, non-empty output text, a usage event, and `response.completed`. Cleanup revoked the temporary key and deleted its temporary customer in `finally`. A direct post-cleanup database check reported 2 active provider-admission rows and 2 owned proxy-lease rows. Read-only follow-up showed the provider deadlines were expired and one endpoint lease remained future-dated, consistent with background/pre-existing activity; no rows were modified and zero-leak cannot be claimed.
 
-The admin status process is separate from the serving engine, so its capacity counters remain zero/unsampled for request traffic; queue wait p50/p95, provider-active maximum, and proxy-lease maximum were therefore not available from that endpoint. They are not inferred or presented as zero. The earlier burst metrics remain the only acceptance measurement.
+The original live run predates the cross-process telemetry fix, so its admin
+capacity counters were zero/unsampled for request traffic; queue wait p50/p95,
+provider-active maximum, and proxy-lease maximum were not available from that
+endpoint and are not inferred as zero. The implementation now writes a
+redacted, 30-second-TTL capacity snapshot from the serving engine to the
+database and the admin process reads that snapshot (stale snapshots are marked
+explicitly). This code path was covered by the status integration regression
+test, but was not retroactively measured during the original live run. The
+earlier burst metrics remain the only acceptance measurement.

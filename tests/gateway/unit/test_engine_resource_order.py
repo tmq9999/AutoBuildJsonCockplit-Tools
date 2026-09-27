@@ -77,6 +77,9 @@ async def test_route_resources_releases_provider_before_retrying_proxy_capacity(
             finally:
                 events.append("proxy.exit")
 
+        async def wait_for_capacity(self, selection, owner, deadline):
+            events.append("proxy.wait")
+
     class Transport:
         async def _validate(self, route, proxy): events.append(("validate", proxy))
 
@@ -88,7 +91,7 @@ async def test_route_resources_releases_provider_before_retrying_proxy_capacity(
     async with engine.route_resources("route", "selection", "owner", __import__("datetime").datetime.now(__import__("datetime").timezone.utc)+__import__("datetime").timedelta(seconds=1)) as lease:
         assert lease.proxy == "proxy"
     assert events == [
-        ("provider.enter", True), ("proxy.enter", True), "provider.exit",
-        ("provider.enter", True), ("proxy.enter", True), ("validate", "proxy"),
+        ("provider.enter", True), ("proxy.enter", False), "provider.exit", "proxy.wait",
+        ("provider.enter", True), ("proxy.enter", False), ("validate", "proxy"),
         "proxy.exit", "provider.exit",
     ]

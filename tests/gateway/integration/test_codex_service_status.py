@@ -46,6 +46,22 @@ async def test_status_is_private_storage_only_and_does_not_claim_running(pg_db, 
             assert await session.scalar(text("SELECT count(*) FROM audit_events")) == 0
 
 
+async def test_status_reads_serving_process_capacity_snapshot(pg_db, settings):
+    async with private_env(pg_db, settings) as (client, services):
+        await client.post("/api/session", headers={"Origin": ORIGIN}, json={"token": "test-admin-token"})
+        snapshot = {"admission": {"capacity": 100, "inflight": 3, "queued": 2},
+                    "provider": {"wait_attempts": 4}, "proxy": {"capacity_signals": 1}}
+        async with pg_db.sessions.begin() as session:
+            await session.execute(text(
+                "INSERT INTO gateway_capacity_snapshots(id,snapshot,updated_at) "
+                "VALUES (1,CAST(:snapshot AS jsonb),clock_timestamp()) "
+                "ON CONFLICT (id) DO UPDATE SET snapshot=EXCLUDED.snapshot,updated_at=EXCLUDED.updated_at"),
+                {"snapshot": json.dumps(snapshot)})
+        result = await client.get(PATH)
+        assert result.status_code == 200
+        assert result.json()["capacity"] == snapshot
+
+
 async def test_status_counts_accounts_and_usable_keys_without_revealing_identities(pg_db, settings):
     async with private_env(pg_db, settings) as (client, services):
         for number, state in enumerate(("active", "reauth_required", "refresh_uncertain", "unverified", "active")):

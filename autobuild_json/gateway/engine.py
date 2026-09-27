@@ -67,6 +67,29 @@ class Engine:
                 "provider": self.provider_limits.snapshot(),
                 "proxy": proxy}
 
+    async def _publish_capacity(self):
+        """Publish redacted serving-process telemetry for the admin process."""
+        if self.db is None or not hasattr(self.db, "sessions"):
+            return
+        try:
+            async with self.db.sessions.begin() as session:
+                await session.execute(text(
+                    "INSERT INTO gateway_capacity_snapshots(id,snapshot,updated_at) "
+                    "VALUES (1,CAST(:snapshot AS jsonb),clock_timestamp()) "
+                    "ON CONFLICT (id) DO UPDATE SET snapshot=EXCLUDED.snapshot,updated_at=EXCLUDED.updated_at"),
+                    {"snapshot": json.dumps(self.capacity_snapshot(), separators=(",", ":"))})
+        except Exception:
+            # Telemetry must never turn a successful inference into a 5xx.
+            return
+
+    def _schedule_capacity_publish(self):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if not loop.is_closed():
+            loop.create_task(self._publish_capacity())
+
     async def codex_tokens(self, route):
         row = await self.credentials._record(route.credential_id)
         if row["health"] != "active" or not row["token_expires_at"] or row["token_expires_at"] <= datetime.now(timezone.utc):
@@ -102,6 +125,7 @@ class Engine:
         while True:
             if isinstance(deadline, datetime) and datetime.now(timezone.utc) >= deadline:
                 raise GatewayError("deadline_exceeded", 504, "request")
+            proxy_capacity = False
             try:
                 # Waiting for provider capacity and waiting for a local proxy
                 # are independent resources. If proxy capacity is exhausted,
@@ -110,14 +134,30 @@ class Engine:
                 provider_args = {"wait": True} if "wait" in inspect.signature(self.provider_limits.acquire).parameters else {}
                 proxy_args = {"wait": True} if "wait" in inspect.signature(self.proxies.acquire).parameters else {}
                 async with self.provider_limits.acquire(route, deadline, **provider_args):
-                    async with self.proxies.acquire(selection, owner, deadline, **proxy_args) as lease:
-                        await self.transport._validate(route, lease.proxy)
-                        yield lease
-                return
+                    try:
+                        # Never let proxy-capacity polling pin a provider slot.
+                        # A non-waiting claim is enough to preserve the safe
+                        # provider-before-proxy ordering for this attempt.
+                        async with self.proxies.acquire(selection, owner, deadline,
+                                                         **({"wait": False} if proxy_args else {})) as lease:
+                            await self.transport._validate(route, lease.proxy)
+                            yield lease
+                        return
+                    except ProxyCapacityError:
+                        proxy_capacity = True
             except ProxyCapacityError:
+                proxy_capacity = True
+            if proxy_capacity:
                 if isinstance(deadline, datetime) and datetime.now(timezone.utc) >= deadline:
                     raise GatewayError("proxy_not_ready", 503, "proxy") from None
-                continue
+                waiter = getattr(self.proxies, "wait_for_capacity", None)
+                if waiter is not None:
+                    await waiter(selection, owner, deadline)
+                else:
+                    # Compatibility fallback for test/dialect proxy stores
+                    # predating the explicit wait path.  No resource is held
+                    # during this bounded sleep.
+                    await asyncio.sleep(min(0.05, max(0, (deadline - datetime.now(timezone.utc)).total_seconds())))
 
     def meta(self, body, idempotency_key=None, *, protocol="openai", session_digest=None):
         now = datetime.now(timezone.utc)
@@ -232,6 +272,9 @@ class Engine:
             # Keep admission across per-attempt retries; it is released only
             # when the prepared call (or preparation cleanup) fully closes.
             await admission_stack.enter_async_context(self.admission.enter(deadline))
+            publish = getattr(self, "_schedule_capacity_publish", None)
+            if publish is not None:
+                publish()
             for number, selected in enumerate(dispatch_routes):
                 known_rejection = None
                 if datetime.now(timezone.utc) >= deadline:
@@ -356,8 +399,13 @@ class Engine:
                     else:
                         await self.ledger.release_unspent(meta.request_id, "not_dispatched")
                 finally:
-                    await stack.aclose()
-                    await admission_stack.aclose()
+                    # Admission is an independent resource.  Always release
+                    # it even when provider/proxy/stream cleanup fails; a
+                    # cleanup error must not permanently consume a gate slot.
+                    try:
+                        await stack.aclose()
+                    finally:
+                        await admission_stack.aclose()
             owned = asyncio.create_task(asyncio.wait_for(cleanup(), 5))
             cancelled = isinstance(error, asyncio.CancelledError)
             try:
@@ -484,4 +532,7 @@ class PreparedCall:
                 finally:
                     if self.admission_stack is not None:
                         await self.admission_stack.aclose()
+                    publish = getattr(self.engine, "_schedule_capacity_publish", None)
+                    if publish is not None:
+                        publish()
                     self.closed = True
