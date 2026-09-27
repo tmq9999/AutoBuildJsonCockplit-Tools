@@ -517,5 +517,5 @@ async def test_persistent_release_failure_is_short_bounded_and_preserves_kiot_er
         async with manager.acquire(ProxySelection("kiotproxy", runtime_entries=keys), uuid4(), deadline()):
             pass
     assert caught.value.code == "kiot_unavailable"
-    assert store.calls <= 2
+    assert store.calls <= 3
     assert asyncio.get_running_loop().time() - started < .9

@@ -13,6 +13,7 @@ from ..errors import GatewayError
 
 
 class ProviderLimits:
+    _PROVIDER_LOCK_CAPACITY = 256
     _CLEANUP_GRACE_SECONDS = 0.25
     _CLEANUP_RETRY_SECONDS = 0.5
     _CLEANUP_RETRY_ATTEMPTS = 2
@@ -26,15 +27,45 @@ class ProviderLimits:
         self._waits = deque(maxlen=2048)
         self._last_wait_ms = 0.0
         self._cleanup_failures = 0
+        self._provider_locks = {}
+        self._provider_lock_overflow = asyncio.Lock()
+
+    def _provider_lock(self, provider_id):
+        lock = self._provider_locks.get(provider_id)
+        if lock is not None:
+            return lock
+        if len(self._provider_locks) >= self._PROVIDER_LOCK_CAPACITY:
+            for key, candidate in tuple(self._provider_locks.items()):
+                if not candidate.locked():
+                    del self._provider_locks[key]
+                    break
+        if len(self._provider_locks) >= self._PROVIDER_LOCK_CAPACITY:
+            return self._provider_lock_overflow
+        lock = asyncio.Lock()
+        self._provider_locks[provider_id] = lock
+        return lock
 
     async def _try_acquire_bounded(self, route, deadline, identity):
         remaining = self._remaining(deadline)
         if remaining <= 0:
             raise GatewayError("deadline_exceeded", 504, "upstream")
+        provider_lock = self._provider_lock(route.provider_id)
+        acquired = False
         try:
+            try:
+                await asyncio.wait_for(provider_lock.acquire(), remaining)
+                acquired = True
+            except asyncio.TimeoutError:
+                raise GatewayError("deadline_exceeded", 504, "upstream") from None
+            remaining = self._remaining(deadline)
+            if remaining <= 0:
+                raise GatewayError("deadline_exceeded", 504, "upstream")
             return await asyncio.wait_for(self._try_acquire(route, deadline, identity), remaining)
         except asyncio.TimeoutError:
             raise GatewayError("deadline_exceeded", 504, "upstream") from None
+        finally:
+            if acquired:
+                provider_lock.release()
 
     async def _set_lock_timeout(self, session, deadline):
         remaining = self._remaining(deadline)

@@ -110,6 +110,52 @@ async def test_provider_cleanup_retries_after_transient_pool_contention(pg_db, p
             assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
 
 
+async def test_same_provider_waiters_do_not_starve_pool_or_cleanup(pg_db, postgres_url):
+    route, _, _ = await limited_route(pg_db, rpm=600)
+    async with small_pool(pg_db, postgres_url) as db:
+        limits = ProviderLimits(db)
+        deadline = future(5)
+
+        async def waiter():
+            async with limits.acquire(route, deadline, wait=True):
+                await asyncio.sleep(0)
+
+        async with limits.acquire(route, deadline):
+            pending = [asyncio.create_task(waiter()) for _ in range(100)]
+            await asyncio.sleep(.1)
+        results = await asyncio.gather(*pending, return_exceptions=True)
+
+        assert results == [None] * 100
+        assert limits.snapshot()["cleanup_failures"] == 0
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
+
+
+async def test_proxy_cleanup_retries_after_transient_pool_contention(pg_db, postgres_url):
+    from autobuild_json.gateway.proxy.config import ProxySelection
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.pg_leases import PgLeaseStore
+    from autobuild_json.models import ProxyConfig
+
+    async with small_pool(pg_db, postgres_url) as db:
+        manager = ProxyManager(
+            PgLeaseStore(db), acquisition_timeout=.2, heartbeat_interval=10,
+        )
+        selection = ProxySelection("fixed", runtime_entries=(ProxyConfig("http://proxy.invalid:80"),))
+        context = manager.acquire(selection, uuid4(), future())
+        await context.__aenter__()
+        blockers = [await db.engine.connect() for _ in range(3)]
+        pending = asyncio.create_task(context.__aexit__(None, None, None))
+        await asyncio.sleep(.3)
+        await blockers[0].close()
+        assert await asyncio.wait_for(pending, 1) is False
+        for blocker in blockers[1:]:
+            await blocker.close()
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 0
+        assert manager.snapshot()["cleanup_failures"] == 0
+
+
 async def test_expired_proxy_claim_is_redacted_deadline_error(pg_db):
     with pytest.raises(GatewayError, match="deadline_exceeded"):
         await PgLeaseStore(pg_db).claim("expired", uuid4(), future(-1))

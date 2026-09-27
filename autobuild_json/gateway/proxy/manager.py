@@ -44,6 +44,7 @@ def endpoint_resource(proxy):
 
 class ProxyManager:
     _CLEANUP_GRACE_SECONDS = 0.25
+    _RESOURCE_LOCK_CAPACITY = 256
 
     def __init__(self, store, kiot=None, *, acquisition_timeout=10, heartbeat_interval=1):
         self.store, self.kiot = store, kiot or KiotClient()
@@ -54,6 +55,9 @@ class ProxyManager:
         self._capacity_signals = 0
         self._waits = deque(maxlen=2048)
         self._last_wait_ms = 0.0
+        self._cleanup_failures = 0
+        self._resource_locks = {}
+        self._resource_lock_overflow = asyncio.Lock()
 
     def snapshot(self):
         waits = sorted(self._waits)
@@ -64,7 +68,22 @@ class ProxyManager:
             return waits[max(0, ceil(len(waits) * percent) - 1)]
         return {"wait_attempts": self._wait_attempts, "capacity_signals": self._capacity_signals,
                 "wait_p50_ms": percentile(.50), "wait_p95_ms": percentile(.95),
-                "last_wait_ms": self._last_wait_ms}
+                "last_wait_ms": self._last_wait_ms, "cleanup_failures": self._cleanup_failures}
+
+    def _resource_lock(self, resource):
+        lock = self._resource_locks.get(resource)
+        if lock is not None:
+            return lock
+        if len(self._resource_locks) >= self._RESOURCE_LOCK_CAPACITY:
+            for key, candidate in tuple(self._resource_locks.items()):
+                if not candidate.locked():
+                    del self._resource_locks[key]
+                    break
+        if len(self._resource_locks) >= self._RESOURCE_LOCK_CAPACITY:
+            return self._resource_lock_overflow
+        lock = asyncio.Lock()
+        self._resource_locks[resource] = lock
+        return lock
 
     async def _bounded_store_call(self, operation, acquire_end):
         remaining = acquire_end - time.monotonic()
@@ -80,6 +99,29 @@ class ProxyManager:
             # acquisition cap expiry into the same retryable signal so the
             # provider context is released before Engine waits again.
             raise ProxyCapacityError() from None
+
+    async def _bounded_resource_call(self, resource, operation, acquire_end):
+        lock = self._resource_lock(resource)
+        remaining = acquire_end - time.monotonic()
+        if remaining <= 0:
+            close = getattr(operation, "close", None)
+            if close is not None:
+                close()
+            raise ProxyCapacityError()
+        acquired = False
+        try:
+            try:
+                await asyncio.wait_for(lock.acquire(), remaining)
+                acquired = True
+            except asyncio.TimeoutError:
+                close = getattr(operation, "close", None)
+                if close is not None:
+                    close()
+                raise ProxyCapacityError() from None
+            return await self._bounded_store_call(operation, acquire_end)
+        finally:
+            if acquired:
+                lock.release()
 
     async def wait_for_capacity(self, selection, owner, deadline):
         """Wait for a local lease without retaining any provider admission.
@@ -133,7 +175,7 @@ class ProxyManager:
                 if cleanup_end is None:
                     await operation
                 else:
-                    await self._bounded_store_call(operation, cleanup_end)
+                    await self._bounded_resource_call(token.resource, operation, cleanup_end)
                 # Keep failed tokens available to the owner/finally path for
                 # a bounded retry.  A timed-out release must never be
                 # mistaken for a successful lease release.
@@ -160,6 +202,8 @@ class ProxyManager:
             except Exception as exc:
                 failure = exc
                 await asyncio.sleep(0)
+        if tokens and failure is not None:
+            self._cleanup_failures += 1
         if raise_failure and tokens and failure is not None:
             raise failure
 
@@ -187,13 +231,13 @@ class ProxyManager:
                 for entry in entries[offset:]+entries[:offset]:
                     if selection.mode == "kiotproxy":
                         resource = "kiot:"+entry.fingerprint
-                        if await self._bounded_store_call(self.store.is_disabled(resource), acquire_end):
+                        if await self._bounded_resource_call(resource, self.store.is_disabled(resource), acquire_end):
                             last_error = GatewayError("kiot_key_invalid", 400, "proxy")
                             continue
                         if resource in examined:
                             continue
                         all_examined = False
-                        token = await self._bounded_store_call(self.store.claim(resource, owner, deadline), acquire_end)
+                        token = await self._bounded_resource_call(resource, self.store.claim(resource, owner, deadline), acquire_end)
                         if token is None:
                             capacity_seen = True
                             continue
@@ -222,7 +266,8 @@ class ProxyManager:
                                 disable_end = datetime.now(timezone.utc) + timedelta(
                                     seconds=max(0, acquire_end - time.monotonic()))
                                 try:
-                                    await self._bounded_store_call(
+                                    await self._bounded_resource_call(
+                                        resource,
                                         self.store.disable_resource(resource, disable_end), acquire_end)
                                 except Exception:
                                     # Health persistence is best effort here;
@@ -239,8 +284,10 @@ class ProxyManager:
                                 if exc.code not in {"proxy_not_ready", "kiot_unavailable", "kiot_key_invalid"}:
                                     raise
                             continue
-                        endpoint = await self._bounded_store_call(
-                            self.store.claim(endpoint_resource(resolved), owner, deadline), acquire_end)
+                        endpoint_resource_id = endpoint_resource(resolved)
+                        endpoint = await self._bounded_resource_call(
+                            endpoint_resource_id,
+                            self.store.claim(endpoint_resource_id, owner, deadline), acquire_end)
                         if endpoint is None:
                             capacity_seen = True
                             await self._cleanup_owned(tokens, acquire_end)
@@ -249,11 +296,11 @@ class ProxyManager:
                         proxy = resolved
                     else:
                         resource = endpoint_resource(entry)
-                        if await self._bounded_store_call(self.store.is_disabled(resource), acquire_end):
+                        if await self._bounded_resource_call(resource, self.store.is_disabled(resource), acquire_end):
                             last_error = GatewayError("proxy_not_ready", 503, "proxy")
                             continue
                         all_examined = False
-                        endpoint = await self._bounded_store_call(self.store.claim(resource, owner, deadline), acquire_end)
+                        endpoint = await self._bounded_resource_call(resource, self.store.claim(resource, owner, deadline), acquire_end)
                         if endpoint is None:
                             capacity_seen = True
                             continue
@@ -287,7 +334,12 @@ class ProxyManager:
                     while True:
                         await asyncio.sleep(min(self.heartbeat_interval, max(0.001, (deadline-datetime.now(timezone.utc)).total_seconds())))
                         for token in tokens:
-                            if not await self.store.renew(token):
+                            renew_end = time.monotonic() + min(
+                                self.heartbeat_interval,
+                                max(0, (deadline-datetime.now(timezone.utc)).total_seconds()),
+                            )
+                            if not await self._bounded_resource_call(
+                                    token.resource, self.store.renew(token), renew_end):
                                 lost = True
                                 parent.cancel()
                                 return
@@ -313,12 +365,15 @@ class ProxyManager:
                 # Kiot error from this acquisition. Fencing/hard expiry and
                 # the bounded retry remain the durable recovery path.
                 await asyncio.wait_for(
-                    self._cleanup_with_retry(tokens, attempts=1, raise_failure=False), timeout=.3)
+                    self._cleanup_with_retry(tokens, seconds=.6, attempts=2, raise_failure=False), timeout=.6)
 
     async def release_kiot(self, key, actor):
         if not actor:
             raise GatewayError("permission_denied", 403)
-        token = await self.store.claim("kiot:"+key.fingerprint, uuid4(), datetime.now(timezone.utc)+timedelta(seconds=15))
+        resource = "kiot:" + key.fingerprint
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=15)
+        token = await self._bounded_resource_call(resource, self.store.claim(resource, uuid4(), deadline),
+                                                  time.monotonic() + 15)
         if token is None:
             raise GatewayError("proxy_not_ready", 503, "proxy")
         try:
