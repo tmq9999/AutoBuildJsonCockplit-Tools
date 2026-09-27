@@ -99,6 +99,8 @@ class ProxyManager:
         self._cursor += 1
         tokens, proxy = [], None
         last_error = GatewayError("proxy_not_ready", 503, "proxy")
+        capacity_seen = False
+        invalid_seen = False
         # Each key's provider control API is queried at most once per acquisition;
         # busy local slots may be waited on without repeatedly hitting Kiot.
         examined = set()
@@ -116,6 +118,7 @@ class ProxyManager:
                         all_examined = False
                         token = await self.store.claim(resource, owner, deadline)
                         if token is None:
+                            capacity_seen = True
                             continue
                         tokens.append(token)
                         examined.add(resource)
@@ -123,19 +126,23 @@ class ProxyManager:
                             resolved = await self._kiot_proxy(entry, selection, deadline, acquire_end)
                         except GatewayError as exc:
                             last_error = exc
-                            if exc.code in {"kiot_key_invalid", "kiot_unavailable"}:
+                            if exc.code == "proxy_not_ready":
                                 await self._cleanup(tokens)
                                 tokens.clear()
-                                if exc.code == "kiot_key_invalid":
-                                    await self.store.disable_resource(resource)
+                                raise
+                            if exc.code == "kiot_unavailable":
+                                await self._cleanup(tokens)
+                                tokens.clear()
                                 raise
                             if exc.code == "kiot_key_invalid":
+                                invalid_seen = True
                                 await self.store.disable_resource(resource)
                             await self._cleanup(tokens)
                             tokens.clear()
                             continue
                         endpoint = await self.store.claim(endpoint_resource(resolved), owner, deadline)
                         if endpoint is None:
+                            capacity_seen = True
                             await self._cleanup(tokens)
                             tokens.clear()
                             continue
@@ -145,21 +152,24 @@ class ProxyManager:
                         all_examined = False
                         endpoint = await self.store.claim(endpoint_resource(entry), owner, deadline)
                         if endpoint is None:
+                            capacity_seen = True
                             continue
                         tokens.append(endpoint)
                         proxy = entry
                     if proxy is not None:
                         break
                 if proxy is None:
-                    if all_examined and not (wait and last_error.code == "proxy_not_ready"):
+                    if all_examined and not (wait and capacity_seen):
                         break
                     if wait:
                         self._wait_attempts += 1
                     await asyncio.sleep(min(0.05, max(0, acquire_end-time.monotonic())))
             if proxy is None:
-                if wait and last_error.code == "proxy_not_ready":
+                if wait and capacity_seen:
                     self._capacity_signals += 1
                     raise ProxyCapacityError()
+                if invalid_seen:
+                    raise GatewayError("kiot_key_invalid", 400, "proxy")
                 raise last_error
             parent = asyncio.current_task()
             lost = False

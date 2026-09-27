@@ -7,10 +7,13 @@
 - Added proxy wait/capacity counters to `ProxyManager.snapshot()` for capacity snapshots.
 - Updated `Engine.route_resources()` to use provider wait mode and proxy wait mode. A capacity signal exits both contexts before retrying, so no provider admission is held while waiting for a proxy lease. Deadline exhaustion returns a public `proxy_not_ready` error.
 - Added focused tests for bounded static-pool capacity signaling, cancellation cleanup, and provider-release ordering around proxy retries.
+- Follow-up classification fix: only a failed local lease claim marks retryable capacity. Kiot `proxy_not_ready` and `kiot_unavailable` now surface immediately; invalid keys are disabled while rotation continues, and mixed invalid/busy pools correctly report retryable capacity.
 
 ## Verification
 
 `../../.venv/bin/python -m pytest tests/gateway/unit/test_proxy_manager.py tests/gateway/unit/test_engine_resource_order.py -q` — **14 passed** (0.59s; emitted only the environment `sys.prefix` runtime warnings).
+
+After the classification fix, the same focused command reports **16 passed** (0.61s).
 
 `git diff --check` — passed.
 

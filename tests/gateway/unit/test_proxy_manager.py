@@ -239,3 +239,47 @@ async def test_wait_true_cancellation_releases_partial_kiot_claims():
         await task
     assert await store.claim("kiot:" + keys[0].fingerprint, uuid4(), deadline()) is not None
     await store.release(held)
+
+
+@pytest.mark.asyncio
+async def test_kiot_proxy_not_ready_is_permanent_even_when_waiting():
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from autobuild_json.gateway.proxy.config import ProxySelection, parse_kiot_keys
+    from autobuild_json.gateway.errors import GatewayError
+
+    class Kiot:
+        async def current(self, *args, **kwargs):
+            raise GatewayError("proxy_not_ready", 503, "proxy")
+
+    manager = ProxyManager(MemoryLeaseStore(), Kiot(), acquisition_timeout=.2)
+    selection = ProxySelection("kiotproxy", runtime_entries=tuple(parse_kiot_keys("key", pepper=b"p"*32)))
+    with pytest.raises(GatewayError) as caught:
+        async with manager.acquire(selection, uuid4(), deadline(), wait=True):
+            pass
+    assert caught.value.code == "proxy_not_ready"
+
+
+@pytest.mark.asyncio
+async def test_mixed_invalid_key_and_busy_valid_key_reports_capacity():
+    from autobuild_json.gateway.proxy.manager import ProxyManager, endpoint_resource
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from autobuild_json.gateway.proxy.config import ProxySelection, parse_kiot_keys
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.models import ProxyConfig
+
+    class Kiot:
+        async def current(self, secret, **kwargs):
+            if secret == "bad":
+                raise GatewayError("kiot_key_invalid", 400, "proxy")
+            return type("Lease", (), {"ttl": 1000, "cooldown": 0, "proxy": ProxyConfig("http://proxy.invalid:80")})()
+
+    store = MemoryLeaseStore()
+    manager = ProxyManager(store, Kiot(), acquisition_timeout=.02)
+    keys = tuple(parse_kiot_keys("bad\ngood", pepper=b"p"*32))
+    held = await store.claim(endpoint_resource(ProxyConfig("http://proxy.invalid:80")), uuid4(), deadline())
+    with pytest.raises(Exception) as caught:
+        async with manager.acquire(ProxySelection("kiotproxy", runtime_entries=keys), uuid4(), deadline(), wait=True):
+            pass
+    assert caught.value.code == "proxy_capacity"
+    await store.release(held)
