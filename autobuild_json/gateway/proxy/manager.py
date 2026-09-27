@@ -66,6 +66,7 @@ class ProxyManager:
         self._cleanup_failures = 0
         self._resource_locks = {}
         self._resource_lock_overflow = tuple(_ResourceLockEntry() for _ in range(32))
+        self._resource_overflow_keys = {}
 
     def snapshot(self):
         waits = sorted(self._waits)
@@ -90,8 +91,12 @@ class ProxyManager:
                     del self._resource_locks[key]
                     break
         if len(self._resource_locks) >= self._RESOURCE_LOCK_CAPACITY:
-            digest = hashlib.sha256(resource.encode()).digest()
-            entry = self._resource_lock_overflow[int.from_bytes(digest[:4]) % len(self._resource_lock_overflow)]
+            entry = self._resource_overflow_keys.get(resource)
+            if entry is None:
+                digest = hashlib.sha256(resource.encode()).digest()
+                entry = self._resource_lock_overflow[int.from_bytes(digest[:4]) % len(self._resource_lock_overflow)]
+                if len(self._resource_overflow_keys) < self._RESOURCE_LOCK_CAPACITY:
+                    self._resource_overflow_keys[resource] = entry
         else:
             entry = _ResourceLockEntry()
             self._resource_locks[resource] = entry

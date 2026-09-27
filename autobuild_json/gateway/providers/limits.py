@@ -37,6 +37,7 @@ class ProviderLimits:
         self._cleanup_failures = 0
         self._provider_locks = {}
         self._provider_lock_overflow = tuple(_ProviderLockEntry() for _ in range(32))
+        self._provider_overflow_keys = {}
 
     def _provider_lock(self, provider_id):
         entry = self._provider_locks.get(provider_id)
@@ -50,7 +51,11 @@ class ProviderLimits:
                     del self._provider_locks[key]
                     break
         if len(self._provider_locks) >= self._PROVIDER_LOCK_CAPACITY:
-            entry = self._provider_lock_overflow[hash(str(provider_id)) % len(self._provider_lock_overflow)]
+            entry = self._provider_overflow_keys.get(provider_id)
+            if entry is None:
+                entry = self._provider_lock_overflow[hash(str(provider_id)) % len(self._provider_lock_overflow)]
+                if len(self._provider_overflow_keys) < self._PROVIDER_LOCK_CAPACITY:
+                    self._provider_overflow_keys[provider_id] = entry
         else:
             entry = _ProviderLockEntry()
             self._provider_locks[provider_id] = entry

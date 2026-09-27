@@ -41,5 +41,10 @@ coroutines on deadline/cancellation, and catches the outer cleanup timeout so
 it cannot replace a primary error. The post-hardening focused provider/proxy
 regressions passed **55 tests**; unit/final-capacity follow-up passed **39**.
 
+Overflow migration is also fenced: once a key falls into a shard, a bounded
+overflow-key map retains that assignment so a later same-key lookup cannot
+create a dedicated lock while the shard lock is held. Deterministic capacity=1
+tests cover this migration for provider and proxy keys.
+
 No live inference, gateway restart, live database write, data symlink change,
 push, or merge was performed.
