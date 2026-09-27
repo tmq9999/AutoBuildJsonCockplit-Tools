@@ -2,6 +2,7 @@ import asyncio
 import time
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from wsproto.events import Ping, Pong, TextMessage
 
@@ -81,6 +82,27 @@ async def test_proxy_transport_is_selected_once_without_direct_fallback(monkeypa
                 "synthetic-account", "synthetic-token", time.monotonic()+10):
             pytest.fail("failed upstream accepted")
     assert selected == [proxy] and len(adapter.requests) == 1 and adapter.closed
+
+
+@pytest.mark.parametrize("failure,not_transmitted", [
+    (httpx.ConnectError, True), (httpx.ReadError, False),
+    (httpx.WriteError, False), (httpx.RemoteProtocolError, False),
+])
+async def test_websocket_open_requires_proven_connection_failure_for_retry(failure, not_transmitted):
+    class FailedSocketTransport(SocketTransport):
+        async def handle_async_request(self, request):
+            raise failure("private-detail", request=request)
+
+    proxy = SimpleNamespace(server="http://proxy.invalid:8080")
+    policy = EgressPolicy(resolver=public_address, trusted_proxy_origins={proxy.server})
+    with pytest.raises(GatewayError) as caught:
+        async with open_codex_websocket(Transport(policy, adapter=FailedSocketTransport()), ROUTE, proxy,
+                                        "synthetic-account", "synthetic-token", time.monotonic() + 10):
+            pytest.fail("failed connection accepted")
+    assert caught.value.transport_phase == "before_response"
+    assert caught.value.request_not_transmitted is not_transmitted
+    assert caught.value.safe_retry is not_transmitted
+    assert "private-detail" not in str(caught.value)
 
 
 async def test_private_destination_is_rejected_before_handshake():

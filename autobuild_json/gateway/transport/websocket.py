@@ -149,8 +149,9 @@ async def open_codex_websocket(transport, route, proxy, account_id, access_token
         raise
     except (asyncio.TimeoutError, httpcore.TimeoutException, httpx.TimeoutException):
         raise GatewayError("deadline_exceeded", 504, "upstream") from None
-    except (httpcore.NetworkError, httpcore.ProtocolError, httpx.HTTPError, OSError):
-        raise TransportFailure(before_response=not response_acquired, proxy_used=proxy is not None) from None
+    except (httpcore.NetworkError, httpcore.ProtocolError, httpx.HTTPError, OSError) as exc:
+        raise TransportFailure(before_response=not response_acquired, proxy_used=proxy is not None,
+                               request_not_transmitted=isinstance(exc, (httpx.ConnectError, httpcore.ConnectError))) from None
     except (ValueError, RemoteProtocolError):
         raise GatewayError("proxy_error" if proxy else "upstream_error", 502, "upstream") from None
     finally:

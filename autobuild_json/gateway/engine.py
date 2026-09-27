@@ -662,14 +662,15 @@ class Engine:
                         self._record_upstream_outcome("cancelled", exc)
                     raise
                 except GatewayError as exc:
-                    # A transport connect failure through a configured proxy
-                    # is retryable only when response headers were never
-                    # acquired.  Close the per-attempt stack first so the
+                    # Only a proven connection-establishment failure can
+                    # establish that the request was not transmitted. Close
+                    # the per-attempt stack first so the
                     # provider admission and proxy lease cannot pin capacity
                     # while selecting the next untried route.
                     retryable = (not transport_retry_used and getattr(exc, "safe_retry", False)
                                  and getattr(exc, "transport_phase", None) == "before_response"
-                                 and getattr(exc, "proxy_used", False))
+                                 and getattr(exc, "proxy_used", False)
+                                 and getattr(exc, "request_not_transmitted", False))
                     if not retryable:
                         if upstream_io_started:
                             outcome = ("expired" if exc.code == "deadline_exceeded" else

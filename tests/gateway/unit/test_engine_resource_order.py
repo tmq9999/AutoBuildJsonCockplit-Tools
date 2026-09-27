@@ -477,7 +477,7 @@ async def test_prepare_releases_attempt_resources_before_retrying_pre_response_p
         async def open(self, request, route, lease):
             self.calls += 1
             if self.calls == 1:
-                raise TransportFailure(before_response=True, proxy_used=True)
+                raise TransportFailure(before_response=True, proxy_used=True, request_not_transmitted=True)
             yield SimpleNamespace()
 
     adapter = Adapter()
@@ -551,7 +551,7 @@ async def test_prepare_retries_pre_response_transport_failure_at_most_once(monke
         @asynccontextmanager
         async def open(self, request, route, lease):
             self.calls += 1
-            raise TransportFailure(before_response=True, proxy_used=True)
+            raise TransportFailure(before_response=True, proxy_used=True, request_not_transmitted=True)
             yield  # pragma: no cover
 
     adapter = Adapter()

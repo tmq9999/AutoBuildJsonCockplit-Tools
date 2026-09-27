@@ -26,8 +26,9 @@ class GatewayError(Exception):
         self.retry_after = retry_after if type(retry_after) is int and 0 <= retry_after <= 86400 else None
         # Transport classification is intentionally internal.  The public
         # serializer exposes only the stable safe code/stage, while dispatch
-        # can use this redacted phase marker to distinguish a retryable proxy
-        # connect failure from an ambiguous response/stream failure.
+        # can use this redacted phase marker for diagnostics. Dispatch
+        # certainty is tracked separately: no headers does not prove that a
+        # request body was never transmitted.
         self.transport_phase = transport_phase if transport_phase in {"before_response", "after_response"} else None
         self.proxy_used = bool(proxy_used)
         self.safe_retry = bool(safe_retry)
@@ -52,9 +53,10 @@ class UpstreamRejected(GatewayError):
 class TransportFailure(GatewayError):
     """Redacted internal classification for an upstream transport failure."""
 
-    def __init__(self, *, before_response, proxy_used):
+    def __init__(self, *, before_response, proxy_used, request_not_transmitted=False):
         phase = "before_response" if before_response else "after_response"
+        self.request_not_transmitted = bool(before_response and request_not_transmitted)
         super().__init__("proxy_error" if proxy_used else "upstream_error", 502, "upstream",
-                         safe_retry=bool(before_response and proxy_used),
+                         safe_retry=bool(proxy_used and self.request_not_transmitted),
                          transport_phase=phase, proxy_used=proxy_used)
         self.before_response = bool(before_response)

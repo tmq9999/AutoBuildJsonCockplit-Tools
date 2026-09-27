@@ -1,3 +1,5 @@
+import asyncio
+import json
 import time
 from types import SimpleNamespace
 
@@ -75,7 +77,93 @@ async def test_proxy_connect_failure_before_response_is_safe_retryable():
     assert error.safe_retry is True
     assert error.transport_phase == "before_response"
     assert error.proxy_used is True
+    assert error.request_not_transmitted is True
     assert "opaque-connect-detail" not in str(error)
+
+
+@pytest.mark.asyncio
+async def test_proxy_receives_full_post_then_closes_without_headers_is_not_retryable(monkeypatch):
+    import socket
+    from autobuild_json.gateway.transport.egress import EgressPolicy
+    from autobuild_json.gateway.transport.http import Transport, OutboundRequest
+    from autobuild_json.gateway.errors import TransportFailure
+    from autobuild_json.models import ProxyConfig
+
+    received = []
+
+    def local_only_connect(sock, address):
+        if address[0] != "127.0.0.1":
+            raise AssertionError("Outbound network is forbidden in offline tests")
+        result = sock.connect_ex(address)
+        if result:
+            raise OSError(result, "local proxy connect failed")
+
+    monkeypatch.setattr(socket.socket, "connect", local_only_connect)
+
+    async def proxy_handler(reader, writer):
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            length = next(int(line.split(b":", 1)[1]) for line in head.split(b"\r\n")
+                          if line.lower().startswith(b"content-length:"))
+            body = await reader.readexactly(length)
+            received.append((head.split(b"\r\n", 1)[0], json.loads(body)))
+            # A complete request may have reached the provider. Close without
+            # sending response headers to keep dispatch outcome ambiguous.
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(proxy_handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    proxy_url = f"http://127.0.0.1:{port}"
+    root = "http://provider.invalid:8765/v1"
+
+    async def resolver(host, port):
+        return ["127.0.0.1"]
+
+    policy = EgressPolicy(resolver=resolver, allowed_networks=("127.0.0.0/8",),
+                          private_origins={"http://provider.invalid:8765"},
+                          trusted_proxy_origins={proxy_url})
+    try:
+        with pytest.raises(TransportFailure) as caught:
+            async with Transport(policy).open(SimpleNamespace(root=root), ProxyConfig(proxy_url),
+                    OutboundRequest("POST", "chat/completions", {"model": "sent-once"},
+                                    deadline=time.monotonic() + 5)):
+                pass
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert received == [(b"POST http://provider.invalid:8765/v1/chat/completions HTTP/1.1",
+                         {"model": "sent-once"})]
+    assert caught.value.transport_phase == "before_response"
+    assert caught.value.request_not_transmitted is False
+    assert caught.value.safe_retry is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, OSError])
+async def test_proxy_ambiguous_open_failure_is_not_retryable(failure):
+    from autobuild_json.gateway.transport.egress import EgressPolicy
+    from autobuild_json.gateway.transport.http import Transport, OutboundRequest
+    from autobuild_json.gateway.errors import TransportFailure
+    from autobuild_json.models import ProxyConfig
+
+    def failed(request):
+        raise failure("private-detail")
+
+    transport = Transport(EgressPolicy(resolver=lambda host, port: asyncio.sleep(0, result=["93.184.216.34"]),
+                                       trusted_proxy_origins={"http://proxy.invalid:8080"}),
+                          adapter=httpx.MockTransport(failed))
+    with pytest.raises(TransportFailure) as caught:
+        async with transport.open(SimpleNamespace(root="https://provider.invalid/v1"),
+                                  ProxyConfig("http://proxy.invalid:8080"),
+                                  OutboundRequest("POST", "chat/completions", {}, deadline=time.monotonic() + 10)):
+            pass
+    assert caught.value.transport_phase == "before_response"
+    assert caught.value.request_not_transmitted is False
+    assert caught.value.safe_retry is False
+    assert "private-detail" not in str(caught.value)
 
 
 @pytest.mark.asyncio

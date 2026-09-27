@@ -4,7 +4,7 @@
 
 **Goal:** Eliminate avoidable interrupted usage holds and transient proxy failures observed during the real 100-user workflow while preserving exact accounting, bounded cleanup, and the current provider/proxy limits.
 
-**Architecture:** Keep the process-local admission capacity at 100, provider concurrency at 16, and one-owner proxy leases. Add explicit pre-response proxy failure classification and safe route retry only before any upstream response bytes are received; make cancellation/stream cleanup and recovery observable and exactly-once without fabricating usage. A request with unknown upstream usage remains `usage_pending` until authoritative usage exists.
+**Architecture:** Keep the process-local admission capacity at 100, provider concurrency at 16, and one-owner proxy leases. Add explicit dispatch-certainty classification and safe route retry only when connection establishment proves the request was not transmitted; make cancellation/stream cleanup and recovery observable and exactly-once without fabricating usage. A request with unknown upstream usage remains `usage_pending` until authoritative usage exists.
 
 **Tech Stack:** Python 3.11+, asyncio, FastAPI/Starlette, SQLAlchemy async PostgreSQL, httpx/httpcore, pytest/pytest-asyncio, existing real-proxy acceptance harness.
 
@@ -16,7 +16,7 @@
 - Keep provider/credential concurrency limit at `16` and proxy endpoint ownership at one request per endpoint.
 - Never fall back to direct egress when a route requires a proxy.
 - Never fabricate input, cached, output, or reasoning usage; unknown upstream usage remains pending.
-- Retry only a proxy connection failure proven to occur before response headers/bytes; never retry an ambiguous stream or a response that has emitted bytes.
+- Retry only a proxy connection-establishment failure that proves the request was not transmitted; absence of response headers alone is insufficient.
 - Do not expose emails, API keys, OAuth tokens, proxy URLs, raw upstream errors, or raw response artifacts.
 - Every cleanup/recovery change must preserve fencing, bounded deadlines, idempotent ledger settlement, and quota holds for unknown usage.
 - Acceptance uses real upstream responses and the configured 20 HTTP proxies; mock results are regression evidence only.
@@ -24,7 +24,7 @@
 ## Review Focus
 
 - Client disconnect immediately after upstream headers: stream cancellation must not double-settle, leak a provider/proxy permit, or silently release unknown quota.
-- Proxy connect/reset before response headers: only this phase may be retried on another configured endpoint, and the retry must release the first provider/proxy resources first.
+- Proven proxy connection-establishment failure: this may be retried on another configured endpoint after releasing the first provider/proxy resources. A reset after transmission remains pending, even without response headers.
 - Proxy failure after response bytes: it must remain a single `proxy_error`/pending outcome with no retry.
 - Recovery with an interrupted request whose attempt later receives authoritative usage: settlement must happen once; unknown usage must remain pending and visible.
 - Request deadline during provider/proxy wait: the error must identify the wait stage, preserve primary errors, and leave no live rows.
@@ -42,7 +42,7 @@
 
 **Interfaces:**
 - Add an internal transport failure classification (not a new secret-bearing public payload) that records `before_response` versus `after_response` and whether a proxy was used.
-- `GatewayError.safe_retry` is true only for a proxy network failure before response headers; all stream/response failures remain false.
+- `GatewayError.safe_retry` is true only when a proxy connection-establishment failure proves the request was not transmitted; read/write/protocol failures remain false even without response headers.
 - `Engine.prepare()`/route dispatch retries this class only through an untried route and after the current resource context has exited.
 
 - [ ] **Step 1: Write failing tests** for a proxy `ConnectError` before headers being retryable, a reset after one streamed chunk not being retryable, and provider/proxy resources being released before the retry.
@@ -122,5 +122,5 @@ If live verification regresses, revoke temporary keys, verify proxy/provider cle
 
 - Every observed outcome from the final live run has a task: 3 interrupted pending settlements (Task 2), 2 proxy errors (Task 1), and 1 deadline expiry (Task 3).
 - The plan preserves the safety rule that unknown upstream usage cannot be fabricated or released automatically.
-- Retry scope is limited to pre-response proxy connection failures; stream ambiguity remains non-retryable.
+- Retry scope is limited to proven proxy connection-establishment failures before request transmission; unknown dispatch and stream outcomes remain non-retryable.
 - The final task uses real upstream/proxy evidence and separates gateway capacity from upstream limitations.

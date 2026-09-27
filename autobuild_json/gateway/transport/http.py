@@ -249,5 +249,6 @@ class Transport:
             raise GatewayError("egress_denied", 502, "upstream") from None
         except (asyncio.TimeoutError, httpx.TimeoutException, httpcore.TimeoutException):
             raise GatewayError("deadline_exceeded", 504, "upstream") from None
-        except (httpx.HTTPError, httpcore.NetworkError, httpcore.ProtocolError, OSError):
-            raise TransportFailure(before_response=not response_acquired, proxy_used=proxy is not None) from None
+        except (httpx.HTTPError, httpcore.NetworkError, httpcore.ProtocolError, OSError) as exc:
+            raise TransportFailure(before_response=not response_acquired, proxy_used=proxy is not None,
+                                   request_not_transmitted=isinstance(exc, (httpx.ConnectError, httpcore.ConnectError))) from None
