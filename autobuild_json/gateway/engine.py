@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 import hashlib
 import hmac
+import inspect
 import json
 import time
 from uuid import UUID, uuid4
@@ -30,6 +31,7 @@ from .secrets import Ciphertext
 from .routing.continuations import ContinuationStore, ContinuationBinding
 from .routing import session as routing_session
 from .admission import InferenceAdmission
+from .proxy.manager import ProxyCapacityError
 
 
 @dataclass(frozen=True)
@@ -97,10 +99,25 @@ class Engine:
         the proxy is claimed only after admission succeeds and is released
         before the provider admission is released.
         """
-        async with self.provider_limits.acquire(route, deadline):
-            async with self.proxies.acquire(selection, owner, deadline) as lease:
-                await self.transport._validate(route, lease.proxy)
-                yield lease
+        while True:
+            if isinstance(deadline, datetime) and datetime.now(timezone.utc) >= deadline:
+                raise GatewayError("deadline_exceeded", 504, "request")
+            try:
+                # Waiting for provider capacity and waiting for a local proxy
+                # are independent resources. If proxy capacity is exhausted,
+                # this context exits before the bounded retry, releasing the
+                # provider admission rather than holding it while sleeping.
+                provider_args = {"wait": True} if "wait" in inspect.signature(self.provider_limits.acquire).parameters else {}
+                proxy_args = {"wait": True} if "wait" in inspect.signature(self.proxies.acquire).parameters else {}
+                async with self.provider_limits.acquire(route, deadline, **provider_args):
+                    async with self.proxies.acquire(selection, owner, deadline, **proxy_args) as lease:
+                        await self.transport._validate(route, lease.proxy)
+                        yield lease
+                return
+            except ProxyCapacityError:
+                if isinstance(deadline, datetime) and datetime.now(timezone.utc) >= deadline:
+                    raise GatewayError("proxy_not_ready", 503, "proxy") from None
+                continue
 
     def meta(self, body, idempotency_key=None, *, protocol="openai", session_digest=None):
         now = datetime.now(timezone.utc)

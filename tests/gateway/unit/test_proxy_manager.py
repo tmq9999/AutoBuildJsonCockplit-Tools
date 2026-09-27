@@ -200,3 +200,42 @@ async def test_cleanup_attempts_every_lease_after_one_release_fails():
         await manager._cleanup([key, endpoint])
     assert await store.claim("kiot:key", uuid4(), deadline()) is not None
     assert await store.claim("endpoint:failed", uuid4(), deadline()) is None
+
+
+@pytest.mark.asyncio
+async def test_wait_true_reports_retryable_capacity_after_bounded_wait():
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from autobuild_json.gateway.proxy.config import ProxySelection
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.models import ProxyConfig
+
+    store = MemoryLeaseStore()
+    manager = ProxyManager(store, acquisition_timeout=.02)
+    selection = ProxySelection("fixed", runtime_entries=(ProxyConfig("http://proxy.invalid:80"),))
+    async with manager.acquire(selection, uuid4(), deadline()):
+        with pytest.raises(GatewayError) as caught:
+            async with manager.acquire(selection, uuid4(), deadline(), wait=True):
+                pass
+    assert caught.value.code == "proxy_capacity"
+
+
+@pytest.mark.asyncio
+async def test_wait_true_cancellation_releases_partial_kiot_claims():
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from autobuild_json.gateway.proxy.config import ProxySelection, parse_kiot_keys
+    from autobuild_json.gateway.proxy.kiot import KiotClient
+
+    store = MemoryLeaseStore()
+    manager = ProxyManager(store, KiotClient(adapter=httpx.MockTransport(lambda r: httpx.Response(200, json=success()))))
+    keys = tuple(parse_kiot_keys("synthetic-A\nsynthetic-B", pepper=b"p"*32))
+    selection = ProxySelection("kiotproxy", runtime_entries=keys)
+    held = await store.claim("endpoint:" + __import__("hashlib").sha256("http://93.184.216.34:39008".encode()).hexdigest(), uuid4(), deadline())
+    task = asyncio.create_task(manager.acquire(selection, uuid4(), deadline(), wait=True).__aenter__())
+    await asyncio.sleep(.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await store.claim("kiot:" + keys[0].fingerprint, uuid4(), deadline()) is not None
+    await store.release(held)

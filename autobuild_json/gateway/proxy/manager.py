@@ -10,6 +10,21 @@ from ..errors import GatewayError
 from .kiot import KiotClient, lease_action
 
 
+class ProxyCapacityError(GatewayError):
+    """Internal signal that a local lease was busy and may be retried."""
+    def __init__(self):
+        Exception.__init__(self, "proxy_capacity")
+        self.code = "proxy_capacity"
+        self.status = 503
+        self.stage = "proxy"
+        self.retry_after = None
+
+    def to_dict(self):
+        # This signal is consumed inside routing and must never become a
+        # public error code.
+        return {"error": {"code": "proxy_not_ready", "message": "proxy_not_ready", "stage": "proxy"}}
+
+
 @dataclass(frozen=True)
 class ProxyLease:
     proxy: object
@@ -29,6 +44,11 @@ class ProxyManager:
         self.acquisition_timeout = min(10, acquisition_timeout)
         self.heartbeat_interval = min(1, heartbeat_interval)
         self._cursor = 0
+        self._wait_attempts = 0
+        self._capacity_signals = 0
+
+    def snapshot(self):
+        return {"wait_attempts": self._wait_attempts, "capacity_signals": self._capacity_signals}
 
     async def _kiot_proxy(self, entry, selection, deadline, acquire_end):
         required = max(0, (deadline-datetime.now(timezone.utc)).total_seconds())
@@ -67,7 +87,7 @@ class ProxyManager:
             raise failure
 
     @asynccontextmanager
-    async def acquire(self, selection, owner, deadline):
+    async def acquire(self, selection, owner, deadline, *, wait=False):
         if deadline.tzinfo is None or deadline <= datetime.now(timezone.utc):
             raise GatewayError("deadline_exceeded", 504, "proxy")
         if selection.mode == "direct":
@@ -103,6 +123,12 @@ class ProxyManager:
                             resolved = await self._kiot_proxy(entry, selection, deadline, acquire_end)
                         except GatewayError as exc:
                             last_error = exc
+                            if exc.code in {"kiot_key_invalid", "kiot_unavailable"}:
+                                await self._cleanup(tokens)
+                                tokens.clear()
+                                if exc.code == "kiot_key_invalid":
+                                    await self.store.disable_resource(resource)
+                                raise
                             if exc.code == "kiot_key_invalid":
                                 await self.store.disable_resource(resource)
                             await self._cleanup(tokens)
@@ -125,10 +151,15 @@ class ProxyManager:
                     if proxy is not None:
                         break
                 if proxy is None:
-                    if all_examined:
+                    if all_examined and not (wait and last_error.code == "proxy_not_ready"):
                         break
+                    if wait:
+                        self._wait_attempts += 1
                     await asyncio.sleep(min(0.05, max(0, acquire_end-time.monotonic())))
             if proxy is None:
+                if wait and last_error.code == "proxy_not_ready":
+                    self._capacity_signals += 1
+                    raise ProxyCapacityError()
                 raise last_error
             parent = asyncio.current_task()
             lost = False
