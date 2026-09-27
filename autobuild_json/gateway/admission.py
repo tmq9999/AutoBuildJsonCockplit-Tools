@@ -41,6 +41,8 @@ class _AdmissionContext:
 
 
 class InferenceAdmission:
+    """Process-local bounded accepted-inference counter; queueing is external."""
+
     def __init__(self, capacity=100, metrics=None):
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
             raise ValueError("capacity must be a positive integer")

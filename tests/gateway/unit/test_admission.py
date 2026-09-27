@@ -13,7 +13,7 @@ def future(seconds=30):
 
 
 @pytest.mark.asyncio
-async def test_waiters_are_woken_in_fifo_order():
+async def test_capacity_admits_and_release_allows_next_request():
     admission = InferenceAdmission(capacity=2)
     first = await admission.enter(future())
     order = []
@@ -52,35 +52,32 @@ async def test_combined_capacity_rejects_third_request():
 
 
 @pytest.mark.asyncio
-async def test_deadline_expiry_removes_waiter():
+async def test_expired_deadline_is_rejected_immediately():
     admission = InferenceAdmission(capacity=2)
-    running = await admission.enter(future())
     with pytest.raises(GatewayError, match="deadline_exceeded"):
         await admission.enter(datetime.now(timezone.utc) - timedelta(seconds=1))
     snapshot = admission.snapshot()
     assert snapshot["queued"] == 0
     assert snapshot["expired"] == 1
-    running.release()
 
 
 @pytest.mark.asyncio
-async def test_cancelled_waiter_is_removed():
-    admission = InferenceAdmission(capacity=2)
-    running = await admission.enter(future())
+async def test_cancelled_context_releases_admitted_ticket():
+    admission = InferenceAdmission(capacity=1)
     blocked = asyncio.Event()
 
-    async def waiter_context():
+    async def worker():
         async with admission.enter(future()):
             await blocked.wait()
 
-    waiter = asyncio.create_task(waiter_context())
-    await asyncio.sleep(0)
+    waiter = asyncio.create_task(worker())
+    while admission.snapshot()["inflight"] != 1:
+        await asyncio.sleep(0)
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
     assert admission.snapshot()["queued"] == 0
-    assert admission.snapshot()["cancelled"] == 0
-    running.release()
+    assert admission.snapshot()["inflight"] == 0
 
 
 @pytest.mark.asyncio
