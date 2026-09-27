@@ -48,4 +48,8 @@ The original configured proxy/provider profile was preserved. Temporary keys wer
 
 ## Follow-up review attempt
 
-The subsequent review-window service restart completed and the admin UI was reachable (HTTP 200), but the public listener reported `{"status":"unavailable"}` (HTTP 503). Consequently, no additional streaming request, secondary workflow run, or live capacity poll was run; no streaming, queue-percentile, provider-active-maximum, proxy-lease-maximum, or persisted-ledger-leak claims are added here. These remain required follow-up evidence rather than being inferred from the earlier burst.
+The subsequent review-window restart initially reported `{"status":"unavailable"}` because the worktree `data` link had been removed while its PostgreSQL cluster was running. After read-only validation of the original data target, the link was restored and the same service restarted without resetting or creating a database. `/health` then returned HTTP 200.
+
+A real temporary-key streaming `/v1/responses` request completed with HTTP 200 and `text/event-stream`; the redacted verifier observed 11 SSE events, non-empty output text, a usage event, and `response.completed`. Cleanup revoked the temporary key and deleted its temporary customer in `finally`. A direct post-cleanup database check reported 2 active provider-admission rows and 2 owned proxy-lease rows, so zero-leak cannot be claimed (these appear to be pre-existing/background service activity, not attributed to the temporary request).
+
+The admin status process is separate from the serving engine, so its capacity counters remain zero/unsampled for request traffic; queue wait p50/p95, provider-active maximum, and proxy-lease maximum were therefore not available from that endpoint. They are not inferred or presented as zero. The earlier burst metrics remain the only acceptance measurement.
