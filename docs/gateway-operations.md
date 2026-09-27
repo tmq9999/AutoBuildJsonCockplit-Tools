@@ -13,6 +13,10 @@ the service, not for OAuth-only mode. Use a dedicated database and role. Configu
 ```text
 AUTOBUILD_GATEWAY_DATABASE_URL=postgresql+psycopg://USER:PASSWORD@127.0.0.1:5432/DATABASE
 AUTOBUILD_GATEWAY_MASTER_KEY_FILE=/absolute/private/keyring.json
+# Optional per-process pool limits; defaults are safe for two gateway processes.
+AUTOBUILD_GATEWAY_DATABASE_POOL_SIZE=16
+AUTOBUILD_GATEWAY_DATABASE_MAX_OVERFLOW=8
+AUTOBUILD_GATEWAY_DATABASE_POOL_TIMEOUT=30
 ```
 
 Never paste these values into tickets. CLI reads environment variables; this page
@@ -124,3 +128,12 @@ rights to resell a provider's service; verify the provider contract independentl
 Do not route customer traffic through providers that prohibit the intended use.
 No live account or Kiot key was used in offline tests. No public deployment has
 been performed by this implementation.
+
+The database pool is bounded per process so concurrent API keys queue briefly
+instead of opening an unbounded number of PostgreSQL sessions. Keep the sum of
+pool sizes/overflow across gateway, admin, maintenance and any worker processes
+below the database `max_connections` budget, leaving headroom for PostgreSQL and
+administrative access. Each process must have a combined pool capacity of at
+least three because quota refresh holds one advisory-lock connection while it
+uses other sessions. The built-in pre-auth limiter remains process-local;
+capacity tests must include the external reverse proxy when one is deployed.

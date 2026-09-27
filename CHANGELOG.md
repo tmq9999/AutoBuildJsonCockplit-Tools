@@ -5,6 +5,29 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ## [Unreleased] — 2026-09-24
 
+### Multi-key concurrency review — 2026-09-27
+
+- A real local load of 128 temporary API keys (384 concurrent `/v1/models`
+  requests) reproduced 30 HTTP 503 responses and PostgreSQL
+  `too many clients already` errors. Root cause was `NullPool`: every request
+  opened a fresh PostgreSQL session while public and admin ran as separate
+  processes.
+- Replaced the unbounded connection creation with a bounded async pool,
+  configurable through `AUTOBUILD_GATEWAY_DATABASE_POOL_SIZE` (default 16),
+  `AUTOBUILD_GATEWAY_DATABASE_MAX_OVERFLOW` (default 8), and
+  `AUTOBUILD_GATEWAY_DATABASE_POOL_TIMEOUT` (default 30 seconds). Quota-refresh
+  advisory-lock cleanup now invalidates a connection when unlock cannot be
+  confirmed, preventing a session lock from leaking into a reused connection.
+  Configuration rejects a combined pool capacity below three because the
+  refresh worker needs the lock connection plus worker/session connections.
+- After restart, a real 256-key / 2-round run (512 catalog requests) returned
+  **512/512 HTTP 200**, health **8/8 HTTP 200**, and a bounded sample of eight
+  real Codex Responses returned **8/8 HTTP 200**. PostgreSQL showed 33 active
+  connections against `max_connections=100`; no new `too many clients` errors
+  occurred. Temporary customers/keys were revoked in cleanup.
+- Regression evidence after the fix: **1,786 Python tests passed on Python 3.10
+  and 3.14**, **57 Node tests**, Ruff, compileall and diff checks passed.
+
 ### Push and frontend/backend review — 2026-09-27
 
 - Published the previous Codex dashboard/gateway review checkpoint as `ababff8`

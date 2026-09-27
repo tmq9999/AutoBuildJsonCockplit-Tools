@@ -187,3 +187,42 @@ async def test_interrupted_worker_is_not_replayed_and_errors_are_safe(pg_db, set
         job = (await client.get(PATH)).json()["job"]
         assert job["state"] == "completed" and job["failed"] == 1
         assert job["errors"][0]["code"] == "reauth_required"
+
+
+@pytest.mark.parametrize("stage", ["acquire", "commit", "unlock"])
+async def test_cancelled_lock_operation_cannot_leave_session_lock_in_pool(pg_db, monkeypatch, stage):
+    from types import SimpleNamespace
+    from pydantic import SecretStr
+    from sqlalchemy.ext.asyncio import AsyncConnection
+    from autobuild_json.gateway.storage.db import make_database
+
+    async with pg_db.sessions() as session:
+        schema = await session.scalar(text("SELECT current_schema()"))
+    observer = make_database(SecretStr(pg_db.engine.url.render_as_string(hide_password=False)), schema=schema)
+    method = "commit" if stage == "commit" else "scalar" if stage == "acquire" else "execute"
+    original = getattr(AsyncConnection, method)
+    interrupted = False
+
+    async def cancel_after_operation(connection, *args, **kwargs):
+        nonlocal interrupted
+        result = await original(connection, *args, **kwargs)
+        if connection.engine is pg_db.engine and not interrupted:
+            interrupted = True
+            raise asyncio.CancelledError
+        return result
+
+    monkeypatch.setattr(AsyncConnection, method, cancel_after_operation)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await QuotaRefreshJobs(SimpleNamespace(db=pg_db)).tick()
+        async with observer.engine.connect() as connection:
+            try:
+                acquired = await connection.scalar(text(
+                    "SELECT pg_try_advisory_lock(hashtext(current_schema()),731459)"))
+                assert acquired, "A cancelled refresh must not leave its session lock in the pool"
+            finally:
+                await connection.invalidate()
+    finally:
+        # Real PostgreSQL sessions only; never leak this test's lock on failure.
+        await observer.close()
+        await pg_db.engine.dispose()

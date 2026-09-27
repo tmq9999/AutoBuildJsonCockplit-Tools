@@ -42,6 +42,25 @@ async def _join_workers(worker, count):
         raise
 
 
+async def _release_advisory_lock(connection):
+    """Release the session lock before a pooled connection is returned.
+
+    If the unlock cannot be confirmed, invalidate the connection so a session
+    lock cannot leak into the next request that borrows it.  Cancellation is
+    re-raised after invalidation so the caller keeps its cancellation state.
+    """
+    try:
+        await connection.execute(text("SELECT pg_advisory_unlock(hashtext(current_schema()),731459)"))
+        await connection.commit()
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await connection.invalidate()
+        raise
+    except Exception:
+        with suppress(Exception):
+            await connection.invalidate()
+
+
 class QuotaRefreshJobs:
     def __init__(self, services):
         self.services, self.db = services, services.db
@@ -124,14 +143,16 @@ class QuotaRefreshJobs:
                 "WHEN interval_minutes=0 THEN NULL ELSE clock_timestamp()+make_interval(mins=>interval_minutes) END"))
 
     async def tick(self):
-        # NullPool closes this dedicated connection on exit, including a failed
-        # unlock; no pooled connection can retain this session-level lock.
+        # The connection is pooled.  Always unlock before returning it, and
+        # invalidate it if the unlock cannot be confirmed.
         async with self.db.engine.connect() as connection:
-            locked = await connection.scalar(text("SELECT pg_try_advisory_lock(hashtext(current_schema()),731459)"))
-            await connection.commit()
-            if not locked:
-                return
+            lock_state = "acquiring"
             try:
+                locked = await connection.scalar(text("SELECT pg_try_advisory_lock(hashtext(current_schema()),731459)"))
+                await connection.commit()
+                lock_state = "locked" if locked else "free"
+                if not locked:
+                    return
                 async with self.db.sessions() as session:
                     orphan = await session.scalar(text("SELECT id FROM codex_quota_refresh_runs WHERE state='running'"))
                 if orphan is not None:
@@ -152,9 +173,15 @@ class QuotaRefreshJobs:
                     await session.execute(text("UPDATE codex_quota_refresh_settings SET next_run_at=NULL"))
                 await self._execute(job["id"])
             finally:
-                with suppress(Exception):
-                    await connection.execute(text("SELECT pg_advisory_unlock(hashtext(current_schema()),731459)"))
-                    await connection.commit()
+                if lock_state == "locked":
+                    await _release_advisory_lock(connection)
+                elif lock_state == "acquiring":
+                    # Cancellation or a driver error can arrive after
+                    # PostgreSQL acquired the lock but before the result was
+                    # assigned locally. Never return that unknown session to
+                    # the pool.
+                    with suppress(Exception):
+                        await connection.invalidate()
 
     async def _execute(self, identity):
         from ..admin.codex_accounts import AccountViews

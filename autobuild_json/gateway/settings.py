@@ -15,6 +15,9 @@ class ServiceSettings(BaseSettings):
     database_url: SecretStr | None = None
     master_key_file: Path | None = None
     request_timeout: int = Field(default=180, ge=1, le=600)
+    database_pool_size: int = Field(default=16, ge=1, le=100)
+    database_max_overflow: int = Field(default=8, ge=0, le=100)
+    database_pool_timeout: float = Field(default=30, ge=1, le=300)
     allowed_hosts: tuple[str, ...] = ("127.0.0.1:8788", "localhost:8788")
     tls_proxy_configured: bool = False
     trusted_proxy_ips: tuple[str, ...] = ()
@@ -46,6 +49,8 @@ class ServiceSettings(BaseSettings):
 
     @model_validator(mode="after")
     def enabled_config(self):
+        if self.database_pool_size + self.database_max_overflow < 3:
+            raise ValueError("Database pool capacity must be at least 3")
         if self.enabled and (self.database_url is None or self.master_key_file is None):
             raise ValueError("Enabled gateway requires database and master-key configuration")
         if self.host not in {"127.0.0.1", "localhost", "::1"} and (not self.tls_proxy_configured or not self.allowed_hosts or not self.trusted_proxy_ips):

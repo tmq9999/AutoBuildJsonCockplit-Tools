@@ -24,7 +24,10 @@ def build_services(settings):
     from .secrets import Vault
     from .transport.egress import EgressPolicy
     vault = Vault.from_file(settings.master_key_file)
-    return AdminServices(make_database(settings.database_url), vault,
+    return AdminServices(make_database(settings.database_url,
+                                       pool_size=settings.database_pool_size,
+                                       max_overflow=settings.database_max_overflow,
+                                       pool_timeout=settings.database_pool_timeout), vault,
         vault.derive_key("client_keys", "client-key-hmac"),
         service_settings=settings,
         egress=EgressPolicy(private_origins=settings.private_origins, allowed_networks=settings.allowed_networks,

@@ -33,6 +33,23 @@ def test_service_database_secret_is_hidden(tmp_path):
     assert "secret@" not in repr(settings)
 
 
+def test_service_rejects_pool_capacity_that_can_deadlock_quota_refresh(tmp_path):
+    with pytest.raises(ValidationError, match="pool capacity must be at least 3"):
+        from autobuild_json.gateway.settings import ServiceSettings
+        ServiceSettings(enabled=True, database_url="postgresql+psycopg://u:p@localhost/service",
+                        master_key_file=tmp_path / "key", database_pool_size=2,
+                        database_max_overflow=0, _env_file=None)
+
+
+def test_service_pool_limits_are_read_from_gateway_environment(monkeypatch):
+    from autobuild_json.gateway.settings import ServiceSettings
+    monkeypatch.setenv("AUTOBUILD_GATEWAY_DATABASE_POOL_SIZE", "7")
+    monkeypatch.setenv("AUTOBUILD_GATEWAY_DATABASE_MAX_OVERFLOW", "5")
+    monkeypatch.setenv("AUTOBUILD_GATEWAY_DATABASE_POOL_TIMEOUT", "12.5")
+    settings = ServiceSettings(_env_file=None)
+    assert (settings.database_pool_size, settings.database_max_overflow, settings.database_pool_timeout) == (7, 5, 12.5)
+
+
 def test_legacy_imports_without_service_dependencies():
     result = subprocess.run([sys.executable, "-c", """
 import sys

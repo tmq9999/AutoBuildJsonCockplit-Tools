@@ -1,5 +1,31 @@
 # Implementation status
 
+## Multi-key concurrency review — 2026-09-27
+
+A real local fan-out created temporary customer keys through the private admin
+API and exercised the public gateway with unique `Authorization` values. The
+first 128-key/384-request run exposed PostgreSQL `too many clients already`
+and 30 HTTP 503 responses because `make_database()` used `NullPool` in both
+gateway processes. The root-cause fix is a bounded async pool (16 base
+connections plus 8 overflow per process), with three environment overrides:
+`AUTOBUILD_GATEWAY_DATABASE_POOL_SIZE`,
+`AUTOBUILD_GATEWAY_DATABASE_MAX_OVERFLOW`, and
+`AUTOBUILD_GATEWAY_DATABASE_POOL_TIMEOUT`; the combined capacity is validated
+to be at least three because quota refresh holds one advisory-lock connection
+while opening worker/session connections.
+
+After restart, the 256-key/512-request catalog run completed **512/512 HTTP
+200**; eight concurrent health probes were **8/8 HTTP 200**. Eight additional
+real Codex Responses requests were **8/8 HTTP 200** with provider usage saved.
+PostgreSQL held 33 active connections with `max_connections=100`, and no new
+post-fix `too many clients` messages appeared. Temporary records were revoked
+and the customer disabled in a `finally` cleanup path. This validates the
+tested burst, not unlimited production capacity; a reverse proxy and database
+pool sizing must still be tuned for deployment scale.
+
+Post-fix suites: **1,786 Python tests on 3.10**, **1,786 on 3.14**, **57 Node
+tests**, Ruff, compileall and `git diff --check` all pass.
+
 ## Push and continued review — 2026-09-27
 
 Checkpoint `ababff8` is pushed to private `tmq9999/AutoBuildJsonCockplit-Tools`

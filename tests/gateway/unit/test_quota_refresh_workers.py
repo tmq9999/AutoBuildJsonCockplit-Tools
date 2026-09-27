@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from autobuild_json.gateway.accounts.quota_refresh_jobs import _join_workers
+from autobuild_json.gateway.accounts.quota_refresh_jobs import _join_workers, _release_advisory_lock
 
 
 @pytest.mark.asyncio
@@ -42,3 +42,23 @@ async def test_worker_cleanup_finishes_before_owner_returns_even_when_cancelled_
         release.set()
         await asyncio.gather(owner, return_exceptions=True)
     assert cleaned.is_set()
+
+
+@pytest.mark.asyncio
+async def test_advisory_lock_connection_is_invalidated_when_unlock_fails():
+    class Connection:
+        def __init__(self):
+            self.invalidated = False
+
+        async def execute(self, statement):
+            raise RuntimeError("unlock failed")
+
+        async def commit(self):
+            raise AssertionError("commit must not run after failed unlock")
+
+        async def invalidate(self):
+            self.invalidated = True
+
+    connection = Connection()
+    await _release_advisory_lock(connection)
+    assert connection.invalidated is True
