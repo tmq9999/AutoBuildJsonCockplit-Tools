@@ -45,3 +45,7 @@ The 100-user burst exercised real non-streaming `/v1/responses` requests and ver
 ## Rollback/cleanup
 
 The original configured proxy/provider profile was preserved. Temporary keys were revoked and the temporary customer removed by the benchmark cleanup path. The live service was left healthy on the public listener (`GET /health` HTTP 200).
+
+## Follow-up review attempt
+
+The subsequent review-window service restart completed and the admin UI was reachable (HTTP 200), but the public listener reported `{"status":"unavailable"}` (HTTP 503). Consequently, no additional streaming request, secondary workflow run, or live capacity poll was run; no streaming, queue-percentile, provider-active-maximum, proxy-lease-maximum, or persisted-ledger-leak claims are added here. These remain required follow-up evidence rather than being inferred from the earlier burst.
