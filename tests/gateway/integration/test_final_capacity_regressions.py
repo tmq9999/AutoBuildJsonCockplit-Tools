@@ -156,6 +156,38 @@ async def test_proxy_cleanup_retries_after_transient_pool_contention(pg_db, post
         assert manager.snapshot()["cleanup_failures"] == 0
 
 
+async def test_provider_lock_reservation_prevents_duplicate_same_key_lock(pg_db):
+    limits = ProviderLimits(pg_db)
+    limits._PROVIDER_LOCK_CAPACITY = 1
+    first = limits._provider_lock("same")
+    assert first.users == 1
+    other = limits._provider_lock("other")
+    again = limits._provider_lock("same")
+    assert again is first
+    assert first.users == 2
+    assert len(limits._provider_locks) == 1
+    assert other is not first
+    first.users -= 2
+    other.users -= 1
+
+
+async def test_proxy_lock_reservation_prevents_duplicate_same_key_lock(pg_db):
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+
+    manager = ProxyManager(PgLeaseStore(pg_db))
+    manager._RESOURCE_LOCK_CAPACITY = 1
+    first = manager._resource_lock("same")
+    assert first.users == 1
+    other = manager._resource_lock("other")
+    again = manager._resource_lock("same")
+    assert again is first
+    assert first.users == 2
+    assert len(manager._resource_locks) == 1
+    assert other is not first
+    first.users -= 2
+    other.users -= 1
+
+
 async def test_expired_proxy_claim_is_redacted_deadline_error(pg_db):
     with pytest.raises(GatewayError, match="deadline_exceeded"):
         await PgLeaseStore(pg_db).claim("expired", uuid4(), future(-1))

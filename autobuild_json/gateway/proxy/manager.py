@@ -42,6 +42,14 @@ def endpoint_resource(proxy):
     return "endpoint:" + hashlib.sha256(proxy.server.encode()).hexdigest()
 
 
+class _ResourceLockEntry:
+    __slots__ = ("lock", "users")
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.users = 0
+
+
 class ProxyManager:
     _CLEANUP_GRACE_SECONDS = 0.25
     _RESOURCE_LOCK_CAPACITY = 256
@@ -57,7 +65,7 @@ class ProxyManager:
         self._last_wait_ms = 0.0
         self._cleanup_failures = 0
         self._resource_locks = {}
-        self._resource_lock_overflow = asyncio.Lock()
+        self._resource_lock_overflow = tuple(_ResourceLockEntry() for _ in range(32))
 
     def snapshot(self):
         waits = sorted(self._waits)
@@ -71,57 +79,68 @@ class ProxyManager:
                 "last_wait_ms": self._last_wait_ms, "cleanup_failures": self._cleanup_failures}
 
     def _resource_lock(self, resource):
-        lock = self._resource_locks.get(resource)
-        if lock is not None:
-            return lock
+        entry = self._resource_locks.get(resource)
+        if entry is not None:
+            entry.users += 1
+            return entry
         if len(self._resource_locks) >= self._RESOURCE_LOCK_CAPACITY:
             for key, candidate in tuple(self._resource_locks.items()):
-                if not candidate.locked() and not getattr(candidate, "_waiters", None):
+                if (candidate.users == 0 and not candidate.lock.locked()
+                        and not getattr(candidate.lock, "_waiters", None)):
                     del self._resource_locks[key]
                     break
         if len(self._resource_locks) >= self._RESOURCE_LOCK_CAPACITY:
-            return self._resource_lock_overflow
-        lock = asyncio.Lock()
-        self._resource_locks[resource] = lock
-        return lock
+            digest = hashlib.sha256(resource.encode()).digest()
+            entry = self._resource_lock_overflow[int.from_bytes(digest[:4]) % len(self._resource_lock_overflow)]
+        else:
+            entry = _ResourceLockEntry()
+            self._resource_locks[resource] = entry
+        entry.users += 1
+        return entry
+
+    @staticmethod
+    def _close_operation(operation):
+        close = getattr(operation, "close", None)
+        if close is not None:
+            close()
 
     async def _bounded_store_call(self, operation, acquire_end):
         remaining = acquire_end - time.monotonic()
         if remaining <= 0:
-            close = getattr(operation, "close", None)
-            if close is not None:
-                close()
+            self._close_operation(operation)
             raise ProxyCapacityError()
         try:
             return await asyncio.wait_for(operation, remaining)
         except asyncio.TimeoutError:
+            self._close_operation(operation)
             # A locked lease row is local capacity contention.  Convert the
             # acquisition cap expiry into the same retryable signal so the
             # provider context is released before Engine waits again.
             raise ProxyCapacityError() from None
 
     async def _bounded_resource_call(self, resource, operation, acquire_end):
-        lock = self._resource_lock(resource)
+        entry = self._resource_lock(resource)
         remaining = acquire_end - time.monotonic()
         if remaining <= 0:
-            close = getattr(operation, "close", None)
-            if close is not None:
-                close()
+            self._close_operation(operation)
+            entry.users -= 1
             raise ProxyCapacityError()
         acquired = False
         try:
             try:
-                await asyncio.wait_for(lock.acquire(), remaining)
+                await asyncio.wait_for(entry.lock.acquire(), remaining)
                 acquired = True
             except asyncio.TimeoutError:
-                close = getattr(operation, "close", None)
-                if close is not None:
-                    close()
+                self._close_operation(operation)
                 raise ProxyCapacityError() from None
+            except BaseException:
+                self._close_operation(operation)
+                raise
             return await self._bounded_store_call(operation, acquire_end)
         finally:
             if acquired:
-                lock.release()
+                entry.lock.release()
+            entry.users -= 1
 
     async def wait_for_capacity(self, selection, owner, deadline):
         """Wait for a local lease without retaining any provider admission.
@@ -364,8 +383,11 @@ class ProxyManager:
                 # Cleanup failure must not overwrite the primary provider or
                 # Kiot error from this acquisition. Fencing/hard expiry and
                 # the bounded retry remain the durable recovery path.
-                await asyncio.wait_for(
-                    self._cleanup_with_retry(tokens, seconds=.6, attempts=2, raise_failure=False), timeout=.6)
+                try:
+                    await asyncio.wait_for(
+                        self._cleanup_with_retry(tokens, seconds=.6, attempts=2, raise_failure=False), timeout=.6)
+                except asyncio.TimeoutError:
+                    self._cleanup_failures += 1
 
     async def release_kiot(self, key, actor):
         if not actor:

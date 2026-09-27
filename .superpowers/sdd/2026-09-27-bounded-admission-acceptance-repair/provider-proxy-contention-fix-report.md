@@ -31,9 +31,15 @@ remain authoritative.
   lease after transient contention; no owner row remains and proxy cleanup
   failures stay zero.
 - Focused provider, proxy, final-capacity, and proxy-manager tests passed after
-  the fix: **53 passed in 23.37s**. The full `tests/gateway` suite then passed
-  **1699 tests in 551.34s**, with one dependency deprecation warning. Ruff,
-  compileall, and `git diff --check` passed.
+the fix: **53 passed in 23.37s**. The full `tests/gateway` suite then passed
+**1699 tests in 551.34s**, with one dependency deprecation warning. Ruff,
+compileall, and `git diff --check` passed.
+
+The final review hardening reserves lock-map entries synchronously with a
+`users` count, uses stable sharded overflow locks, closes unstarted store
+coroutines on deadline/cancellation, and catches the outer cleanup timeout so
+it cannot replace a primary error. The post-hardening focused provider/proxy
+regressions passed **55 tests**; unit/final-capacity follow-up passed **39**.
 
 No live inference, gateway restart, live database write, data symlink change,
 push, or merge was performed.

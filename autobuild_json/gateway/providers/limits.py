@@ -12,6 +12,14 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from ..errors import GatewayError
 
 
+class _ProviderLockEntry:
+    __slots__ = ("lock", "users")
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.users = 0
+
+
 class ProviderLimits:
     _PROVIDER_LOCK_CAPACITY = 256
     _CLEANUP_GRACE_SECONDS = 0.25
@@ -28,32 +36,36 @@ class ProviderLimits:
         self._last_wait_ms = 0.0
         self._cleanup_failures = 0
         self._provider_locks = {}
-        self._provider_lock_overflow = asyncio.Lock()
+        self._provider_lock_overflow = tuple(_ProviderLockEntry() for _ in range(32))
 
     def _provider_lock(self, provider_id):
-        lock = self._provider_locks.get(provider_id)
-        if lock is not None:
-            return lock
+        entry = self._provider_locks.get(provider_id)
+        if entry is not None:
+            entry.users += 1
+            return entry
         if len(self._provider_locks) >= self._PROVIDER_LOCK_CAPACITY:
             for key, candidate in tuple(self._provider_locks.items()):
-                if not candidate.locked() and not getattr(candidate, "_waiters", None):
+                if (candidate.users == 0 and not candidate.lock.locked()
+                        and not getattr(candidate.lock, "_waiters", None)):
                     del self._provider_locks[key]
                     break
         if len(self._provider_locks) >= self._PROVIDER_LOCK_CAPACITY:
-            return self._provider_lock_overflow
-        lock = asyncio.Lock()
-        self._provider_locks[provider_id] = lock
-        return lock
+            entry = self._provider_lock_overflow[hash(str(provider_id)) % len(self._provider_lock_overflow)]
+        else:
+            entry = _ProviderLockEntry()
+            self._provider_locks[provider_id] = entry
+        entry.users += 1
+        return entry
 
     async def _try_acquire_bounded(self, route, deadline, identity):
         remaining = self._remaining(deadline)
         if remaining <= 0:
             raise GatewayError("deadline_exceeded", 504, "upstream")
-        provider_lock = self._provider_lock(route.provider_id)
+        provider_entry = self._provider_lock(route.provider_id)
         acquired = False
         try:
             try:
-                await asyncio.wait_for(provider_lock.acquire(), remaining)
+                await asyncio.wait_for(provider_entry.lock.acquire(), remaining)
                 acquired = True
             except asyncio.TimeoutError:
                 raise GatewayError("deadline_exceeded", 504, "upstream") from None
@@ -65,7 +77,8 @@ class ProviderLimits:
             raise GatewayError("deadline_exceeded", 504, "upstream") from None
         finally:
             if acquired:
-                provider_lock.release()
+                provider_entry.lock.release()
+            provider_entry.users -= 1
 
     async def _set_lock_timeout(self, session, deadline):
         remaining = self._remaining(deadline)
