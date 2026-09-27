@@ -84,9 +84,11 @@ class ProviderLimits:
                 raise GatewayError("upstream_unavailable", 503, "upstream", 1)
             if any(counts["concurrent"] >= concurrency for counts, _, concurrency in limits):
                 return False
-            await session.execute(
+            inserted = await session.execute(
                 text(
-                    "INSERT INTO provider_admissions(id,provider_id,credential_id,deadline) VALUES (:id,:provider,:credential,:deadline)"
+                    "INSERT INTO provider_admissions(id,provider_id,credential_id,deadline) "
+                    "SELECT :id,:provider,:credential,:deadline "
+                    "WHERE clock_timestamp() < :deadline RETURNING id"
                 ),
                 {
                     "id": identity,
@@ -95,6 +97,8 @@ class ProviderLimits:
                     "deadline": deadline,
                 },
             )
+            if inserted.first() is None:
+                raise GatewayError("deadline_exceeded", 504, "upstream")
         return True
 
     def _remaining(self, deadline):
@@ -129,7 +133,13 @@ class ProviderLimits:
             if wait and self._remaining(deadline) <= 0:
                 self._expired_waits += 1
                 raise GatewayError("deadline_exceeded", 504, "upstream")
-            if await self._try_acquire(route, deadline, identity):
+            try:
+                acquired = await self._try_acquire(route, deadline, identity)
+            except GatewayError as exc:
+                if wait and exc.code == "deadline_exceeded":
+                    self._expired_waits += 1
+                raise
+            if acquired:
                 break
             if not wait:
                 raise GatewayError("upstream_unavailable", 503, "upstream", 1)

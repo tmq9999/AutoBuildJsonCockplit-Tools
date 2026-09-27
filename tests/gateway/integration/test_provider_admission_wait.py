@@ -77,6 +77,31 @@ async def test_waiting_admission_expires_without_inserting_a_row(pg_db):
     assert await active_admissions(pg_db) == 0
 
 
+async def test_deadline_is_rechecked_after_a_provider_row_lock(pg_db):
+    route, provider, _ = await limited_route(pg_db)
+    limits = ProviderLimits(pg_db)
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=0.05)
+
+    async with pg_db.sessions.begin() as blocker:
+        await blocker.execute(
+            text("SELECT id FROM providers WHERE id=:id FOR UPDATE"),
+            {"id": provider},
+        )
+        context = limits.acquire(route, deadline, wait=True)
+        pending = asyncio.create_task(context.__aenter__())
+        await asyncio.sleep(0.15)
+        assert not pending.done()
+
+    try:
+        await pending
+    except GatewayError as error:
+        assert error.code == "deadline_exceeded"
+    else:
+        await context.__aexit__(None, None, None)
+        pytest.fail("Admission must not be inserted after its deadline")
+    assert await active_admissions(pg_db) == 0
+
+
 async def test_default_non_waiting_admission_still_fails_immediately(pg_db):
     route, _, _ = await limited_route(pg_db)
     limits = ProviderLimits(pg_db)

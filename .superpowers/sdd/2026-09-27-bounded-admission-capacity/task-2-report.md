@@ -36,3 +36,31 @@ pytest tests/gateway/integration/test_cooldown.py tests/gateway/integration/test
 ```
 
 The external virtualenv emitted the existing `sys.prefix`/`sys.exec_prefix` runtime warnings because it is referenced from the worktree; PostgreSQL and all tests completed successfully. No library dependency issue blocked verification.
+
+## Review fix
+
+The final pre-commit review identified a deadline race while `_try_acquire`
+was blocked on a provider/credential `FOR UPDATE`. The admission insert now
+uses an atomic PostgreSQL `clock_timestamp() < :deadline` condition in the
+same transaction, so a waiter that expires during row-lock acquisition cannot
+create an admission row. A regression test holds the provider row lock past
+the deadline and verifies `deadline_exceeded` with zero active rows.
+
+RED/GREEN evidence for the fix:
+
+```text
+Before the fix: test_deadline_is_rechecked_after_a_provider_row_lock failed
+(`Admission must not be inserted after its deadline`).
+
+After the fix: test_deadline_is_rechecked_after_a_provider_row_lock - 1 passed
+```
+
+Final focused verification after the fix:
+
+```text
+pytest tests/gateway/integration/test_provider_admission_wait.py tests/gateway/integration/test_review_regressions.py -q
+16 passed in 7.74s
+
+pytest tests/gateway/integration/test_cooldown.py tests/gateway/integration/test_rate_limits.py tests/gateway/integration/test_provider_probe.py -q
+79 passed in 32.17s
+```
