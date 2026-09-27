@@ -172,6 +172,71 @@ async def test_prepared_close_retains_and_later_joins_cancellation_resistant_cle
     assert prepared.closed and admission.snapshot()["inflight"] == 0
 
 
+@pytest.mark.asyncio
+async def test_resistant_stream_cleanup_cannot_block_admission_release():
+    admission = InferenceAdmission(1)
+    admission_stack = AsyncExitStack()
+    await admission_stack.enter_async_context(admission.enter(datetime.now(timezone.utc) + timedelta(seconds=2)))
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class Ledger:
+        async def mark_pending(self, *args):
+            pass
+
+    class Stream:
+        async def cancel(self):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            finally:
+                finished.set()
+
+    from autobuild_json.gateway.engine import PreparedCall
+    prepared = PreparedCall(SimpleNamespace(ledger=Ledger(), budgets=None), AsyncExitStack(), Stream(),
+                            __import__("uuid").uuid4(), SimpleNamespace(public_model_id="m", adapter="x"),
+                            __import__("uuid").uuid4(), admission_stack=admission_stack,
+                            cleanup_grace=0.05)
+    with pytest.raises(TimeoutError):
+        await prepared.close()
+    assert entered.is_set() and not finished.is_set()
+    assert admission.snapshot()["inflight"] == 0
+    assert prepared._cleanup_children and not prepared.closed
+    release.set()
+    await prepared.close()
+    assert finished.is_set() and not prepared._cleanup_children and prepared.closed
+
+
+@pytest.mark.asyncio
+async def test_normal_cleanup_releases_admission_after_stream_and_route():
+    admission = InferenceAdmission(1)
+    admission_stack = AsyncExitStack()
+    events = []
+    await admission_stack.enter_async_context(admission.enter(datetime.now(timezone.utc) + timedelta(seconds=2)))
+    admission_stack.push_async_callback(lambda: _async_value(events.append("admission")))
+
+    class Ledger:
+        async def mark_pending(self, *args):
+            pass
+
+    class Stream:
+        async def cancel(self):
+            events.append("stream")
+
+    class Stack:
+        async def aclose(self):
+            events.append("route")
+
+    from autobuild_json.gateway.engine import PreparedCall
+    prepared = PreparedCall(SimpleNamespace(ledger=Ledger(), budgets=None), Stack(), Stream(),
+                            __import__("uuid").uuid4(), SimpleNamespace(public_model_id="m", adapter="x"),
+                            __import__("uuid").uuid4(), admission_stack=admission_stack)
+    await prepared.close()
+    assert events[-1] == "admission" and set(events[:2]) == {"stream", "route"}
+    assert admission.snapshot()["inflight"] == 0
+
+
 class _Ledger:
     def __init__(self):
         self.released = []

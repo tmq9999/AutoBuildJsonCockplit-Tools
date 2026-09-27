@@ -736,22 +736,30 @@ class PreparedCall:
                 else:
                     await self.engine.ledger.mark_pending(self.request_id, "interrupted")
 
-        async def resource_cleanup():
-            try:
-                await self.stream.cancel()
-            finally:
-                try:
-                    await self.stack.aclose()
-                finally:
-                    if self.admission_stack is not None:
-                        await self.admission_stack.aclose()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.cleanup_grace
+
+        stream_cleanup = asyncio.create_task(self.stream.cancel(), name="prepared-stream-cleanup")
+        route_cleanup = asyncio.create_task(self.stack.aclose(), name="prepared-route-cleanup")
+        resource_children = (stream_cleanup, route_cleanup)
+
+        async def admission_cleanup():
+            # Preserve normal stream/route-before-admission ordering. If a
+            # resource refuses cancellation, reserve a small slice of the same
+            # monotonic budget so admission release is still attempted before
+            # the caller's bounded deadline.
+            reserve = min(0.01, self.cleanup_grace / 5)
+            await asyncio.wait(resource_children, timeout=max(0, deadline - loop.time() - reserve))
+            if self.admission_stack is not None:
+                await self.admission_stack.aclose()
 
         children = [asyncio.create_task(accounting_cleanup(), name="prepared-accounting-cleanup"),
-                    asyncio.create_task(resource_cleanup(), name="prepared-resource-cleanup")]
+                    stream_cleanup, route_cleanup,
+                    asyncio.create_task(admission_cleanup(), name="prepared-admission-cleanup")]
         self._cleanup_children.update(children)
         for child in children:
             child.add_done_callback(self._cleanup_children.discard)
-        done, pending = await asyncio.wait(children, timeout=self.cleanup_grace)
+        _, pending = await asyncio.wait(children, timeout=max(0, deadline - loop.time()))
         for child in pending:
             child.cancel()
         # The supervisor deliberately remains live while cancellation-resistant

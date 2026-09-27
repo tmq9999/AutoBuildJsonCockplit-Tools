@@ -212,3 +212,36 @@ targeted matrix was sufficient; it had reached 188 passed with no failures in
 passed. No production database was mutated. Operational observation supplied
 by the controller: the local runner does not launch maintenance, and historical
 interrupted rows will be handled by explicit Task 4 recovery verification.
+
+## Review fix round 3
+
+Split stream cancellation, route/proxy stack close, and admission-stack close
+into independently owned supervisor children. Normal cleanup preserves
+stream/route-before-admission ordering. If either resource child is resistant,
+the admission child waits only until a small reserve inside the same monotonic
+cleanup budget, then releases admission independently before the caller's
+bounded timeout. The supervisor retains all unfinished children for later
+drain; it never marks the call closed or abandons a detached task. A
+permanently resistant dependency therefore leaves `closed=False` until a later
+close/shutdown drain can join it.
+
+```text
+pytest tests/gateway/unit/test_engine_admission.py -q
+11 passed in 0.49s
+
+pytest tests/gateway/unit/test_engine_admission.py \
+  tests/gateway/integration/test_recovery.py \
+  tests/gateway/integration/test_gateway.py \
+  tests/gateway/integration/test_stream_lifecycle.py \
+  tests/gateway/integration/test_codex_service_status.py -q
+42 passed in 12.81s
+
+ruff check <changed Python files>
+All checks passed!
+
+python -m compileall -q <changed Python files>
+Passed (no output).
+
+git diff --check
+Passed (no output).
+```
