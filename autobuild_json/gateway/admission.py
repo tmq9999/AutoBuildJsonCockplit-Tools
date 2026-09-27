@@ -75,6 +75,7 @@ class InferenceAdmission:
         self._resource_wait_expired = 0
         self._resource_wait_cancelled = 0
         self._resource_wait_success = 0
+        self._resource_wait_failed = 0
         self._last_resource_wait_ms = 0.0
 
     def enter(self, deadline):
@@ -101,6 +102,8 @@ class InferenceAdmission:
             self._resource_wait_expired += 1
         elif outcome == "cancelled":
             self._resource_wait_cancelled += 1
+        elif outcome == "failed":
+            self._resource_wait_failed += 1
         else:
             self._resource_wait_success += 1
         self._emit_metrics()
@@ -201,6 +204,7 @@ class InferenceAdmission:
             "proxy_waiting": self._resource_waiting_by_type.get("proxy", 0),
             "resource_wait_episodes": self._resource_wait_episodes,
             "resource_wait_success": self._resource_wait_success,
+            "resource_wait_failed": self._resource_wait_failed,
             "resource_wait_expired": self._resource_wait_expired,
             "resource_wait_cancelled": self._resource_wait_cancelled,
             "resource_wait_p50_ms": resource_percentile(.50),

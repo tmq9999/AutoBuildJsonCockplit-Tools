@@ -29,10 +29,28 @@ class PgLeaseStore:
             {"timeout": f"{max(1, int(remaining * 1000))}ms"},
         )
 
-    async def disable_resource(self, resource):
+    async def _disable_transaction(self, resource, deadline):
         async with self.db.sessions.begin() as session:
+            await self._set_lock_timeout(session, deadline)
             await session.execute(text("INSERT INTO proxy_health(resource,disabled) VALUES (:resource,true) "
                                        "ON CONFLICT(resource) DO UPDATE SET disabled=true"), {"resource": resource})
+
+    async def disable_resource(self, resource, deadline=None):
+        deadline = deadline or (datetime.now(timezone.utc) + timedelta(seconds=self._CLEANUP_GRACE_SECONDS))
+        remaining = self._remaining(deadline)
+        if remaining <= 0:
+            raise GatewayError("deadline_exceeded", 504, "proxy")
+        try:
+            await asyncio.wait_for(self._disable_transaction(resource, deadline), remaining)
+        except asyncio.TimeoutError:
+            raise GatewayError("deadline_exceeded", 504, "proxy") from None
+        except (OperationalError, DBAPIError) as exc:
+            original = getattr(exc, "orig", None)
+            pgcode = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+            message = str(original or exc).lower()
+            if pgcode == "55P03" or "lock timeout" in message:
+                raise GatewayError("deadline_exceeded", 504, "proxy") from None
+            raise
 
     async def is_disabled(self, resource):
         async with self.db.sessions() as session:

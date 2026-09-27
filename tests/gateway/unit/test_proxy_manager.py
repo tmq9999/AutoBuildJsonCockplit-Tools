@@ -359,3 +359,129 @@ async def test_mixed_invalid_key_and_busy_valid_key_reports_capacity():
             pass
     assert caught.value.code == "proxy_capacity"
     await store.release(held)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_with_acquisition_deadline_cancels_a_blocked_release():
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+
+    entered, closed = asyncio.Event(), asyncio.Event()
+
+    class BlockedRelease(MemoryLeaseStore):
+        async def release(self, token):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+    store = BlockedRelease()
+    manager = ProxyManager(store)
+    token = await store.claim("endpoint:blocked", uuid4(), deadline())
+    end = asyncio.get_running_loop().time() + 0.02
+    task = asyncio.create_task(manager._cleanup([token], end))
+    await entered.wait()
+    with pytest.raises(Exception):
+        await task
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_owned_retains_token_when_release_budget_expires():
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+
+    class BlockedRelease(MemoryLeaseStore):
+        async def release(self, token):
+            await asyncio.Event().wait()
+
+    store = BlockedRelease()
+    manager = ProxyManager(store)
+    token = await store.claim("endpoint:retained", uuid4(), deadline())
+    tokens = [token]
+    with pytest.raises(Exception):
+        await manager._cleanup_owned(tokens, asyncio.get_running_loop().time() + 0.01)
+    assert tokens == [token]
+
+
+@pytest.mark.asyncio
+async def test_invalid_kiot_key_passes_acquisition_deadline_to_health_disable():
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from autobuild_json.gateway.proxy.config import ProxySelection, parse_kiot_keys
+    from autobuild_json.gateway.errors import GatewayError
+
+    class HealthStore(MemoryLeaseStore):
+        def __init__(self):
+            super().__init__()
+            self.deadline = None
+
+        async def disable_resource(self, resource, deadline=None):
+            self.deadline = deadline
+            await super().disable_resource(resource, deadline)
+
+    class InvalidKiot:
+        async def current(self, *args, **kwargs):
+            raise GatewayError("kiot_key_invalid", 400, "proxy")
+
+    store = HealthStore()
+    manager = ProxyManager(store, InvalidKiot(), acquisition_timeout=.1)
+    selection = ProxySelection("kiotproxy", runtime_entries=tuple(parse_kiot_keys("bad", pepper=b"p" * 32)))
+    with pytest.raises(GatewayError, match="kiot_key_invalid"):
+        async with manager.acquire(selection, uuid4(), deadline()):
+            pass
+    assert isinstance(store.deadline, datetime)
+    assert store.deadline < datetime.now(timezone.utc) + timedelta(seconds=.2)
+
+
+@pytest.mark.asyncio
+async def test_release_kiot_retries_transient_lease_release_failure():
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from types import SimpleNamespace
+
+    class FlakyStore(MemoryLeaseStore):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def release(self, token):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("temporary release failure")
+            await super().release(token)
+
+    class Kiot:
+        async def out(self, *args, **kwargs):
+            return None
+
+    store = FlakyStore()
+    manager = ProxyManager(store, Kiot())
+    key = SimpleNamespace(fingerprint="key", secret="secret")
+    await manager.release_kiot(key, "admin")
+    assert store.calls == 2
+    assert await store.claim("kiot:key", uuid4(), deadline()) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["proxy_not_ready", "kiot_unavailable", "kiot_key_invalid"])
+async def test_kiot_failure_at_acquisition_expiry_is_not_retried_as_capacity(code):
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from autobuild_json.gateway.proxy.config import ProxySelection, parse_kiot_keys
+    from autobuild_json.gateway.errors import GatewayError
+
+    class KiotFailure:
+        async def current(self, *args, **kwargs):
+            await asyncio.sleep(.03)
+            raise GatewayError(code, 503, "proxy")
+
+    store = MemoryLeaseStore()
+    manager = ProxyManager(store, KiotFailure(), acquisition_timeout=.02)
+    key = tuple(parse_kiot_keys("bad", pepper=b"p"*32))
+    with pytest.raises(GatewayError) as caught:
+        async with manager.acquire(ProxySelection("kiotproxy", runtime_entries=key), uuid4(), deadline()):
+            pass
+    assert caught.value.code == code
+    assert await store.claim("kiot:" + key[0].fingerprint, uuid4(), deadline()) is not None

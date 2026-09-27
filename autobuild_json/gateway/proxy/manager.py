@@ -43,6 +43,8 @@ def endpoint_resource(proxy):
 
 
 class ProxyManager:
+    _CLEANUP_GRACE_SECONDS = 0.25
+
     def __init__(self, store, kiot=None, *, acquisition_timeout=10, heartbeat_interval=1):
         self.store, self.kiot = store, kiot or KiotClient()
         self.acquisition_timeout = min(10, acquisition_timeout)
@@ -123,17 +125,40 @@ class ProxyManager:
             raise GatewayError("proxy_not_ready", 503, "proxy")
         return current.proxy
 
-    async def _cleanup(self, tokens):
+    async def _cleanup(self, tokens, cleanup_end=None):
         failure = None
         for token in reversed(tokens):
             try:
-                await self.store.release(token)
+                operation = self.store.release(token)
+                if cleanup_end is None:
+                    await operation
+                else:
+                    await self._bounded_store_call(operation, cleanup_end)
+                # Keep failed tokens available to the owner/finally path for
+                # a bounded retry.  A timed-out release must never be
+                # mistaken for a successful lease release.
+                tokens.remove(token)
             except Exception as exc:
                 # Try every slot even if one release fails. Report the first
                 # failure afterward; cancellation still respects our timeout.
                 if failure is None:
                     failure = exc
         if failure is not None:
+            raise failure
+
+    async def _cleanup_owned(self, tokens, cleanup_end=None):
+        await self._cleanup(tokens, cleanup_end)
+
+    async def _cleanup_with_retry(self, tokens, seconds=5):
+        end = time.monotonic() + seconds
+        failure = None
+        while tokens and time.monotonic() < end:
+            try:
+                await self._cleanup(tokens, end)
+            except Exception as exc:
+                failure = exc
+                await asyncio.sleep(0)
+        if tokens and failure is not None:
             raise failure
 
     @asynccontextmanager
@@ -177,25 +202,46 @@ class ProxyManager:
                         except GatewayError as exc:
                             last_error = exc
                             if exc.code == "proxy_not_ready":
-                                await self._cleanup(tokens)
-                                tokens.clear()
+                                try:
+                                    await self._cleanup_owned(
+                                        tokens, max(acquire_end, time.monotonic() + self._CLEANUP_GRACE_SECONDS))
+                                except Exception:
+                                    pass
                                 raise
                             if exc.code == "kiot_unavailable":
-                                await self._cleanup(tokens)
-                                tokens.clear()
+                                try:
+                                    await self._cleanup_owned(
+                                        tokens, max(acquire_end, time.monotonic() + self._CLEANUP_GRACE_SECONDS))
+                                except Exception:
+                                    pass
                                 raise
                             if exc.code == "kiot_key_invalid":
                                 invalid_seen = True
-                                await self.store.disable_resource(resource)
-                            await self._cleanup(tokens)
-                            tokens.clear()
+                                disable_end = datetime.now(timezone.utc) + timedelta(
+                                    seconds=max(0, acquire_end - time.monotonic()))
+                                try:
+                                    await self._bounded_store_call(
+                                        self.store.disable_resource(resource, disable_end), acquire_end)
+                                except Exception:
+                                    # Health persistence is best effort here;
+                                    # retain the permanent Kiot classification
+                                    # and let the outer cleanup release the
+                                    # lease within its grace.
+                                    pass
+                            cleanup_end = max(acquire_end, time.monotonic() + self._CLEANUP_GRACE_SECONDS)
+                            try:
+                                await self._cleanup_owned(tokens, cleanup_end)
+                            except Exception:
+                                # Preserve the primary Kiot error. The outer
+                                # owner cleanup retains any unreleased token.
+                                if exc.code not in {"proxy_not_ready", "kiot_unavailable", "kiot_key_invalid"}:
+                                    raise
                             continue
                         endpoint = await self._bounded_store_call(
                             self.store.claim(endpoint_resource(resolved), owner, deadline), acquire_end)
                         if endpoint is None:
                             capacity_seen = True
-                            await self._cleanup(tokens)
-                            tokens.clear()
+                            await self._cleanup_owned(tokens, acquire_end)
                             continue
                         tokens.append(endpoint)
                         proxy = resolved
@@ -260,9 +306,8 @@ class ProxyManager:
                 await asyncio.gather(pulse, return_exceptions=True)
         finally:
             if tokens:
-                # wait_for owns, cancels and joins its cleanup coroutine. Shielding
-                # an anonymous coroutine here leaks it on timeout/cancellation.
-                await asyncio.wait_for(self._cleanup(tokens), timeout=5)
+                # wait_for owns, cancels and joins bounded cleanup retries.
+                await asyncio.wait_for(self._cleanup_with_retry(tokens), timeout=5)
 
     async def release_kiot(self, key, actor):
         if not actor:
@@ -273,4 +318,4 @@ class ProxyManager:
         try:
             await self.kiot.out(key.secret, deadline=time.monotonic()+10)
         finally:
-            await self.store.release(token)
+            await self._cleanup_with_retry([token])

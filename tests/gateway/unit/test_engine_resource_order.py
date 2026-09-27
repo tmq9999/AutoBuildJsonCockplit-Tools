@@ -134,3 +134,141 @@ async def test_route_resources_maps_expired_proxy_capacity_to_deadline_exceeded(
             pass
     assert caught.value.code == "deadline_exceeded"
     assert events == ["provider.enter", ("proxy.enter", False), "provider.exit"]
+
+
+@pytest.mark.asyncio
+async def test_route_resources_publishes_resource_wait_transitions():
+    from datetime import datetime, timedelta, timezone
+    from autobuild_json.gateway.engine import Engine
+
+    events = []
+
+    class Admission:
+        def begin_resource_wait(self, resource):
+            events.append(("begin", resource))
+            return resource
+
+        def end_resource_wait(self, episode, outcome):
+            events.append(("end", episode, outcome))
+
+    class ProviderAdmission:
+        @asynccontextmanager
+        async def acquire(self, route, deadline, *, wait=False):
+            yield object()
+
+    class ProxyLeases:
+        @asynccontextmanager
+        async def acquire(self, selection, owner, deadline, *, wait=False):
+            yield SimpleNamespace(proxy="proxy")
+
+    class Transport:
+        async def _validate(self, route, proxy):
+            return None
+
+    engine = Engine.__new__(Engine)
+    engine.admission = Admission()
+    engine.provider_limits = ProviderAdmission()
+    engine.proxies = ProxyLeases()
+    engine.transport = Transport()
+    engine.request_capacity_publish = lambda: events.append("publish")
+
+    selection = SimpleNamespace(mode="fixed")
+    async with engine.route_resources(
+        "route", selection, "owner", datetime.now(timezone.utc) + timedelta(seconds=1)
+    ):
+        pass
+
+    assert events == [
+        ("begin", "provider"), "publish",
+        ("end", "provider", "success"), "publish",
+        ("begin", "proxy"), "publish",
+        ("end", "proxy", "success"), "publish",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_route_resources_does_not_report_proxy_wait_for_direct_selection():
+    from datetime import datetime, timedelta, timezone
+    from autobuild_json.gateway.engine import Engine
+
+    events = []
+
+    class Admission:
+        def begin_resource_wait(self, resource):
+            events.append(("begin", resource))
+            return resource
+
+        def end_resource_wait(self, episode, outcome):
+            events.append(("end", episode, outcome))
+
+    class ProviderAdmission:
+        @asynccontextmanager
+        async def acquire(self, route, deadline, *, wait=False):
+            yield object()
+
+    class ProxyLeases:
+        @asynccontextmanager
+        async def acquire(self, selection, owner, deadline, *, wait=False):
+            yield SimpleNamespace(proxy=None)
+
+    engine = Engine.__new__(Engine)
+    engine.admission = Admission()
+    engine.provider_limits = ProviderAdmission()
+    engine.proxies = ProxyLeases()
+    engine.transport = SimpleNamespace(_validate=lambda route, proxy: asyncio.sleep(0))
+
+    async with engine.route_resources(
+        "route", SimpleNamespace(mode="direct"), "owner",
+        datetime.now(timezone.utc) + timedelta(seconds=1),
+    ):
+        pass
+
+    assert events == [("begin", "provider"), ("end", "provider", "success")]
+
+
+@pytest.mark.asyncio
+async def test_route_resources_marks_unexpected_provider_and_proxy_errors_failed():
+    from datetime import datetime, timedelta, timezone
+    from autobuild_json.gateway.admission import InferenceAdmission
+    from autobuild_json.gateway.engine import Engine
+
+    admission = InferenceAdmission(2)
+
+    class ProviderFailure:
+        @asynccontextmanager
+        async def acquire(self, route, deadline, *, wait=False):
+            raise RuntimeError("provider store failure")
+            yield  # pragma: no cover
+
+    engine = Engine.__new__(Engine)
+    engine.admission = admission
+    engine.provider_limits = ProviderFailure()
+    engine.proxies = SimpleNamespace(acquire=engine.provider_limits.acquire)
+    with pytest.raises(RuntimeError):
+        async with engine.route_resources(
+            "route", SimpleNamespace(mode="fixed"), "owner",
+            datetime.now(timezone.utc) + timedelta(seconds=1),
+        ):
+            pass
+    assert admission.snapshot()["resource_wait_failed"] == 1
+
+    class ProviderSuccess:
+        @asynccontextmanager
+        async def acquire(self, route, deadline, *, wait=False):
+            yield object()
+
+    class ProxyFailure:
+        @asynccontextmanager
+        async def acquire(self, selection, owner, deadline, *, wait=False):
+            raise RuntimeError("proxy store failure")
+            yield  # pragma: no cover
+
+    engine.provider_limits = ProviderSuccess()
+    engine.proxies = ProxyFailure()
+    with pytest.raises(RuntimeError):
+        async with engine.route_resources(
+            "route", SimpleNamespace(mode="fixed"), "owner",
+            datetime.now(timezone.utc) + timedelta(seconds=1),
+        ):
+            pass
+    assert admission.snapshot()["resource_wait_failed"] == 2

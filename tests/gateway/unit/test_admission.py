@@ -152,11 +152,14 @@ async def test_resource_wait_cancel_and_expiry_are_counted_once_with_bounded_his
     admission.end_resource_wait(cancelled, "cancelled")
     expired = admission.begin_resource_wait("provider")
     admission.end_resource_wait(expired, "expired")
+    failed = admission.begin_resource_wait("proxy")
+    admission.end_resource_wait(failed, "failed")
     for _ in range(3000):
         episode = admission.begin_resource_wait("provider")
         admission.end_resource_wait(episode, "success")
     snapshot = admission.snapshot()
     assert snapshot["resource_wait_cancelled"] == 1
     assert snapshot["resource_wait_expired"] == 1
+    assert snapshot["resource_wait_failed"] == 1
     assert len(admission._resource_waits) == 2048
     ticket.release()

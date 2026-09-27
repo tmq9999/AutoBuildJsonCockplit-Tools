@@ -144,3 +144,33 @@ async def test_release_joins_bounded_cleanup_when_cancelled(pg_db):
     finally:
         await blocker.rollback()
         await blocker.close()
+
+
+async def test_disable_resource_deadline_is_bounded_by_locked_health_row(pg_db):
+    from autobuild_json.gateway.proxy.pg_leases import PgLeaseStore
+
+    store = PgLeaseStore(pg_db)
+    resource = "locked-health-fingerprint"
+    async with pg_db.sessions.begin() as session:
+        await session.execute(
+            text("INSERT INTO proxy_health(resource,disabled) VALUES (:resource,false) "
+                 "ON CONFLICT(resource) DO NOTHING"),
+            {"resource": resource},
+        )
+
+    blocker = pg_db.sessions()
+    await blocker.begin()
+    try:
+        await blocker.execute(
+            text("SELECT resource FROM proxy_health WHERE resource=:resource FOR UPDATE"),
+            {"resource": resource},
+        )
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(GatewayError, match="deadline_exceeded") as error:
+            await store.disable_resource(resource, datetime.now(timezone.utc) + timedelta(seconds=0.1))
+        assert error.value.status == 504
+        assert error.value.stage == "proxy"
+        assert asyncio.get_running_loop().time() - started < 0.8
+    finally:
+        await blocker.rollback()
+        await blocker.close()

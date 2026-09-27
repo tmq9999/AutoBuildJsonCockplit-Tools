@@ -219,8 +219,6 @@ async def test_provider_concurrency_is_shared_across_client_keys(pg_db):
     from autobuild_json.gateway.identity.service import IdentityService
     from autobuild_json.gateway.identity.policy import KeyPolicy
     from autobuild_json.gateway.protocols.openai_chat import OpenAIChatCodec
-    from autobuild_json.gateway.errors import GatewayError
-
     async with gateway_environment(pg_db) as env:
         await env.engine.catalog.update_provider(
             env.provider_id,
@@ -242,12 +240,18 @@ async def test_provider_concurrency_is_shared_across_client_keys(pg_db):
         two = await identity.authenticate(key.secret, "openai")
         request = OpenAIChatCodec().decode(BODY, {})
         held = await env.engine.prepare(one, request, env.engine.meta(BODY))
+        second = asyncio.create_task(env.engine.prepare(two, request, env.engine.meta(BODY)))
         try:
-            with pytest.raises(GatewayError, match="upstream_unavailable"):
-                await env.engine.prepare(two, request, env.engine.meta(BODY))
-            assert len(env.upstream_requests) == 1
-        finally:
+            await asyncio.sleep(0.05)
+            assert not second.done(), "provider concurrency must make the second request wait"
             await held.close()
+            prepared = await asyncio.wait_for(second, 2)
+            await prepared.close()
+            assert len(env.upstream_requests) == 2
+        finally:
+            if not second.done():
+                second.cancel()
+                await asyncio.gather(second, return_exceptions=True)
 
 
 async def test_provider_rpm_remains_limited_after_completed_request(pg_db):

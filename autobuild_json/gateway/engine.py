@@ -139,6 +139,28 @@ class Engine:
         if event is not None:
             event.set()
 
+    def _begin_resource_wait(self, resource):
+        admission = getattr(self, "admission", None)
+        begin = getattr(admission, "begin_resource_wait", None)
+        if begin is None:
+            return None
+        episode = begin(resource)
+        publish = getattr(self, "request_capacity_publish", None)
+        if publish is not None:
+            publish()
+        return episode
+
+    def _end_resource_wait(self, episode, outcome="success"):
+        if episode is None:
+            return
+        admission = getattr(self, "admission", None)
+        end = getattr(admission, "end_resource_wait", None)
+        if end is not None:
+            end(episode, outcome)
+        publish = getattr(self, "request_capacity_publish", None)
+        if publish is not None:
+            publish()
+
     async def stop_capacity_publisher(self, timeout=2.0):
         """Stop, flush best-effort, and join the publisher task."""
         task = getattr(self, "_capacity_task", None)
@@ -217,54 +239,53 @@ class Engine:
                 # provider admission rather than holding it while sleeping.
                 provider_args = {"wait": True} if "wait" in inspect.signature(self.provider_limits.acquire).parameters else {}
                 proxy_args = {"wait": True} if "wait" in inspect.signature(self.proxies.acquire).parameters else {}
-                admission = getattr(self, "admission", None)
-                provider_episode = (admission.begin_resource_wait("provider")
-                                    if admission is not None and hasattr(admission, "begin_resource_wait") else None)
+                provider_episode = self._begin_resource_wait("provider")
                 provider_outcome = "success"
                 try:
                     provider_context = self.provider_limits.acquire(route, deadline, **provider_args)
                     async with provider_context:
-                        if provider_episode is not None:
-                            admission.end_resource_wait(provider_episode, "success")
-                            provider_episode = None
-                        publish = getattr(self, "request_capacity_publish", None)
-                        if publish is not None:
-                            publish()
-                        proxy_episode = (admission.begin_resource_wait("proxy")
-                                         if admission is not None and hasattr(admission, "begin_resource_wait") else None)
+                        self._end_resource_wait(provider_episode, "success")
+                        provider_episode = None
+                        # Direct routes have no scarce proxy resource to wait
+                        # for, so they must not create a misleading zero-time
+                        # proxy wait episode.
+                        proxy_episode = (None if getattr(selection, "mode", None) == "direct"
+                                         else self._begin_resource_wait("proxy"))
+                        proxy_outcome = "success"
                         try:
                             # Never let proxy-capacity polling pin a provider slot.
                             # A non-waiting claim is enough to preserve the safe
                             # provider-before-proxy ordering for this attempt.
                             async with self.proxies.acquire(selection, owner, deadline,
                                                              **({"wait": False} if proxy_args else {})) as lease:
-                                if proxy_episode is not None:
-                                    admission.end_resource_wait(proxy_episode, "success")
-                                    proxy_episode = None
+                                self._end_resource_wait(proxy_episode, "success")
+                                proxy_episode = None
                                 await self.transport._validate(route, lease.proxy)
                                 yield lease
                             return
                         except asyncio.CancelledError:
-                            if proxy_episode is not None:
-                                admission.end_resource_wait(proxy_episode, "cancelled")
+                            proxy_outcome = "cancelled"
                             raise
                         except GatewayError as error:
-                            if proxy_episode is not None:
-                                admission.end_resource_wait(proxy_episode, "expired" if error.code == "deadline_exceeded" else "success")
+                            proxy_outcome = "expired" if error.code == "deadline_exceeded" else "failed"
+                            raise
+                        except BaseException:
+                            proxy_outcome = "failed"
                             raise
                         finally:
-                            if proxy_episode is not None:
-                                admission.end_resource_wait(proxy_episode, "success")
+                            self._end_resource_wait(proxy_episode, proxy_outcome)
 
                 except asyncio.CancelledError:
                     provider_outcome = "cancelled"
                     raise
                 except GatewayError as error:
-                    provider_outcome = "expired" if error.code == "deadline_exceeded" else "success"
+                    provider_outcome = "expired" if error.code == "deadline_exceeded" else "failed"
+                    raise
+                except BaseException:
+                    provider_outcome = "failed"
                     raise
                 finally:
-                    if provider_episode is not None:
-                        admission.end_resource_wait(provider_episode, provider_outcome)
+                    self._end_resource_wait(provider_episode, provider_outcome)
 
             except ProxyCapacityError:
                 proxy_capacity = True
@@ -272,9 +293,8 @@ class Engine:
                 if isinstance(deadline, datetime) and datetime.now(timezone.utc) >= deadline:
                     raise GatewayError("deadline_exceeded", 504, "request") from None
                 waiter = getattr(self.proxies, "wait_for_capacity", None)
-                admission = getattr(self, "admission", None)
-                wait_episode = (admission.begin_resource_wait("proxy")
-                                if admission is not None and hasattr(admission, "begin_resource_wait") else None)
+                wait_episode = self._begin_resource_wait("proxy")
+                wait_outcome = "success"
                 try:
                     if waiter is not None:
                         await waiter(selection, owner, deadline)
@@ -283,20 +303,19 @@ class Engine:
                         # predating the explicit wait path.  No resource is held
                         # during this bounded sleep.
                         await asyncio.sleep(min(0.05, max(0, (deadline - datetime.now(timezone.utc)).total_seconds())))
-                    if wait_episode is not None:
-                        admission.end_resource_wait(wait_episode, "success")
-                        wait_episode = None
+                    self._end_resource_wait(wait_episode, "success")
+                    wait_episode = None
                 except asyncio.CancelledError:
-                    if wait_episode is not None:
-                        admission.end_resource_wait(wait_episode, "cancelled")
+                    wait_outcome = "cancelled"
                     raise
                 except GatewayError as error:
-                    if wait_episode is not None:
-                        admission.end_resource_wait(wait_episode, "expired" if error.code == "deadline_exceeded" else "success")
+                    wait_outcome = "expired" if error.code == "deadline_exceeded" else "failed"
+                    raise
+                except BaseException:
+                    wait_outcome = "failed"
                     raise
                 finally:
-                    if wait_episode is not None:
-                        admission.end_resource_wait(wait_episode, "success")
+                    self._end_resource_wait(wait_episode, wait_outcome)
 
     def meta(self, body, idempotency_key=None, *, protocol="openai", session_digest=None):
         now = datetime.now(timezone.utc)

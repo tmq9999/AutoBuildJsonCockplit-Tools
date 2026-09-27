@@ -19,7 +19,7 @@ class MemoryLeaseStore:
         self._rows = {}
         self._disabled = set()
 
-    async def disable_resource(self, resource):
+    async def disable_resource(self, resource, deadline=None):
         async with self._lock:
             self._disabled.add(resource)
 
