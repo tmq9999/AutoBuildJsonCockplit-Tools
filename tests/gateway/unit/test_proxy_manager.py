@@ -70,9 +70,10 @@ async def test_busy_shared_key_and_explicit_release_cannot_interrupt_holder():
     keys = tuple(parse_kiot_keys("synthetic-key", pepper=b"p"*32))
     selection = ProxySelection("kiotproxy", runtime_entries=keys)
     async with a.acquire(selection, uuid4(), deadline()):
-        with pytest.raises(GatewayError, match="proxy_not_ready"):
+        with pytest.raises(GatewayError) as caught:
             async with b.acquire(selection, uuid4(), deadline()):
                 pass
+        assert caught.value.code == "proxy_capacity"
         with pytest.raises(GatewayError, match="proxy_not_ready"):
             await b.release_kiot(keys[0], "admin")
     assert calls == ["/api/v1/proxies/current"]
@@ -90,9 +91,10 @@ async def test_duplicate_endpoint_serializes_different_keys_and_cancel_releases_
                            acquisition_timeout=0.03)
     keys = tuple(parse_kiot_keys("synthetic-A\nsynthetic-B", pepper=b"p"*32))
     async with manager.acquire(ProxySelection("kiotproxy", runtime_entries=keys[:1]), uuid4(), deadline()):
-        with pytest.raises(GatewayError, match="proxy_not_ready"):
+        with pytest.raises(GatewayError) as caught:
             async with manager.acquire(ProxySelection("kiotproxy", runtime_entries=keys[1:]), uuid4(), deadline()):
                 pass
+        assert caught.value.code == "proxy_capacity"
     acquired = asyncio.Event()
     async def holder():
         async with manager.acquire(ProxySelection("kiotproxy", runtime_entries=keys[:1]), uuid4(), deadline()):
@@ -242,11 +244,32 @@ async def test_wait_false_makes_one_claim_without_sleeping():
     selection = ProxySelection("fixed", runtime_entries=(ProxyConfig("http://proxy.invalid:80"),))
     async with manager.acquire(selection, uuid4(), deadline()):
         started = asyncio.get_running_loop().time()
-        with pytest.raises(GatewayError, match="proxy_not_ready"):
+        with pytest.raises(GatewayError) as caught:
             async with manager.acquire(selection, uuid4(), deadline(), wait=False):
                 pass
+        assert caught.value.code == "proxy_capacity"
         assert store.claims == 2
         assert asyncio.get_running_loop().time() - started < 0.1
+
+
+@pytest.mark.asyncio
+async def test_disabled_endpoint_is_permanent_not_capacity_signal():
+    from autobuild_json.gateway.proxy.manager import ProxyManager, endpoint_resource
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from autobuild_json.gateway.proxy.config import ProxySelection
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.models import ProxyConfig
+
+    store = MemoryLeaseStore()
+    proxy = ProxyConfig("http://proxy.invalid:80")
+    await store.disable_resource(endpoint_resource(proxy))
+    manager = ProxyManager(store, acquisition_timeout=.02)
+    selection = ProxySelection("fixed", runtime_entries=(proxy,))
+    with pytest.raises(GatewayError) as caught:
+        async with manager.acquire(selection, uuid4(), deadline(), wait=False):
+            pass
+    assert caught.value.code == "proxy_not_ready"
+    assert manager.snapshot()["capacity_signals"] == 0
 
 
 @pytest.mark.asyncio

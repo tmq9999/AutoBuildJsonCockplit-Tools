@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -95,3 +96,41 @@ async def test_route_resources_releases_provider_before_retrying_proxy_capacity(
         ("provider.enter", True), ("proxy.enter", False), ("validate", "proxy"),
         "proxy.exit", "provider.exit",
     ]
+
+
+@pytest.mark.asyncio
+async def test_route_resources_maps_expired_proxy_capacity_to_deadline_exceeded():
+    from datetime import datetime, timedelta, timezone
+    from autobuild_json.gateway.engine import Engine
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.gateway.proxy.manager import ProxyCapacityError
+
+    events = []
+
+    class ProviderAdmission:
+        @asynccontextmanager
+        async def acquire(self, route, deadline, *, wait=False):
+            events.append("provider.enter")
+            try:
+                await asyncio.sleep(.01)
+                yield object()
+            finally:
+                events.append("provider.exit")
+
+    class ProxyLeases:
+        @asynccontextmanager
+        async def acquire(self, selection, owner, deadline, *, wait=False):
+            events.append(("proxy.enter", wait))
+            raise ProxyCapacityError()
+            yield  # pragma: no cover
+
+    engine = Engine.__new__(Engine)
+    engine.provider_limits = ProviderAdmission()
+    engine.proxies = ProxyLeases()
+    engine.transport = SimpleNamespace()
+    deadline = datetime.now(timezone.utc) + timedelta(milliseconds=1)
+    with pytest.raises(GatewayError) as caught:
+        async with engine.route_resources("route", "selection", "owner", deadline):
+            pass
+    assert caught.value.code == "deadline_exceeded"
+    assert events == ["provider.enter", ("proxy.enter", False), "provider.exit"]

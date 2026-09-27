@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -46,9 +47,19 @@ class ProxyManager:
         self._cursor = 0
         self._wait_attempts = 0
         self._capacity_signals = 0
+        self._waits = deque(maxlen=2048)
+        self._last_wait_ms = 0.0
 
     def snapshot(self):
-        return {"wait_attempts": self._wait_attempts, "capacity_signals": self._capacity_signals}
+        waits = sorted(self._waits)
+        def percentile(percent):
+            if not waits:
+                return 0.0
+            from math import ceil
+            return waits[max(0, ceil(len(waits) * percent) - 1)]
+        return {"wait_attempts": self._wait_attempts, "capacity_signals": self._capacity_signals,
+                "wait_p50_ms": percentile(.50), "wait_p95_ms": percentile(.95),
+                "last_wait_ms": self._last_wait_ms}
 
     async def wait_for_capacity(self, selection, owner, deadline):
         """Wait for a local lease without retaining any provider admission.
@@ -57,13 +68,19 @@ class ProxyManager:
         caller must still perform a fresh claim after acquiring provider
         capacity because another request may win the race.
         """
-        while datetime.now(timezone.utc) < deadline:
-            try:
-                async with self.acquire(selection, owner, deadline, wait=True):
-                    return
-            except ProxyCapacityError:
-                continue
-        raise GatewayError("deadline_exceeded", 504, "proxy")
+        started = time.monotonic()
+        try:
+            while datetime.now(timezone.utc) < deadline:
+                try:
+                    async with self.acquire(selection, owner, deadline, wait=True):
+                        return
+                except ProxyCapacityError:
+                    continue
+            raise GatewayError("deadline_exceeded", 504, "proxy")
+        finally:
+            wait_ms = (time.monotonic() - started) * 1000
+            self._waits.append(wait_ms)
+            self._last_wait_ms = wait_ms
 
     async def _kiot_proxy(self, entry, selection, deadline, acquire_end):
         required = max(0, (deadline-datetime.now(timezone.utc)).total_seconds())
@@ -164,8 +181,12 @@ class ProxyManager:
                         tokens.append(endpoint)
                         proxy = resolved
                     else:
+                        resource = endpoint_resource(entry)
+                        if await self.store.is_disabled(resource):
+                            last_error = GatewayError("proxy_not_ready", 503, "proxy")
+                            continue
                         all_examined = False
-                        endpoint = await self.store.claim(endpoint_resource(entry), owner, deadline)
+                        endpoint = await self.store.claim(resource, owner, deadline)
                         if endpoint is None:
                             capacity_seen = True
                             continue
@@ -185,7 +206,7 @@ class ProxyManager:
                         self._wait_attempts += 1
                     await asyncio.sleep(min(0.05, max(0, acquire_end-time.monotonic())))
             if proxy is None:
-                if wait and capacity_seen:
+                if capacity_seen:
                     self._capacity_signals += 1
                     raise ProxyCapacityError()
                 if invalid_seen:

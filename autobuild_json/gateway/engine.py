@@ -149,7 +149,7 @@ class Engine:
                 proxy_capacity = True
             if proxy_capacity:
                 if isinstance(deadline, datetime) and datetime.now(timezone.utc) >= deadline:
-                    raise GatewayError("proxy_not_ready", 503, "proxy") from None
+                    raise GatewayError("deadline_exceeded", 504, "request") from None
                 waiter = getattr(self.proxies, "wait_for_capacity", None)
                 if waiter is not None:
                     await waiter(selection, owner, deadline)
