@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -37,3 +38,29 @@ def test_wait_sample_memory_is_bounded():
 
     assert len(admission._waits) == 2048
     assert snapshot["wait_p95_ms"] <= 4999
+
+
+@pytest.mark.asyncio
+async def test_stop_reports_cancellation_resistant_publisher_without_detaching_it():
+    engine = Engine.__new__(Engine)
+    engine._capacity_interval = 0
+    release = asyncio.Event()
+
+    async def resistant_worker():
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            # Simulate a writer that cannot immediately honor cancellation.
+            await release.wait()
+
+    engine._capacity_publisher = resistant_worker
+    await engine.start_capacity_publisher()
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await engine.stop_capacity_publisher(timeout=0.01)
+    assert time.monotonic() - started < 0.2
+    assert engine._capacity_task is not None and not engine._capacity_task.done()
+
+    release.set()
+    engine._capacity_task.cancel()
+    await asyncio.gather(engine._capacity_task, return_exceptions=True)

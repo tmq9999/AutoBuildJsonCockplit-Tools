@@ -27,3 +27,8 @@ Integration verification requires the repository's PostgreSQL 18/17 test environ
 - Hardened serving lifespan cleanup so publisher shutdown is attempted after startup failures and background service cleanup runs even when publisher flush/stop raises.
 - Prevented stale event signals from causing duplicate capacity writes and bounded cancellation/join during publisher shutdown.
 - Unit publisher tests still pass (2 passed); Ruff passes. PostgreSQL 18 binaries are present but cannot execute in this environment (dynamic-linker failure during `initdb`), so integration tests remain blocked.
+
+## Fix round 2
+
+- A cancellation-resistant publisher now causes `stop_capacity_publisher()` to raise a bounded timeout instead of silently returning with a live task. The Engine retains ownership/reference so the caller can join it before event-loop shutdown.
+- Added a regression test for this failure contract; publisher tests now report 3 passed.

@@ -153,7 +153,12 @@ class Engine:
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=bounded)
             except (asyncio.TimeoutError, asyncio.CancelledError):
-                pass
+                if not task.done():
+                    # Do not claim shutdown completed while a cancellation-
+                    # resistant writer is still alive. The task remains
+                    # referenced by the Engine so its owner can join it
+                    # before closing the event loop.
+                    raise TimeoutError("capacity publisher did not stop")
         except asyncio.CancelledError:
             task.cancel()
             raise
