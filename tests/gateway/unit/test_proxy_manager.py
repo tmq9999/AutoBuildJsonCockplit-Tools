@@ -221,6 +221,35 @@ async def test_wait_true_reports_retryable_capacity_after_bounded_wait():
 
 
 @pytest.mark.asyncio
+async def test_wait_false_makes_one_claim_without_sleeping():
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from autobuild_json.gateway.proxy.config import ProxySelection
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.models import ProxyConfig
+
+    class CountingStore(MemoryLeaseStore):
+        def __init__(self):
+            super().__init__()
+            self.claims = 0
+
+        async def claim(self, *args, **kwargs):
+            self.claims += 1
+            return await super().claim(*args, **kwargs)
+
+    store = CountingStore()
+    manager = ProxyManager(store, acquisition_timeout=1)
+    selection = ProxySelection("fixed", runtime_entries=(ProxyConfig("http://proxy.invalid:80"),))
+    async with manager.acquire(selection, uuid4(), deadline()):
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(GatewayError, match="proxy_not_ready"):
+            async with manager.acquire(selection, uuid4(), deadline(), wait=False):
+                pass
+        assert store.claims == 2
+        assert asyncio.get_running_loop().time() - started < 0.1
+
+
+@pytest.mark.asyncio
 async def test_wait_true_cancellation_releases_partial_kiot_claims():
     from autobuild_json.gateway.proxy.manager import ProxyManager
     from autobuild_json.gateway.proxy.leases import MemoryLeaseStore

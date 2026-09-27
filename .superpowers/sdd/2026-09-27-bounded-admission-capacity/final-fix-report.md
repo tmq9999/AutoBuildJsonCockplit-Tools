@@ -42,7 +42,8 @@ snapshot reading. Focused unit verification:
   tests/gateway/unit/test_engine_admission.py \
   tests/gateway/unit/test_admission.py \
   tests/gateway/unit/test_proxy_manager.py
-30 passed in 0.64s
+33 passed in 0.51s (including local-gateway environment propagation and
+single-pass `wait=False` proxy-claim regressions)
 ```
 
 ```text
@@ -62,4 +63,6 @@ pytest ...test_provider_admission_wait.py ...test_codex_service_status.py
 ```
 
 The required `data` symlink was preserved. Commits for this wave are recorded
-in the branch history with subject `fix: close final bounded admission review gaps`.
+in the branch history with subjects `fix: close final bounded admission review
+gaps`, `test: preserve local gateway capacity configuration`, and `fix: make
+proxy non-wait claims single pass`.
