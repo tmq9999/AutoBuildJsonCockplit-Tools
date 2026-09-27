@@ -149,16 +149,18 @@ class ProxyManager:
     async def _cleanup_owned(self, tokens, cleanup_end=None):
         await self._cleanup(tokens, cleanup_end)
 
-    async def _cleanup_with_retry(self, tokens, seconds=5):
+    async def _cleanup_with_retry(self, tokens, seconds=0.5, *, attempts=2, raise_failure=True):
         end = time.monotonic() + seconds
         failure = None
-        while tokens and time.monotonic() < end:
+        for _ in range(attempts):
+            if not tokens or time.monotonic() >= end:
+                break
             try:
                 await self._cleanup(tokens, end)
             except Exception as exc:
                 failure = exc
                 await asyncio.sleep(0)
-        if tokens and failure is not None:
+        if raise_failure and tokens and failure is not None:
             raise failure
 
     @asynccontextmanager
@@ -307,7 +309,11 @@ class ProxyManager:
         finally:
             if tokens:
                 # wait_for owns, cancels and joins bounded cleanup retries.
-                await asyncio.wait_for(self._cleanup_with_retry(tokens), timeout=5)
+                # Cleanup failure must not overwrite the primary provider or
+                # Kiot error from this acquisition. Fencing/hard expiry and
+                # the bounded retry remain the durable recovery path.
+                await asyncio.wait_for(
+                    self._cleanup_with_retry(tokens, attempts=1, raise_failure=False), timeout=.3)
 
     async def release_kiot(self, key, actor):
         if not actor:
@@ -318,4 +324,4 @@ class ProxyManager:
         try:
             await self.kiot.out(key.secret, deadline=time.monotonic()+10)
         finally:
-            await self._cleanup_with_retry([token])
+            await self._cleanup_with_retry([token], raise_failure=True)

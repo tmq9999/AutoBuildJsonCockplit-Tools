@@ -485,3 +485,37 @@ async def test_kiot_failure_at_acquisition_expiry_is_not_retried_as_capacity(cod
             pass
     assert caught.value.code == code
     assert await store.claim("kiot:" + key[0].fingerprint, uuid4(), deadline()) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow", [False, True])
+async def test_persistent_release_failure_is_short_bounded_and_preserves_kiot_error(slow):
+    from autobuild_json.gateway.proxy.manager import ProxyManager
+    from autobuild_json.gateway.proxy.leases import MemoryLeaseStore
+    from autobuild_json.gateway.proxy.config import ProxySelection, parse_kiot_keys
+    from autobuild_json.gateway.errors import GatewayError
+
+    class BrokenStore(MemoryLeaseStore):
+        calls = 0
+
+        async def release(self, token):
+            self.calls += 1
+            if slow:
+                await asyncio.sleep(.25)
+            raise GatewayError("deadline_exceeded", 504, "proxy")
+
+    class KiotFailure:
+        async def current(self, *args, **kwargs):
+            await asyncio.sleep(.03)
+            raise GatewayError("kiot_unavailable", 503, "proxy")
+
+    store = BrokenStore()
+    manager = ProxyManager(store, KiotFailure(), acquisition_timeout=.02)
+    keys = tuple(parse_kiot_keys("unavailable", pepper=b"p"*32))
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(GatewayError) as caught:
+        async with manager.acquire(ProxySelection("kiotproxy", runtime_entries=keys), uuid4(), deadline()):
+            pass
+    assert caught.value.code == "kiot_unavailable"
+    assert store.calls <= 2
+    assert asyncio.get_running_loop().time() - started < .9
