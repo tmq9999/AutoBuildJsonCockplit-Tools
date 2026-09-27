@@ -14,7 +14,7 @@ SAFE_CODES = frozenset({
     "image_accounts_required",
     "model_not_supported", "provider_rejected", "unsupported_reasoning_effort",
 })
-SAFE_STAGES = frozenset({"auth", "policy", "storage", "quota", "proxy", "upstream", "stream", "request", "refresh"})
+SAFE_STAGES = frozenset({"auth", "policy", "storage", "quota", "provider", "proxy", "upstream", "stream", "request", "refresh"})
 
 
 class GatewayError(Exception):

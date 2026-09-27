@@ -61,6 +61,9 @@ class ProxyManager:
         self._cursor = 0
         self._wait_attempts = 0
         self._capacity_signals = 0
+        self._expired_waits = 0
+        self._cancelled_waits = 0
+        self._rate_limited_waits = 0
         self._waits = deque(maxlen=2048)
         self._last_wait_ms = 0.0
         self._cleanup_failures = 0
@@ -77,7 +80,10 @@ class ProxyManager:
             return waits[max(0, ceil(len(waits) * percent) - 1)]
         return {"wait_attempts": self._wait_attempts, "capacity_signals": self._capacity_signals,
                 "wait_p50_ms": percentile(.50), "wait_p95_ms": percentile(.95),
-                "last_wait_ms": self._last_wait_ms, "cleanup_failures": self._cleanup_failures}
+                "last_wait_ms": self._last_wait_ms, "cleanup_failures": self._cleanup_failures,
+                "expired_waits": self._expired_waits, "cancelled_waits": self._cancelled_waits,
+                "deadline_expired": self._expired_waits, "cancelled": self._cancelled_waits,
+                "rate_limited": self._rate_limited_waits}
 
     def _resource_lock(self, resource):
         entry = self._resource_locks.get(resource)
@@ -168,6 +174,18 @@ class ProxyManager:
                 except ProxyCapacityError:
                     continue
             raise GatewayError("deadline_exceeded", 504, "proxy")
+        except asyncio.CancelledError:
+            if datetime.now(timezone.utc) >= deadline:
+                self._expired_waits += 1
+            else:
+                self._cancelled_waits += 1
+            raise
+        except GatewayError as exc:
+            if exc.code == "deadline_exceeded":
+                self._expired_waits += 1
+            elif exc.code == "rate_limited":
+                self._rate_limited_waits += 1
+            raise
         finally:
             wait_ms = (time.monotonic() - started) * 1000
             self._waits.append(wait_ms)

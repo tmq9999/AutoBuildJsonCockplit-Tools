@@ -184,6 +184,21 @@ class Engine:
         if publish is not None:
             publish()
 
+    def _record_stage_outcome(self, stage, outcome):
+        admission = getattr(self, "admission", None)
+        record = getattr(admission, "record_stage_outcome", None)
+        if record is not None:
+            record(stage, outcome)
+        publish = getattr(self, "request_capacity_publish", None)
+        if publish is not None:
+            publish()
+
+    @staticmethod
+    def _stage_error(error, stage):
+        if isinstance(error, GatewayError):
+            error.stage = stage
+        return error
+
     async def stop_capacity_publisher(self, timeout=2.0):
         """Stop, flush best-effort, and join the publisher task."""
         task = getattr(self, "_capacity_task", None)
@@ -261,19 +276,24 @@ class Engine:
                 # this context exits before the bounded retry, releasing the
                 # provider admission rather than holding it while sleeping.
                 provider_args = {"wait": True} if "wait" in inspect.signature(self.provider_limits.acquire).parameters else {}
-                proxy_args = {"wait": True} if "wait" in inspect.signature(self.proxies.acquire).parameters else {}
+                proxy_acquire = getattr(self.proxies, "acquire", None)
+                proxy_args = ({"wait": True} if proxy_acquire is not None
+                              and "wait" in inspect.signature(proxy_acquire).parameters else {})
                 provider_episode = self._begin_resource_wait("provider")
+                provider_waiting = True
                 provider_outcome = "success"
                 try:
                     provider_context = self.provider_limits.acquire(route, deadline, **provider_args)
                     async with provider_context:
                         self._end_resource_wait(provider_episode, "success")
                         provider_episode = None
+                        provider_waiting = False
                         # Direct routes have no scarce proxy resource to wait
                         # for, so they must not create a misleading zero-time
                         # proxy wait episode.
                         proxy_episode = (None if getattr(selection, "mode", None) == "direct"
                                          else self._begin_resource_wait("proxy"))
+                        proxy_waiting = getattr(selection, "mode", None) != "direct"
                         proxy_outcome = "success"
                         try:
                             # Never let proxy-capacity polling pin a provider slot.
@@ -283,29 +303,67 @@ class Engine:
                                                              **({"wait": False} if proxy_args else {})) as lease:
                                 self._end_resource_wait(proxy_episode, "success")
                                 proxy_episode = None
+                                proxy_waiting = False
                                 await self.transport._validate(route, lease.proxy)
                                 yield lease
                             return
                         except asyncio.CancelledError:
-                            proxy_outcome = "cancelled"
+                            if proxy_waiting:
+                                proxy_outcome = "cancelled"
+                                self._record_stage_outcome("proxy", "cancelled")
+                            else:
+                                self._record_stage_outcome("upstream", "cancelled")
+                            raise
+                        except ProxyCapacityError:
+                            proxy_outcome = "failed"
                             raise
                         except GatewayError as error:
-                            proxy_outcome = "expired" if error.code == "deadline_exceeded" else "failed"
+                            if proxy_waiting:
+                                proxy_outcome = "expired" if error.code == "deadline_exceeded" else "failed"
+                                if error.code == "deadline_exceeded":
+                                    self._record_stage_outcome("proxy", "expired")
+                                    self._stage_error(error, "proxy")
+                                elif error.code == "rate_limited":
+                                    self._record_stage_outcome("proxy", "rate_limited")
+                                else:
+                                    self._record_stage_outcome("proxy", "failed")
+                            else:
+                                outcome = ("expired" if error.code == "deadline_exceeded" else
+                                           "rate_limited" if error.code == "rate_limited" else "failed")
+                                self._record_stage_outcome("upstream", outcome)
+                                if error.code == "deadline_exceeded":
+                                    self._stage_error(error, "upstream")
                             raise
                         except BaseException:
-                            proxy_outcome = "failed"
+                            if proxy_waiting:
+                                proxy_outcome = "failed"
+                                self._record_stage_outcome("proxy", "failed")
+                            else:
+                                self._record_stage_outcome("upstream", "failed")
                             raise
                         finally:
                             self._end_resource_wait(proxy_episode, proxy_outcome)
 
                 except asyncio.CancelledError:
-                    provider_outcome = "cancelled"
+                    if provider_waiting:
+                        provider_outcome = "cancelled"
+                        self._record_stage_outcome("provider", "cancelled")
                     raise
                 except GatewayError as error:
-                    provider_outcome = "expired" if error.code == "deadline_exceeded" else "failed"
+                    if provider_waiting:
+                        provider_outcome = "expired" if error.code == "deadline_exceeded" else "failed"
+                        if error.code == "deadline_exceeded":
+                            self._record_stage_outcome("provider", "expired")
+                            self._stage_error(error, "provider")
+                        elif error.code == "rate_limited":
+                            self._record_stage_outcome("provider", "rate_limited")
+                        else:
+                            self._record_stage_outcome("provider", "failed")
                     raise
                 except BaseException:
-                    provider_outcome = "failed"
+                    if provider_waiting:
+                        provider_outcome = "failed"
+                        self._record_stage_outcome("provider", "failed")
                     raise
                 finally:
                     self._end_resource_wait(provider_episode, provider_outcome)
@@ -314,13 +372,20 @@ class Engine:
                 proxy_capacity = True
             if proxy_capacity:
                 if isinstance(deadline, datetime) and datetime.now(timezone.utc) >= deadline:
-                    raise GatewayError("deadline_exceeded", 504, "request") from None
+                    self._record_stage_outcome("proxy", "expired")
+                    raise GatewayError("deadline_exceeded", 504, "proxy") from None
                 waiter = getattr(self.proxies, "wait_for_capacity", None)
                 wait_episode = self._begin_resource_wait("proxy")
                 wait_outcome = "success"
                 try:
                     if waiter is not None:
-                        await waiter(selection, owner, deadline)
+                        remaining = max(0, (deadline - datetime.now(timezone.utc)).total_seconds())
+                        if remaining <= 0:
+                            raise GatewayError("deadline_exceeded", 504, "proxy")
+                        try:
+                            await asyncio.wait_for(waiter(selection, owner, deadline), remaining)
+                        except asyncio.TimeoutError:
+                            raise GatewayError("deadline_exceeded", 504, "proxy") from None
                     else:
                         # Compatibility fallback for test/dialect proxy stores
                         # predating the explicit wait path.  No resource is held
@@ -330,12 +395,21 @@ class Engine:
                     wait_episode = None
                 except asyncio.CancelledError:
                     wait_outcome = "cancelled"
+                    self._record_stage_outcome("proxy", "cancelled")
                     raise
                 except GatewayError as error:
                     wait_outcome = "expired" if error.code == "deadline_exceeded" else "failed"
+                    if error.code == "deadline_exceeded":
+                        self._record_stage_outcome("proxy", "expired")
+                        self._stage_error(error, "proxy")
+                    elif error.code == "rate_limited":
+                        self._record_stage_outcome("proxy", "rate_limited")
+                    else:
+                        self._record_stage_outcome("proxy", "failed")
                     raise
                 except BaseException:
                     wait_outcome = "failed"
+                    self._record_stage_outcome("proxy", "failed")
                     raise
                 finally:
                     self._end_resource_wait(wait_episode, wait_outcome)

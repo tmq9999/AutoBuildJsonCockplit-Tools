@@ -199,3 +199,101 @@ async def test_provider_sample_is_one_total_episode_not_poll_slices(pg_db):
     assert snapshot["wait_p50_ms"] >= 300
     assert len(waiter._waits) == 1
     assert snapshot["wait_attempts"] > 1
+
+
+async def test_provider_then_proxy_waits_share_one_deadline_and_leave_no_rows(pg_db):
+    from types import SimpleNamespace
+
+    from autobuild_json.gateway.admission import InferenceAdmission
+    from autobuild_json.gateway.engine import Engine
+    from autobuild_json.gateway.proxy.config import ProxySelection
+    from autobuild_json.gateway.proxy.manager import ProxyManager, endpoint_resource
+    from autobuild_json.models import ProxyConfig
+
+    route, _, _ = await limited_route(pg_db, rpm=600)
+    limits = ProviderLimits(pg_db)
+    store = PgLeaseStore(pg_db)
+    manager = ProxyManager(store, acquisition_timeout=1, heartbeat_interval=.1)
+    proxy = ProxyConfig("http://proxy.invalid:80")
+    selection = ProxySelection("fixed", runtime_entries=(proxy,))
+    provider_holder = limits.acquire(route, future(2))
+    await provider_holder.__aenter__()
+    proxy_holder = await store.claim(endpoint_resource(proxy), uuid4(), future(2))
+
+    engine = Engine.__new__(Engine)
+    engine.admission = InferenceAdmission(2)
+    engine.provider_limits = limits
+    engine.proxies = manager
+    engine.transport = SimpleNamespace(_validate=lambda route, proxy: asyncio.sleep(0))
+    deadline = future(.18)
+
+    async def release_provider():
+        await asyncio.sleep(.08)
+        await provider_holder.__aexit__(None, None, None)
+
+    release = asyncio.create_task(release_provider())
+    try:
+        with pytest.raises(GatewayError) as caught:
+            async with engine.route_resources(route, selection, uuid4(), deadline):
+                pytest.fail("busy proxy must consume the remaining request deadline")
+        assert caught.value.code == "deadline_exceeded"
+        assert caught.value.stage == "proxy"
+        await release
+        assert limits.snapshot()["wait_p50_ms"] >= 50
+        assert manager.snapshot()["last_wait_ms"] > 0
+        assert engine.admission.snapshot()["deadline_expired_by_stage"] == {
+            "provider": 0, "proxy": 1, "upstream": 0,
+        }
+    finally:
+        if not release.done():
+            release.cancel()
+            await asyncio.gather(release, return_exceptions=True)
+        await store.release(proxy_holder)
+
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
+        assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 0
+
+
+async def test_cancelled_proxy_wait_releases_provider_and_proxy_rows(pg_db):
+    from types import SimpleNamespace
+
+    from autobuild_json.gateway.admission import InferenceAdmission
+    from autobuild_json.gateway.engine import Engine
+    from autobuild_json.gateway.proxy.config import ProxySelection
+    from autobuild_json.gateway.proxy.manager import ProxyManager, endpoint_resource
+    from autobuild_json.models import ProxyConfig
+
+    route, _, _ = await limited_route(pg_db, rpm=600)
+    limits = ProviderLimits(pg_db)
+    store = PgLeaseStore(pg_db)
+    manager = ProxyManager(store, acquisition_timeout=1, heartbeat_interval=.1)
+    proxy = ProxyConfig("http://proxy.invalid:80")
+    selection = ProxySelection("fixed", runtime_entries=(proxy,))
+    held = await store.claim(endpoint_resource(proxy), uuid4(), future(2))
+    engine = Engine.__new__(Engine)
+    engine.admission = InferenceAdmission(2)
+    engine.provider_limits = limits
+    engine.proxies = manager
+    engine.transport = SimpleNamespace(_validate=lambda route, proxy: asyncio.sleep(0))
+
+    async def request():
+        async with engine.route_resources(route, selection, uuid4(), future(2)):
+            pytest.fail("busy proxy must keep the request waiting")
+
+    pending = asyncio.create_task(request())
+    while manager.snapshot()["wait_attempts"] == 0:
+        await asyncio.sleep(.01)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await store.release(held)
+
+    assert limits.snapshot()["cancelled"] == 0
+    assert manager.snapshot()["cancelled"] == 1
+    assert engine.admission.snapshot()["cancelled_by_stage"] == {
+        "provider": 0, "proxy": 1, "upstream": 0,
+    }
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
+        assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 0

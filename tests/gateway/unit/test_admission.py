@@ -163,3 +163,14 @@ async def test_resource_wait_cancel_and_expiry_are_counted_once_with_bounded_his
     assert snapshot["resource_wait_failed"] == 1
     assert len(admission._resource_waits) == 2048
     ticket.release()
+
+
+def test_snapshot_exposes_stage_wait_outcomes_separately():
+    admission = InferenceAdmission(capacity=1)
+    admission.record_stage_outcome("provider", "expired")
+    admission.record_stage_outcome("proxy", "cancelled")
+    admission.record_stage_outcome("upstream", "rate_limited")
+    snapshot = admission.snapshot()
+    assert snapshot["deadline_expired_by_stage"] == {"provider": 1, "proxy": 0, "upstream": 0}
+    assert snapshot["cancelled_by_stage"] == {"provider": 0, "proxy": 1, "upstream": 0}
+    assert snapshot["rate_limited_by_stage"] == {"provider": 0, "proxy": 0, "upstream": 1}

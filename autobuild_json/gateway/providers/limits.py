@@ -32,6 +32,7 @@ class ProviderLimits:
         self._wait_attempts = 0
         self._expired_waits = 0
         self._cancelled_waits = 0
+        self._rate_limited_waits = 0
         self._waits = deque(maxlen=2048)
         self._last_wait_ms = 0.0
         self._cleanup_failures = 0
@@ -168,6 +169,9 @@ class ProviderLimits:
             "wait_attempts": self._wait_attempts,
             "expired_waits": self._expired_waits,
             "cancelled_waits": self._cancelled_waits,
+            "deadline_expired": self._expired_waits,
+            "cancelled": self._cancelled_waits,
+            "rate_limited": self._rate_limited_waits,
             "wait_p50_ms": percentile(.50),
             "wait_p95_ms": percentile(.95),
             "last_wait_ms": self._last_wait_ms,
@@ -242,6 +246,8 @@ class ProviderLimits:
                 except GatewayError as exc:
                     if wait and exc.code == "deadline_exceeded":
                         self._expired_waits += 1
+                    elif wait and exc.code == "rate_limited":
+                        self._rate_limited_waits += 1
                     raise
                 if acquired:
                     break

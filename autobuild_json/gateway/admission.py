@@ -77,6 +77,10 @@ class InferenceAdmission:
         self._resource_wait_success = 0
         self._resource_wait_failed = 0
         self._last_resource_wait_ms = 0.0
+        self._stage_outcomes = {
+            stage: {outcome: 0 for outcome in ("expired", "cancelled", "rate_limited", "failed")}
+            for stage in ("provider", "proxy", "upstream")
+        }
 
     def enter(self, deadline):
         return _AdmissionContext(self, deadline)
@@ -106,6 +110,14 @@ class InferenceAdmission:
             self._resource_wait_failed += 1
         else:
             self._resource_wait_success += 1
+        self._emit_metrics()
+
+    def record_stage_outcome(self, stage, outcome):
+        """Record a redacted terminal outcome for a bounded wait stage."""
+        bucket = self._stage_outcomes.get(stage)
+        if bucket is None or outcome not in bucket:
+            return
+        bucket[outcome] += 1
         self._emit_metrics()
 
     async def _acquire(self, deadline):
@@ -199,6 +211,10 @@ class InferenceAdmission:
             "wait_p50_ms": percentile(0.50),
             "wait_p95_ms": percentile(0.95),
             "last_wait_ms": self._last_wait_ms,
+            "queue_wait_p50_ms": percentile(0.50),
+            "queue_wait_p95_ms": percentile(0.95),
+            "queue_wait_expired": self._expired,
+            "queue_wait_cancelled": self._cancelled,
             "resource_waiting": self._resource_waiting,
             "provider_waiting": self._resource_waiting_by_type.get("provider", 0),
             "proxy_waiting": self._resource_waiting_by_type.get("proxy", 0),
@@ -210,4 +226,16 @@ class InferenceAdmission:
             "resource_wait_p50_ms": resource_percentile(.50),
             "resource_wait_p95_ms": resource_percentile(.95),
             "last_resource_wait_ms": self._last_resource_wait_ms,
+            "deadline_expired_by_stage": {
+                stage: values["expired"] for stage, values in self._stage_outcomes.items()
+            },
+            "cancelled_by_stage": {
+                stage: values["cancelled"] for stage, values in self._stage_outcomes.items()
+            },
+            "rate_limited_by_stage": {
+                stage: values["rate_limited"] for stage, values in self._stage_outcomes.items()
+            },
+            "failed_by_stage": {
+                stage: values["failed"] for stage, values in self._stage_outcomes.items()
+            },
         }

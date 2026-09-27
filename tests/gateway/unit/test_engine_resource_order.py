@@ -135,6 +135,7 @@ async def test_route_resources_maps_expired_proxy_capacity_to_deadline_exceeded(
         async with engine.route_resources("route", "selection", "owner", deadline):
             pass
     assert caught.value.code == "deadline_exceeded"
+    assert caught.value.stage == "proxy"
     assert events == ["provider.enter", ("proxy.enter", False), "provider.exit"]
 
 
@@ -226,6 +227,147 @@ async def test_route_resources_does_not_report_proxy_wait_for_direct_selection()
         pass
 
     assert events == [("begin", "provider"), ("end", "provider", "success")]
+
+
+@pytest.mark.asyncio
+async def test_route_resources_maps_provider_deadline_to_provider_stage():
+    from datetime import datetime, timedelta, timezone
+    from autobuild_json.gateway.engine import Engine
+    from autobuild_json.gateway.errors import GatewayError
+
+    class ProviderAdmission:
+        @asynccontextmanager
+        async def acquire(self, route, deadline, *, wait=False):
+            raise GatewayError("deadline_exceeded", 504, "upstream")
+            yield  # pragma: no cover
+
+    engine = Engine.__new__(Engine)
+    from autobuild_json.gateway.admission import InferenceAdmission
+
+    engine.admission = InferenceAdmission(1)
+    engine.provider_limits = ProviderAdmission()
+    engine.proxies = SimpleNamespace()
+    with pytest.raises(GatewayError) as caught:
+        async with engine.route_resources(
+            "route", SimpleNamespace(mode="direct"), "owner",
+            datetime.now(timezone.utc) + timedelta(seconds=1),
+        ):
+            pass
+    assert caught.value.code == "deadline_exceeded"
+    assert caught.value.stage == "provider"
+    assert engine.admission.snapshot()["deadline_expired_by_stage"] == {
+        "provider": 1, "proxy": 0, "upstream": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_route_resources_uses_one_deadline_across_provider_and_proxy_waits():
+    from datetime import datetime, timedelta, timezone
+    from autobuild_json.gateway.engine import Engine
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.gateway.proxy.manager import ProxyCapacityError
+
+    events = []
+
+    class ProviderAdmission:
+        @asynccontextmanager
+        async def acquire(self, route, deadline, *, wait=False):
+            events.append("provider.enter")
+            try:
+                await asyncio.sleep(.01)
+                yield object()
+            finally:
+                events.append("provider.exit")
+
+    class ProxyLeases:
+        @asynccontextmanager
+        async def acquire(self, selection, owner, deadline, *, wait=False):
+            events.append("proxy.claim")
+            raise ProxyCapacityError()
+            yield  # pragma: no cover
+
+        async def wait_for_capacity(self, selection, owner, deadline):
+            await asyncio.sleep(.05)
+
+    engine = Engine.__new__(Engine)
+    from autobuild_json.gateway.admission import InferenceAdmission
+
+    engine.admission = InferenceAdmission(1)
+    engine.provider_limits = ProviderAdmission()
+    engine.proxies = ProxyLeases()
+    started = asyncio.get_running_loop().time()
+    deadline = datetime.now(timezone.utc) + timedelta(milliseconds=25)
+    with pytest.raises(GatewayError) as caught:
+        async with engine.route_resources(
+            "route", SimpleNamespace(mode="fixed"), "owner", deadline,
+        ):
+            pass
+    assert caught.value.code == "deadline_exceeded"
+    assert caught.value.stage == "proxy"
+    assert asyncio.get_running_loop().time() - started < .08
+    assert events == ["provider.enter", "proxy.claim", "provider.exit"]
+    assert engine.admission.snapshot()["deadline_expired_by_stage"] == {
+        "provider": 0, "proxy": 1, "upstream": 0,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_outcome"),
+    [
+        ("deadline", "expired"),
+        ("rate_limited", "rate_limited"),
+        ("cancelled", "cancelled"),
+    ],
+)
+async def test_route_resources_attributes_post_acquisition_outcome_once_to_upstream(
+    failure, expected_outcome,
+):
+    from datetime import datetime, timedelta, timezone
+    from autobuild_json.gateway.admission import InferenceAdmission
+    from autobuild_json.gateway.engine import Engine
+    from autobuild_json.gateway.errors import GatewayError
+
+    class ProviderAdmission:
+        @asynccontextmanager
+        async def acquire(self, route, deadline, *, wait=False):
+            yield object()
+
+    class ProxyLeases:
+        @asynccontextmanager
+        async def acquire(self, selection, owner, deadline, *, wait=False):
+            yield SimpleNamespace(proxy=None)
+
+    engine = Engine.__new__(Engine)
+    engine.admission = InferenceAdmission(2)
+    engine.provider_limits = ProviderAdmission()
+    engine.proxies = ProxyLeases()
+    engine.transport = SimpleNamespace(_validate=lambda route, proxy: asyncio.sleep(0))
+    error = (asyncio.CancelledError() if failure == "cancelled" else
+             GatewayError("deadline_exceeded", 504, "request") if failure == "deadline" else
+             GatewayError("rate_limited", 429, "upstream", 1))
+    caught = None
+    try:
+        async with engine.route_resources(
+            "route", SimpleNamespace(mode="direct"), "owner",
+            datetime.now(timezone.utc) + timedelta(seconds=1),
+        ):
+            raise error
+    except BaseException as exc:
+        caught = exc
+
+    assert caught is error
+    if failure == "deadline":
+        assert caught.stage == "upstream"
+    snapshot = engine.admission.snapshot()
+    field = {
+        "expired": "deadline_expired_by_stage",
+        "cancelled": "cancelled_by_stage",
+        "rate_limited": "rate_limited_by_stage",
+    }[expected_outcome]
+    assert snapshot[field] == {"provider": 0, "proxy": 0, "upstream": 1}
+    assert snapshot["resource_wait_expired"] == 0
+    assert snapshot["resource_wait_cancelled"] == 0
 
 
 @pytest.mark.asyncio
