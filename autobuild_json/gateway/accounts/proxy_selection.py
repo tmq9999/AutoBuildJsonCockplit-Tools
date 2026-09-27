@@ -20,7 +20,16 @@ class AccountProxyResolver:
                     raise GatewayError('proxy_not_ready', 503, 'proxy')
                 from uuid import UUID
                 loader = getattr(self.profiles, 'load', self.profiles)
-                selection = await loader(UUID(stamp['proxy_id']))
+                identity = UUID(stamp['proxy_id'])
+                # ProfileStore can load through this transaction's session;
+                # this preserves the dependency stamp without checking out a
+                # second pooled connection while provider/credential locks are held.
+                load_in_session = getattr(self.profiles, 'load_in_session', None)
+                if load_in_session is None:
+                    owner = getattr(loader, '__self__', None)
+                    load_in_session = getattr(owner, 'load_in_session', None)
+                selection = (await load_in_session(session, identity) if load_in_session is not None
+                             else await loader(identity))
         return selection, stamp
 
     async def resolve(self, credential_id):

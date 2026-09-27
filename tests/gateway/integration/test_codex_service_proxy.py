@@ -11,6 +11,7 @@ from sqlalchemy import text
 from autobuild_json.gateway.accounts.imports import CODEX_PROVIDER
 from autobuild_json.gateway.accounts.proxy_selection import AccountProxyResolver
 from autobuild_json.gateway.admin.schemas import ProxyInput
+from autobuild_json.gateway.proxy.profiles import ProfileStore
 from tests.gateway.codex_admin_support import ORIGIN, account, private_env
 
 pytestmark = [pytest.mark.postgres, pytest.mark.asyncio]
@@ -88,6 +89,33 @@ async def test_all_profile_modes_are_storage_only_and_safe(pg_db, settings, mode
             assert audit == {"actor": "admin", "record_id": CODEX_PROVIDER,
                              "details": {"version": 2, "proxy_profile_id": str(profile)}}
             assert await session.scalar(text("SELECT count(*) FROM requests")) == 0
+
+
+async def test_proxy_policy_does_not_nested_checkout_under_small_pool(pg_db, settings):
+    """Concurrent policy reads must not deadlock on resolver/profile sessions."""
+    from pydantic import SecretStr
+    from autobuild_json.gateway.storage.db import make_database
+
+    async with private_env(pg_db, settings) as (_client, services):
+        credential = await account(services)
+        profile = await services.profiles.create(
+            ProxyInput(name="Pool regression", mode="fixed",
+                       entries_text=SecretStr("http://proxy.example:8080")))
+        async with pg_db.sessions.begin() as session:
+            await session.execute(text("UPDATE credentials SET profile_id=:profile WHERE id=:id"),
+                                  {"id": credential, "profile": profile})
+        async with pg_db.sessions() as session:
+            schema = await session.scalar(text("SELECT current_schema()"))
+        small = make_database(SecretStr(pg_db.engine.url.render_as_string(hide_password=False)),
+                              schema=schema, pool_size=3, max_overflow=0, pool_timeout=0.2)
+        try:
+            profiles = ProfileStore(small, services.vault, b"p" * 32)
+            for loader in (profiles, profiles.load):
+                resolver = AccountProxyResolver(small, loader)
+                policies = await asyncio.gather(*(resolver.policy(credential) for _ in range(3)))
+                assert [policy.mode for policy, _stamp in policies] == ["fixed"] * 3
+        finally:
+            await small.close()
 
 
 async def test_proxy_update_preserves_raw_config_and_versions_exactly(pg_db, settings):

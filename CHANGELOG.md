@@ -5,6 +5,32 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ## [Unreleased] — 2026-09-24
 
+### Proxy burst follow-up — 2026-09-27
+
+- Corrected a real PostgreSQL pool-starvation deadlock in account proxy
+  resolution. `AccountProxyResolver` previously held provider/credential/profile
+  row locks and then `ProfileStore.load()` checked out a second pooled
+  connection. Concurrent proxy requests could therefore produce
+  `storage_unavailable`, health 503s, and cascading request timeouts. Profile
+  material is now loaded through the already-held transaction session; custom
+  loaders retain the compatibility fallback.
+- Added a PostgreSQL regression test with a three-connection pool and concurrent
+  policy reads. The test failed before the change with a QueuePool timeout and
+  passes after it. The focused proxy/egress/rotation/pool/resource suite passes
+  **93 tests**.
+- Restarted the local gateway with the corrected HTTP pool
+  `192.168.1.17:7001–7020` and ran real Codex Responses traffic through it.
+  A 100-request burst produced **15 HTTP 200** responses with complete usage,
+  **84 explicit upstream admission rejections**, and no storage error, 504, or
+  health 503. A real post-restart smoke request returned **13 input / 8 output**
+  tokens; the configured proxy profile remained attached.
+- A 100-user, three-step real workflow (code → tests → review) completed **89/100**
+  workflows and **276** successful Responses with usage recorded: 66,554 input,
+  59,994 output, 13,321 reasoning tokens. The remaining failures were explicit
+  provider-capacity/rate-limit responses plus 11 upstream stream errors; no
+  `storage_unavailable` or 504 occurred. Temporary keys/customers were revoked
+  and the proxy profile was retained.
+
 ### Multi-key concurrency review — 2026-09-27
 
 - A real local load of 128 temporary API keys (384 concurrent `/v1/models`

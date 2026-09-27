@@ -1,5 +1,42 @@
 # Implementation status
 
+## Proxy pool starvation fix and 100-user real workflow — 2026-09-27
+
+The first 100-user real Codex burst through HTTP proxies
+`192.168.1.17:7001–7020` exposed a concrete pool deadlock: proxy policy held
+provider/credential/profile locks on one PostgreSQL connection and loaded the
+encrypted profile with a second connection. This exhausted the bounded pool and
+caused 18 storage 503s, two health 503s, and cascading 504s in the initial run.
+`ProfileStore.load_in_session()` now decrypts/parses the profile using the
+existing transaction session, while the standalone `load()` API remains intact.
+
+The real PostgreSQL regression reproduced the old QueuePool timeout with a
+three-connection pool and passes after the change. The focused proxy,
+egress, rotation, pool-dispatch, and resource-order suite is **93/93 passed**.
+
+After restarting the running service to load the fix:
+
+- 100 simultaneous real `/v1/responses` requests: **15 HTTP 200** with complete
+  usage, 84 explicit `upstream_unavailable` admission responses, one upstream
+  stream error, **0 storage errors**, **0 HTTP 504**, and health **59/59 HTTP
+  200**. The configured provider profile remained `provider`-sourced and all
+  temporary keys were revoked.
+- 100 concurrent developer workflows, each making three real requests (code,
+  tests, review), with bounded retry only for explicit capacity/rate-limit
+  errors: **89/100 workflows completed**, 276 successful Responses, and usage
+  totals of 66,554 input, 59,994 output, and 13,321 reasoning tokens. PostgreSQL
+  peaked at 28 connections; no storage 503 or 504 occurred. The 19 health 429s
+  were the deliberate per-peer ingress limit during the 600-request/minute
+  burst, not database health failures.
+
+The service's current Codex provider admission limit is 16 concurrent requests.
+That limit is intentionally surfaced as a typed `upstream_unavailable` response;
+it is not relabeled as a network error. Increase it only after matching the
+upstream account capacity and proxy/DB limits. Eleven workflow attempts returned
+typed upstream stream errors (including five unsupported event/feature cases),
+which require upstream event evidence before changing the parser; they were not
+converted into false success or usage.
+
 ## Multi-key concurrency review — 2026-09-27
 
 A real local fan-out created temporary customer keys through the private admin

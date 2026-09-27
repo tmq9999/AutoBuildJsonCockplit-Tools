@@ -36,7 +36,10 @@ class ProfileStore:
 
     async def load(self, identity):
         async with self.db.sessions() as session:
-            row = (await session.execute(text("SELECT * FROM proxy_profiles WHERE id=:id"), {"id": identity})).mappings().first()
+            return await self.load_in_session(session, identity)
+
+    async def load_in_session(self, session, identity):
+        row = (await session.execute(text("SELECT * FROM proxy_profiles WHERE id=:id"), {"id": identity})).mappings().first()
         if row is None:
             raise GatewayError("not_found", 404)
         raw = self.vault.open("proxy_profile", identity, Ciphertext.from_dict(row["encrypted_entries"])).decode()

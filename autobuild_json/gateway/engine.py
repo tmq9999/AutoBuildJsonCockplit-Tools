@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
@@ -76,6 +76,23 @@ class Engine:
         model_id = await self.catalog.resolve_model(principal, model)
         return routing_session.session_digest(self.digest_key, principal, model_id, value)
 
+    @asynccontextmanager
+    async def route_resources(self, route, selection, owner, deadline):
+        """Admit upstream capacity before claiming a scarce proxy lease.
+
+        Provider admission is the bounded resource that decides whether a
+        request may dispatch.  Acquiring a proxy first lets a burst of
+        rejected requests occupy every proxy lease while waiting for provider
+        slots, which in turn consumes database connections and can starve
+        health/admin traffic.  The provider slot is therefore acquired first;
+        the proxy is claimed only after admission succeeds and is released
+        before the provider admission is released.
+        """
+        async with self.provider_limits.acquire(route, deadline):
+            async with self.proxies.acquire(selection, owner, deadline) as lease:
+                await self.transport._validate(route, lease.proxy)
+                yield lease
+
     def meta(self, body, idempotency_key=None, *, protocol="openai", session_digest=None):
         now = datetime.now(timezone.utc)
         claim, payload = None, None
@@ -107,38 +124,36 @@ class Engine:
                 if self.proxy_resolver is None:
                     raise GatewayError("proxy_not_ready", 503)
                 selection = await self.proxy_resolver(route.proxy_profile_id)
-            async with self.proxies.acquire(selection, meta.request_id, meta.deadline) as lease:
-                await self.transport._validate(route, lease.proxy)
-                async with self.provider_limits.acquire(route,meta.deadline):
-                    await self.credential(route)
-                    await routing_session.revalidate(self, principal, request, route)
-                    attempt = uuid4()
-                    await self.ledger.mark_dispatched(meta.request_id, attempt, route=route)
-                    dispatched = True
+            async with self.route_resources(route, selection, meta.request_id, meta.deadline) as lease:
+                await self.credential(route)
+                await routing_session.revalidate(self, principal, request, route)
+                attempt = uuid4()
+                await self.ledger.mark_dispatched(meta.request_id, attempt, route=route)
+                dispatched = True
+                try:
+                    # The attribution transaction can wait on configuration
+                    # writers. Fence again before any provider HTTP, just as
+                    # generation does, and retain proof of zero dispatch.
                     try:
-                        # The attribution transaction can wait on configuration
-                        # writers. Fence again before any provider HTTP, just as
-                        # generation does, and retain proof of zero dispatch.
-                        try:
-                            await routing_session.revalidate(self, principal, request, route)
-                        except BaseException:
-                            known_rejection = attempt
-                            raise
-                        count = await self.adapters[route.adapter].count(request, route, lease)
-                    except UpstreamRejected as exc:
+                        await routing_session.revalidate(self, principal, request, route)
+                    except BaseException:
                         known_rejection = attempt
-                        received_at = time.monotonic()
-                        await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
-                        dispatched = False
-                        if exc.upstream_status == 429:
-                            await self.catalog.cooldown(route.provider_id, None,
-                                                        exc.retry_after if exc.retry_after is not None else 60,
-                                                        started_at=received_at)
-                            if exc.retry_after is not None:
-                                exc.retry_after = await self.catalog.retry_after(principal, request, binding_id=route.binding_id)
                         raise
-                    await self.ledger.settle(meta.request_id, Usage(0, 0), attempt_id=attempt)
-                    return count
+                    count = await self.adapters[route.adapter].count(request, route, lease)
+                except UpstreamRejected as exc:
+                    known_rejection = attempt
+                    received_at = time.monotonic()
+                    await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
+                    dispatched = False
+                    if exc.upstream_status == 429:
+                        await self.catalog.cooldown(route.provider_id, None,
+                                                    exc.retry_after if exc.retry_after is not None else 60,
+                                                    started_at=received_at)
+                        if exc.retry_after is not None:
+                            exc.retry_after = await self.catalog.retry_after(principal, request, binding_id=route.binding_id)
+                    raise
+                await self.ledger.settle(meta.request_id, Usage(0, 0), attempt_id=attempt)
+                return count
         except BaseException:
             if known_rejection is not None:
                 await self.ledger.reject_and_release(meta.request_id, known_rejection)
@@ -219,9 +234,8 @@ class Engine:
                     if self.proxy_resolver is None:
                         raise GatewayError("proxy_not_ready", 503, "proxy")
                     selection = await self.proxy_resolver(selected.proxy_profile_id)
-                lease = await stack.enter_async_context(self.proxies.acquire(selection, meta.request_id, deadline))
-                await self.transport._validate(selected,lease.proxy)
-                await stack.enter_async_context(self.provider_limits.acquire(selected,deadline))
+                lease = await stack.enter_async_context(
+                    self.route_resources(selected, selection, meta.request_id, deadline))
                 attempt = uuid4()
                 # Resolve credential before dispatch flag so bad local config has no
                 # uncertain-charge side effect. Adapter repeats current enabled check.
