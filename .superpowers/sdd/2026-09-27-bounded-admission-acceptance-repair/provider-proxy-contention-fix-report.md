@@ -46,5 +46,10 @@ overflow-key map retains that assignment so a later same-key lookup cannot
 create a dedicated lock while the shard lock is held. Deterministic capacity=1
 tests cover this migration for provider and proxy keys.
 
+Active overflow assignments are removed only when their entry user count reaches
+zero. This prevents an untracked overflow key from migrating to a new dedicated
+lock while its shard entry is still held; the migration regression covers keys
+that exceed the dedicated map capacity.
+
 No live inference, gateway restart, live database write, data symlink change,
 push, or merge was performed.

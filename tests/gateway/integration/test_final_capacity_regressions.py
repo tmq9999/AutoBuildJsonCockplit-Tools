@@ -174,6 +174,13 @@ async def test_provider_lock_reservation_prevents_duplicate_same_key_lock(pg_db)
     again_migrated = limits._provider_lock("migrated")
     assert migrated is again_migrated
     migrated.users -= 2
+    limits._provider_locks.clear()
+    limits._provider_lock("anchor").users = 0
+    overflow = limits._provider_lock("overflow")
+    new_entry = limits._provider_lock("new")
+    assert limits._provider_lock("overflow") is overflow
+    limits._provider_unlock("overflow", overflow)
+    limits._provider_unlock("new", new_entry)
     first.users -= 2
     other.users -= 1
 
@@ -198,6 +205,13 @@ async def test_proxy_lock_reservation_prevents_duplicate_same_key_lock(pg_db):
     again_migrated = manager._resource_lock("migrated")
     assert migrated is again_migrated
     migrated.users -= 2
+    manager._resource_locks.clear()
+    manager._resource_lock("anchor").users = 0
+    overflow = manager._resource_lock("overflow")
+    new_entry = manager._resource_lock("new")
+    assert manager._resource_lock("overflow") is overflow
+    manager._resource_unlock("overflow", overflow)
+    manager._resource_unlock("new", new_entry)
     first.users -= 2
     other.users -= 1
 

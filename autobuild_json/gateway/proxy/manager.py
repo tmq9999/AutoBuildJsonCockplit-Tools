@@ -103,6 +103,11 @@ class ProxyManager:
         entry.users += 1
         return entry
 
+    def _resource_unlock(self, resource, entry):
+        entry.users -= 1
+        if entry.users == 0 and self._resource_overflow_keys.get(resource) is entry:
+            del self._resource_overflow_keys[resource]
+
     @staticmethod
     def _close_operation(operation):
         close = getattr(operation, "close", None)
@@ -128,7 +133,7 @@ class ProxyManager:
         remaining = acquire_end - time.monotonic()
         if remaining <= 0:
             self._close_operation(operation)
-            entry.users -= 1
+            self._resource_unlock(resource, entry)
             raise ProxyCapacityError()
         acquired = False
         try:
@@ -145,7 +150,7 @@ class ProxyManager:
         finally:
             if acquired:
                 entry.lock.release()
-            entry.users -= 1
+            self._resource_unlock(resource, entry)
 
     async def wait_for_capacity(self, selection, owner, deadline):
         """Wait for a local lease without retaining any provider admission.

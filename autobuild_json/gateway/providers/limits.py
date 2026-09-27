@@ -62,6 +62,11 @@ class ProviderLimits:
         entry.users += 1
         return entry
 
+    def _provider_unlock(self, provider_id, entry):
+        entry.users -= 1
+        if entry.users == 0 and self._provider_overflow_keys.get(provider_id) is entry:
+            del self._provider_overflow_keys[provider_id]
+
     async def _try_acquire_bounded(self, route, deadline, identity):
         remaining = self._remaining(deadline)
         if remaining <= 0:
@@ -83,7 +88,7 @@ class ProviderLimits:
         finally:
             if acquired:
                 provider_entry.lock.release()
-            provider_entry.users -= 1
+            self._provider_unlock(route.provider_id, provider_entry)
 
     async def _set_lock_timeout(self, session, deadline):
         remaining = self._remaining(deadline)
