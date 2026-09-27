@@ -51,10 +51,10 @@ zero. This prevents an untracked overflow key from migrating to a new dedicated
 lock while its shard entry is still held; the migration regression covers keys
 that exceed the dedicated map capacity.
 
-The overflow assignment registry intentionally retains every active overflow
-key, rather than applying a second cap. Active reservations are bounded by the
-process admission gate; entries are deleted by the unlock helper when users
-reaches zero.
+Overflow mode is bounded: dedicated entries remain capped, and a fixed set of
+32 deterministic shard locks handles every key after the cap is reached. Once
+overflow mode starts, new keys never migrate back to dedicated entries, so
+there is no per-key overflow registry or unbounded lock map.
 
 No live inference, gateway restart, live database write, data symlink change,
 push, or merge was performed.

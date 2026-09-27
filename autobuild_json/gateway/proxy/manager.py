@@ -66,7 +66,7 @@ class ProxyManager:
         self._cleanup_failures = 0
         self._resource_locks = {}
         self._resource_lock_overflow = tuple(_ResourceLockEntry() for _ in range(32))
-        self._resource_overflow_keys = {}
+        self._resource_overflow_mode = False
 
     def snapshot(self):
         waits = sorted(self._waits)
@@ -80,12 +80,13 @@ class ProxyManager:
                 "last_wait_ms": self._last_wait_ms, "cleanup_failures": self._cleanup_failures}
 
     def _resource_lock(self, resource):
-        overflow = self._resource_overflow_keys.get(resource)
-        if overflow is not None:
-            overflow.users += 1
-            return overflow
         entry = self._resource_locks.get(resource)
         if entry is not None:
+            entry.users += 1
+            return entry
+        if self._resource_overflow_mode:
+            digest = hashlib.sha256(resource.encode()).digest()
+            entry = self._resource_lock_overflow[int.from_bytes(digest[:4]) % len(self._resource_lock_overflow)]
             entry.users += 1
             return entry
         if len(self._resource_locks) >= self._RESOURCE_LOCK_CAPACITY:
@@ -95,13 +96,9 @@ class ProxyManager:
                     del self._resource_locks[key]
                     break
         if len(self._resource_locks) >= self._RESOURCE_LOCK_CAPACITY:
-            entry = self._resource_overflow_keys.get(resource)
-            if entry is None:
-                digest = hashlib.sha256(resource.encode()).digest()
-                entry = self._resource_lock_overflow[int.from_bytes(digest[:4]) % len(self._resource_lock_overflow)]
-                # Active overflow assignments are bounded by process admission;
-                # retain every key until its reservation is released.
-                self._resource_overflow_keys[resource] = entry
+            self._resource_overflow_mode = True
+            digest = hashlib.sha256(resource.encode()).digest()
+            entry = self._resource_lock_overflow[int.from_bytes(digest[:4]) % len(self._resource_lock_overflow)]
         else:
             entry = _ResourceLockEntry()
             self._resource_locks[resource] = entry
@@ -110,8 +107,6 @@ class ProxyManager:
 
     def _resource_unlock(self, resource, entry):
         entry.users -= 1
-        if entry.users == 0 and self._resource_overflow_keys.get(resource) is entry:
-            del self._resource_overflow_keys[resource]
 
     @staticmethod
     def _close_operation(operation):

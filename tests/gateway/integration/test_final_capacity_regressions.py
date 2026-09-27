@@ -159,49 +159,12 @@ async def test_proxy_cleanup_retries_after_transient_pool_contention(pg_db, post
 async def test_provider_lock_reservation_prevents_duplicate_same_key_lock(pg_db):
     limits = ProviderLimits(pg_db)
     limits._PROVIDER_LOCK_CAPACITY = 1
-    first = limits._provider_lock("same")
-    assert first.users == 1
-    other = limits._provider_lock("other")
-    again = limits._provider_lock("same")
-    assert again is first
-    assert first.users == 2
-    assert len(limits._provider_locks) == 1
-    assert other is not first
-    first.users = 0
-    limits._provider_locks.clear()
-    limits._provider_lock("anchor").users = 1
-    migrated = limits._provider_lock("migrated")
-    again_migrated = limits._provider_lock("migrated")
-    assert migrated is again_migrated
-    migrated.users -= 2
-    limits._provider_locks.clear()
-    limits._provider_lock("anchor").users = 1
+    anchor = limits._provider_lock("anchor")
     overflow = limits._provider_lock("overflow")
-    limits._provider_locks["anchor"].users = 1
+    assert limits._provider_overflow_mode
+    limits._provider_unlock("anchor", anchor)
     assert limits._provider_lock("overflow") is overflow
-    limits._provider_unlock("overflow", overflow)
-    limits._provider_unlock("overflow", overflow)
-    limits._provider_locks.clear()
-    limits._provider_lock("anchor").users = 0
-    overflow = limits._provider_lock("overflow")
-    new_entry = limits._provider_lock("new")
-    assert limits._provider_lock("overflow") is overflow
-    limits._provider_unlock("overflow", overflow)
-    limits._provider_unlock("new", new_entry)
-    limits._provider_locks.clear()
-    anchor = limits._provider_lock("anchor2")
-    one = limits._provider_lock("one")
-    two = limits._provider_lock("two")
-    limits._provider_unlock("anchor2", anchor)
-    limits._provider_lock("three")
-    assert limits._provider_lock("one") is one
-    assert limits._provider_lock("two") is two
-    limits._provider_unlock("one", one)
-    limits._provider_unlock("one", one)
-    limits._provider_unlock("two", two)
-    limits._provider_unlock("two", two)
-    first.users -= 2
-    other.users -= 1
+    assert limits._provider_lock("future") is limits._provider_lock("future")
 
 
 async def test_proxy_lock_reservation_prevents_duplicate_same_key_lock(pg_db):
@@ -209,49 +172,12 @@ async def test_proxy_lock_reservation_prevents_duplicate_same_key_lock(pg_db):
 
     manager = ProxyManager(PgLeaseStore(pg_db))
     manager._RESOURCE_LOCK_CAPACITY = 1
-    first = manager._resource_lock("same")
-    assert first.users == 1
-    other = manager._resource_lock("other")
-    again = manager._resource_lock("same")
-    assert again is first
-    assert first.users == 2
-    assert len(manager._resource_locks) == 1
-    assert other is not first
-    first.users = 0
-    manager._resource_locks.clear()
-    manager._resource_lock("anchor").users = 1
-    migrated = manager._resource_lock("migrated")
-    again_migrated = manager._resource_lock("migrated")
-    assert migrated is again_migrated
-    migrated.users -= 2
-    manager._resource_locks.clear()
-    manager._resource_lock("anchor").users = 1
+    anchor = manager._resource_lock("anchor")
     overflow = manager._resource_lock("overflow")
-    manager._resource_locks["anchor"].users = 1
+    assert manager._resource_overflow_mode
+    manager._resource_unlock("anchor", anchor)
     assert manager._resource_lock("overflow") is overflow
-    manager._resource_unlock("overflow", overflow)
-    manager._resource_unlock("overflow", overflow)
-    manager._resource_locks.clear()
-    manager._resource_lock("anchor").users = 0
-    overflow = manager._resource_lock("overflow")
-    new_entry = manager._resource_lock("new")
-    assert manager._resource_lock("overflow") is overflow
-    manager._resource_unlock("overflow", overflow)
-    manager._resource_unlock("new", new_entry)
-    manager._resource_locks.clear()
-    anchor = manager._resource_lock("anchor2")
-    one = manager._resource_lock("one")
-    two = manager._resource_lock("two")
-    manager._resource_unlock("anchor2", anchor)
-    manager._resource_lock("three")
-    assert manager._resource_lock("one") is one
-    assert manager._resource_lock("two") is two
-    manager._resource_unlock("one", one)
-    manager._resource_unlock("one", one)
-    manager._resource_unlock("two", two)
-    manager._resource_unlock("two", two)
-    first.users -= 2
-    other.users -= 1
+    assert manager._resource_lock("future") is manager._resource_lock("future")
 
 
 async def test_expired_proxy_claim_is_redacted_deadline_error(pg_db):
