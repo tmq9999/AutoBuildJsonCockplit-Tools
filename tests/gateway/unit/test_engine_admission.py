@@ -304,3 +304,49 @@ async def test_prepare_cancellation_releases_admission_ticket(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await engine.prepare("principal", SimpleNamespace(), meta)
     assert admission.snapshot()["inflight"] == 0
+
+
+@pytest.mark.asyncio
+async def test_prepared_events_records_terminal_upstream_outcome_once():
+    from autobuild_json.gateway.contracts import InferenceEvent
+    from autobuild_json.gateway.engine import PreparedCall
+
+    admission = InferenceAdmission(1)
+    admission_stack = AsyncExitStack()
+    await admission_stack.enter_async_context(admission.enter(datetime.now(timezone.utc) + timedelta(seconds=2)))
+
+    async def stream_events():
+        yield InferenceEvent(kind="started")
+        raise GatewayError("rate_limited", 429, "upstream", 1)
+
+    class Stream:
+        events = stream_events()
+
+        async def cancel(self):
+            pass
+
+    class Ledger:
+        async def mark_pending(self, *args):
+            pass
+
+        async def reconcile_interrupted(self, *args):
+            pass
+
+    engine = Engine.__new__(Engine)
+    engine.admission = admission
+    engine._record_stage_outcome = Engine._record_stage_outcome.__get__(engine)
+    engine._record_upstream_outcome = Engine._record_upstream_outcome.__get__(engine)
+    engine.request_capacity_publish = lambda: None
+    engine.ledger = Ledger()
+    engine.budgets = None
+    engine.catalog = SimpleNamespace()
+    route = SimpleNamespace(public_model_id="m", adapter="fake", capabilities=set(),
+                            provider_id="p", credential_id="c")
+    prepared = PreparedCall(engine, AsyncExitStack(), Stream(), __import__("uuid").uuid4(), route,
+                            __import__("uuid").uuid4(), admission_stack=admission_stack)
+    with pytest.raises(GatewayError, match="rate_limited"):
+        await prepared.collect()
+    assert admission.snapshot()["rate_limited_by_stage"] == {
+        "provider": 0, "proxy": 0, "upstream": 1,
+    }
+    assert prepared.closed

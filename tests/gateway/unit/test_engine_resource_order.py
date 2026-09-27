@@ -245,6 +245,8 @@ async def test_route_resources_maps_provider_deadline_to_provider_stage():
     from autobuild_json.gateway.admission import InferenceAdmission
 
     engine.admission = InferenceAdmission(1)
+    engine._record_stage_outcome = Engine._record_stage_outcome.__get__(engine)
+    engine._record_upstream_outcome = Engine._record_upstream_outcome.__get__(engine)
     engine.provider_limits = ProviderAdmission()
     engine.proxies = SimpleNamespace()
     with pytest.raises(GatewayError) as caught:
@@ -556,7 +558,11 @@ async def test_prepare_retries_pre_response_transport_failure_at_most_once(monke
     engine = Engine.__new__(Engine)
     engine.catalog = SimpleNamespace(visible_model=lambda principal, model: asyncio.sleep(0, result=model))
     engine.ledger = Ledger()
-    engine.admission = SimpleNamespace(enter=lambda deadline: _empty_context())
+    from autobuild_json.gateway.admission import InferenceAdmission
+
+    engine.admission = InferenceAdmission(1)
+    engine._record_stage_outcome = Engine._record_stage_outcome.__get__(engine)
+    engine._record_upstream_outcome = Engine._record_upstream_outcome.__get__(engine)
     engine.budgets = SimpleNamespace(settle=lambda *args: asyncio.sleep(0))
     engine.adapters = {"codex_oauth": adapter}
     engine.db = None
@@ -575,11 +581,6 @@ async def test_prepare_retries_pre_response_transport_failure_at_most_once(monke
         finally:
             events.append(("exit", route.provider_id))
 
-    @asynccontextmanager
-    async def admission_context(deadline):
-        yield
-
-    engine.admission.enter = admission_context
     engine.route_resources = resources
     monkeypatch.setattr(engine_module, "validate_request", lambda request, route: None)
     class ProxyPolicy:
@@ -599,6 +600,9 @@ async def test_prepare_retries_pre_response_transport_failure_at_most_once(monke
     assert [event for event in events if event[0] == "enter"] == [
         ("enter", "provider"), ("enter", "provider"),
     ]
+    assert engine.admission.snapshot()["failed_by_stage"] == {
+        "provider": 0, "proxy": 0, "upstream": 1,
+    }
 
 
 @asynccontextmanager

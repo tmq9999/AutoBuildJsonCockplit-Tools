@@ -235,7 +235,11 @@ class ProviderLimits:
     @asynccontextmanager
     async def acquire(self, route, deadline, *, wait=False):
         identity = uuid4()
-        wait_started = None
+        # Start the episode before the first bounded attempt.  The first
+        # attempt can itself block on the per-provider lock or a PostgreSQL
+        # row lock; starting only after ``_try_acquire_bounded`` returns
+        # misses cancellation/deadline outcomes in that path.
+        wait_started = time.monotonic() if wait else None
         try:
             while True:
                 if wait and self._remaining(deadline) <= 0:
@@ -253,8 +257,6 @@ class ProviderLimits:
                     break
                 if not wait:
                     raise GatewayError("upstream_unavailable", 503, "upstream", 1)
-                if wait_started is None:
-                    wait_started = time.monotonic()
                 self._wait_attempts += 1
                 await self._wait_for_release(deadline)
         except asyncio.CancelledError:

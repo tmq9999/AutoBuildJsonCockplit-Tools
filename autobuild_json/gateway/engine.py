@@ -193,6 +193,17 @@ class Engine:
         if publish is not None:
             publish()
 
+    def _record_upstream_outcome(self, outcome, error=None):
+        """Record one terminal provider-I/O outcome across nested owners."""
+        if error is not None and getattr(error, "_gateway_upstream_outcome_recorded", False):
+            return
+        if error is not None:
+            try:
+                error._gateway_upstream_outcome_recorded = True
+            except (AttributeError, TypeError):
+                pass
+        self._record_stage_outcome("upstream", outcome)
+
     @staticmethod
     def _stage_error(error, stage):
         if isinstance(error, GatewayError):
@@ -312,7 +323,7 @@ class Engine:
                                 proxy_outcome = "cancelled"
                                 self._record_stage_outcome("proxy", "cancelled")
                             else:
-                                self._record_stage_outcome("upstream", "cancelled")
+                                self._record_upstream_outcome("cancelled")
                             raise
                         except ProxyCapacityError:
                             proxy_outcome = "failed"
@@ -330,7 +341,7 @@ class Engine:
                             else:
                                 outcome = ("expired" if error.code == "deadline_exceeded" else
                                            "rate_limited" if error.code == "rate_limited" else "failed")
-                                self._record_stage_outcome("upstream", outcome)
+                                self._record_upstream_outcome(outcome, error)
                                 if error.code == "deadline_exceeded":
                                     self._stage_error(error, "upstream")
                             raise
@@ -339,7 +350,7 @@ class Engine:
                                 proxy_outcome = "failed"
                                 self._record_stage_outcome("proxy", "failed")
                             else:
-                                self._record_stage_outcome("upstream", "failed")
+                                self._record_upstream_outcome("failed")
                             raise
                         finally:
                             self._end_resource_wait(proxy_episode, proxy_outcome)
@@ -624,8 +635,10 @@ class Engine:
                         await self.catalog.model_cooldown(selected, 300, started_at=received_at)
                     await stack.aclose()
                     stack = AsyncExitStack()
-                    if (not exc.safe_retry or number + 1 == len(dispatch_routes) or selection_state.pinned
-                            or not codex and routes[1].provider_id == selected.provider_id):
+                    terminal = (not exc.safe_retry or number + 1 == len(dispatch_routes)
+                                or selection_state.pinned
+                                or not codex and routes[1].provider_id == selected.provider_id)
+                    if terminal:
                         if exc.upstream_status == 429:
                             # No promise for untried/unhinted providers. Re-read
                             # local deadlines, including routes already cooling at
@@ -637,18 +650,28 @@ class Engine:
                                     principal, request, binding_id=selected.binding_id if selection_state.pinned else None)
                             else:
                                 exc.retry_after = None
+                        self._record_upstream_outcome(
+                            "rate_limited" if exc.upstream_status == 429 else "failed", exc)
                         raise
                     known_rejection = None
                     continue
+                except asyncio.CancelledError as exc:
+                    if known_rejection is None:
+                        self._record_upstream_outcome("cancelled", exc)
+                    raise
                 except GatewayError as exc:
                     # A transport connect failure through a configured proxy
                     # is retryable only when response headers were never
                     # acquired.  Close the per-attempt stack first so the
                     # provider admission and proxy lease cannot pin capacity
                     # while selecting the next untried route.
-                    if not (not transport_retry_used and getattr(exc, "safe_retry", False)
-                            and getattr(exc, "transport_phase", None) == "before_response"
-                            and getattr(exc, "proxy_used", False)):
+                    retryable = (not transport_retry_used and getattr(exc, "safe_retry", False)
+                                 and getattr(exc, "transport_phase", None) == "before_response"
+                                 and getattr(exc, "proxy_used", False))
+                    if not retryable:
+                        outcome = ("expired" if exc.code == "deadline_exceeded" else
+                                   "rate_limited" if exc.code == "rate_limited" else "failed")
+                        self._record_upstream_outcome(outcome, exc)
                         raise
                     known_rejection = attempt
                     await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
@@ -661,9 +684,14 @@ class Engine:
                     transport_retry_used = True
                     if (number + 1 == len(dispatch_routes) or selection_state.pinned
                             or not codex and routes[1].provider_id == selected.provider_id):
+                        self._record_upstream_outcome("failed", exc)
                         raise
                     known_rejection = None
                     continue
+                except BaseException as exc:
+                    if known_rejection is None:
+                        self._record_upstream_outcome("failed", exc)
+                    raise
                 prepared = PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt, scope,
                                         admission_stack=admission_stack)
                 prepared.collector.model = visible_model
@@ -780,12 +808,25 @@ class PreparedCall:
             if not self.settled:
                 raise GatewayError("upstream_error", 502, "stream")
         except ValueError:
+            self.engine._record_upstream_outcome("failed")
             if self.route.adapter == "codex_oauth":
                 await self.engine.catalog.credential_outcome(self.route.provider_id, self.route.credential_id, "upstream_error")
             raise GatewayError("upstream_error", 502, "stream") from None
+        except asyncio.CancelledError as error:
+            self.engine._record_upstream_outcome("cancelled", error)
+            raise
+        except GeneratorExit as error:
+            self.engine._record_upstream_outcome("cancelled", error)
+            raise
         except GatewayError as error:
+            outcome = ("expired" if error.code == "deadline_exceeded" else
+                       "rate_limited" if error.code == "rate_limited" else "failed")
+            self.engine._record_upstream_outcome(outcome, error)
             if self.route.adapter == "codex_oauth":
                 await self.engine.catalog.credential_outcome(self.route.provider_id, self.route.credential_id, error.code)
+            raise
+        except BaseException as error:
+            self.engine._record_upstream_outcome("failed", error)
             raise
         finally:
             await self.close()

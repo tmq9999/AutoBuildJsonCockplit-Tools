@@ -98,10 +98,33 @@ async def test_deadline_is_rechecked_after_a_provider_row_lock(pg_db):
             with pytest.raises(GatewayError, match="deadline_exceeded") as error:
                 await pending
             assert error.value.status == 504
+            assert limits.snapshot()["expired_waits"] == 1
+            assert len(limits._waits) == 1
         finally:
             if not pending.done():
                 pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
+    assert await active_admissions(pg_db) == 0
+
+
+async def test_cancelled_wait_inside_provider_row_lock_is_counted_once(pg_db):
+    route, provider, _ = await limited_route(pg_db)
+    limits = ProviderLimits(pg_db)
+    async with pg_db.sessions.begin() as blocker:
+        await blocker.execute(
+            text("SELECT id FROM providers WHERE id=:id FOR UPDATE"),
+            {"id": provider},
+        )
+        context = limits.acquire(route, datetime.now(timezone.utc) + timedelta(seconds=2), wait=True)
+        pending = asyncio.create_task(context.__aenter__())
+        await asyncio.sleep(.05)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        snapshot = limits.snapshot()
+        assert snapshot["cancelled_waits"] == 1
+        assert len(limits._waits) == 1
+        assert snapshot["wait_p50_ms"] >= 30
     assert await active_admissions(pg_db) == 0
 
 
