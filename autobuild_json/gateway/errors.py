@@ -18,11 +18,19 @@ SAFE_STAGES = frozenset({"auth", "policy", "storage", "quota", "proxy", "upstrea
 
 
 class GatewayError(Exception):
-    def __init__(self, code, status=400, stage="request", retry_after=None):
+    def __init__(self, code, status=400, stage="request", retry_after=None, *,
+                 safe_retry=False, transport_phase=None, proxy_used=False):
         self.code = code if code in SAFE_CODES else "internal_error"
         self.status = status if isinstance(status, int) and 400 <= status <= 599 else 500
         self.stage = stage if stage in SAFE_STAGES else "request"
         self.retry_after = retry_after if type(retry_after) is int and 0 <= retry_after <= 86400 else None
+        # Transport classification is intentionally internal.  The public
+        # serializer exposes only the stable safe code/stage, while dispatch
+        # can use this redacted phase marker to distinguish a retryable proxy
+        # connect failure from an ambiguous response/stream failure.
+        self.transport_phase = transport_phase if transport_phase in {"before_response", "after_response"} else None
+        self.proxy_used = bool(proxy_used)
+        self.safe_retry = bool(safe_retry)
         super().__init__(self.code)
 
     def to_dict(self):
@@ -39,3 +47,14 @@ class UpstreamRejected(GatewayError):
         if self.code == 'unsupported_reasoning_effort':
             self.status = 400
         self.safe_retry = status == 429
+
+
+class TransportFailure(GatewayError):
+    """Redacted internal classification for an upstream transport failure."""
+
+    def __init__(self, *, before_response, proxy_used):
+        phase = "before_response" if before_response else "after_response"
+        super().__init__("proxy_error" if proxy_used else "upstream_error", 502, "upstream",
+                         safe_retry=bool(before_response and proxy_used),
+                         transport_phase=phase, proxy_used=proxy_used)
+        self.before_response = bool(before_response)

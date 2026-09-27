@@ -1,6 +1,8 @@
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -272,3 +274,99 @@ async def test_route_resources_marks_unexpected_provider_and_proxy_errors_failed
         ):
             pass
     assert admission.snapshot()["resource_wait_failed"] == 2
+
+
+@pytest.mark.asyncio
+async def test_prepare_releases_attempt_resources_before_retrying_pre_response_proxy_failure(monkeypatch):
+    import autobuild_json.gateway.engine as engine_module
+    from autobuild_json.gateway.engine import Engine, RequestMeta
+    from autobuild_json.gateway.errors import TransportFailure
+    from autobuild_json.gateway.routing.session import Selection
+
+    events = []
+    route_one = SimpleNamespace(
+        adapter="fake", provider_id="provider-a", credential_id="credential-a", proxy_profile_id=None,
+        public_model_id="public", binding_id="binding-a", upstream_model="upstream",
+        budget_id=None, bounds=SimpleNamespace(input_tokens=1, output_tokens=2), input_micro=1,
+        output_micro=1, cache_read_micro=None, cache_write_micro=None, timeout=60,
+    )
+    route_two = SimpleNamespace(**{**route_one.__dict__, "provider_id": "provider-b"})
+    options = SimpleNamespace(max_output_tokens=None, model_copy=lambda **kwargs: options)
+    request = SimpleNamespace(
+        options=options, model="public",
+    )
+    request.model_copy = lambda **kwargs: request
+    scope = SimpleNamespace(public_model_id="public")
+    meta = RequestMeta(uuid4(), datetime.now(timezone.utc), datetime.now(timezone.utc) + timedelta(seconds=30))
+
+    class Admission:
+        @asynccontextmanager
+        async def enter(self, deadline):
+            yield
+
+    class Ledger:
+        async def reserve(self, admission):
+            return "hold"
+
+        async def resize(self, hold, bounds):
+            return hold
+
+        async def mark_dispatched(self, request_id, attempt, *, route):
+            events.append(("dispatched", route.provider_id))
+
+        async def mark_rejected(self, request_id, attempt, reason):
+            events.append(("rejected", reason))
+
+    class Budgets:
+        async def settle(self, attempt, amount):
+            pass
+
+    class Catalog:
+        async def visible_model(self, principal, model):
+            return model
+
+    class Adapter:
+        def __init__(self):
+            self.calls = 0
+
+        @asynccontextmanager
+        async def open(self, request, route, lease):
+            self.calls += 1
+            if self.calls == 1:
+                raise TransportFailure(before_response=True, proxy_used=True)
+            yield SimpleNamespace()
+
+    adapter = Adapter()
+    engine = Engine.__new__(Engine)
+    engine.catalog = Catalog()
+    engine.ledger = Ledger()
+    engine.admission = Admission()
+    engine.budgets = Budgets()
+    engine.adapters = {"fake": adapter}
+    engine.proxy_resolver = None
+    engine.credential = lambda route: asyncio.sleep(0)
+
+    @asynccontextmanager
+    async def resources(route, selection, owner, deadline):
+        events.append(("enter", route.provider_id))
+        try:
+            yield SimpleNamespace(proxy="proxy")
+        finally:
+            events.append(("exit", route.provider_id))
+
+    engine.route_resources = resources
+    monkeypatch.setattr(engine_module, "validate_request", lambda request, route: None)
+    monkeypatch.setattr(
+        engine_module.routing_session,
+        "select",
+        lambda engine, principal, request, meta: asyncio.sleep(0, result=Selection(
+            request, (route_one, route_two), scope, False, 1)),
+    )
+    monkeypatch.setattr(engine_module.routing_session, "revalidate", lambda *args: asyncio.sleep(0))
+
+    prepared = await engine.prepare(object(), request, meta)
+    assert prepared.route.provider_id == "provider-b"
+    assert events == [
+        ("enter", "provider-a"), ("dispatched", "provider-a"), ("rejected", "rejected_before_generation"),
+        ("exit", "provider-a"), ("enter", "provider-b"), ("dispatched", "provider-b"),
+    ]

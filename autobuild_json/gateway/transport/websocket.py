@@ -16,7 +16,7 @@ from wsproto import ConnectionType, WSConnection
 from wsproto.events import Request, AcceptConnection, TextMessage, Ping, Pong
 from wsproto.utilities import RemoteProtocolError
 
-from ..errors import GatewayError, UpstreamRejected
+from ..errors import GatewayError, TransportFailure, UpstreamRejected
 from ..providers.retry import parse_retry_after
 from .http import CoreTransport, _account_close
 
@@ -24,8 +24,8 @@ MAX_MESSAGE = 40_000_000
 
 
 class CodexSocket:
-    def __init__(self, protocol, stream, deadline):
-        self.protocol, self.stream, self.deadline = protocol, stream, deadline
+    def __init__(self, protocol, stream, deadline, *, proxy_used=False):
+        self.protocol, self.stream, self.deadline, self.proxy_used = protocol, stream, deadline, bool(proxy_used)
         self.pending = deque()
         self.closed = False
         self._close_task = None
@@ -37,7 +37,9 @@ class CodexSocket:
         except (asyncio.TimeoutError, httpcore.TimeoutException):
             raise GatewayError("deadline_exceeded", 504, "upstream") from None
         except (httpcore.NetworkError, httpcore.ProtocolError, OSError):
-            raise GatewayError("upstream_error", 502, "upstream") from None
+            # A WebSocket stream has already completed its handshake by the
+            # time CodexSocket performs I/O, so all resets are ambiguous.
+            raise TransportFailure(before_response=False, proxy_used=self.proxy_used) from None
 
     async def send_json(self, value):
         payload = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
@@ -101,6 +103,7 @@ async def open_codex_websocket(transport, route, proxy, account_id, access_token
         if not value or any(ord(c) <= 32 or ord(c) >= 127 for c in value):
             raise GatewayError("invalid_state", 502, "upstream")
     adapter, response = None, None
+    response_acquired = False
     try:
         await asyncio.wait_for(transport._validate(route, proxy), max(0, deadline-time.monotonic()))
         protocol = WSConnection(ConnectionType.CLIENT)
@@ -123,6 +126,7 @@ async def open_codex_websocket(transport, route, proxy, account_id, access_token
             extensions={"timeout": {"connect": min(10, remaining), "read": min(60, remaining),
                                     "write": min(60, remaining), "pool": min(60, remaining)}})
         response = await asyncio.wait_for(adapter.handle_async_request(call), remaining)
+        response_acquired = True
         if response.status_code in {400, 401, 403, 404, 422, 429}:
             rejected = UpstreamRejected(response.status_code, parse_retry_after(response.headers.get("retry-after")))
             rejected.received_at = time.monotonic()
@@ -136,7 +140,7 @@ async def open_codex_websocket(transport, route, proxy, account_id, access_token
         stream = response.extensions.get("network_stream")
         if stream is None:
             raise GatewayError("upstream_error", 502, "upstream")
-        connection = CodexSocket(protocol, stream, deadline)
+        connection = CodexSocket(protocol, stream, deadline, proxy_used=proxy is not None)
         try:
             yield connection
         finally:
@@ -145,8 +149,9 @@ async def open_codex_websocket(transport, route, proxy, account_id, access_token
         raise
     except (asyncio.TimeoutError, httpcore.TimeoutException, httpx.TimeoutException):
         raise GatewayError("deadline_exceeded", 504, "upstream") from None
-    except (ValueError, RemoteProtocolError, httpcore.NetworkError, httpcore.ProtocolError,
-            httpx.HTTPError, OSError):
+    except (httpcore.NetworkError, httpcore.ProtocolError, httpx.HTTPError, OSError):
+        raise TransportFailure(before_response=not response_acquired, proxy_used=proxy is not None) from None
+    except (ValueError, RemoteProtocolError):
         raise GatewayError("proxy_error" if proxy else "upstream_error", 502, "upstream") from None
     finally:
         try:

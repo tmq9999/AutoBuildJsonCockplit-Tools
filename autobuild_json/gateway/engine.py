@@ -536,6 +536,29 @@ class Engine:
                         raise
                     known_rejection = None
                     continue
+                except GatewayError as exc:
+                    # A transport connect failure through a configured proxy
+                    # is retryable only when response headers were never
+                    # acquired.  Close the per-attempt stack first so the
+                    # provider admission and proxy lease cannot pin capacity
+                    # while selecting the next untried route.
+                    if not (getattr(exc, "safe_retry", False)
+                            and getattr(exc, "transport_phase", None) == "before_response"
+                            and getattr(exc, "proxy_used", False)):
+                        raise
+                    known_rejection = attempt
+                    await self.ledger.mark_rejected(meta.request_id, attempt, "rejected_before_generation")
+                    dispatched = False
+                    if budget_attempt is not None:
+                        await self.budgets.settle(budget_attempt, Decimal(0))
+                        budget_attempt = None
+                    await stack.aclose()
+                    stack = AsyncExitStack()
+                    if (number + 1 == len(dispatch_routes) or selection_state.pinned
+                            or not codex and routes[1].provider_id == selected.provider_id):
+                        raise
+                    known_rejection = None
+                    continue
                 prepared = PreparedCall(self, stack, stream, meta.request_id, selected, attempt, budget_attempt, scope,
                                         admission_stack=admission_stack)
                 prepared.collector.model = visible_model

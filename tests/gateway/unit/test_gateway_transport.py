@@ -50,6 +50,73 @@ async def test_transport_bounds_body_and_sanitizes_network_failure():
 
 
 @pytest.mark.asyncio
+async def test_proxy_connect_failure_before_response_is_safe_retryable():
+    from autobuild_json.gateway.transport.egress import EgressPolicy
+    from autobuild_json.gateway.transport.http import Transport, OutboundRequest
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.models import ProxyConfig
+
+    async def resolver(host, port):
+        return ["93.184.216.34"]
+
+    def failed(request):
+        raise httpx.ConnectError("opaque-connect-detail", request=request)
+
+    transport = Transport(EgressPolicy(resolver=resolver, trusted_proxy_origins={"http://proxy.invalid:8080"}),
+                          adapter=httpx.MockTransport(failed))
+    with pytest.raises(GatewayError) as caught:
+        async with transport.open(SimpleNamespace(root="https://provider.invalid/v1"),
+                                  ProxyConfig("http://proxy.invalid:8080"),
+                                  OutboundRequest("POST", "chat/completions", {}, deadline=time.monotonic() + 10)):
+            pass
+
+    error = caught.value
+    assert error.code == "proxy_error"
+    assert error.safe_retry is True
+    assert error.transport_phase == "before_response"
+    assert error.proxy_used is True
+    assert "opaque-connect-detail" not in str(error)
+
+
+@pytest.mark.asyncio
+async def test_proxy_stream_reset_after_first_chunk_is_not_retryable():
+    from autobuild_json.gateway.transport.egress import EgressPolicy
+    from autobuild_json.gateway.transport.http import Transport, OutboundRequest
+    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.models import ProxyConfig
+
+    class Reset(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"first"
+            raise httpx.ReadError("opaque-reset-detail")
+
+        async def aclose(self):
+            return None
+
+    async def resolver(host, port):
+        return ["93.184.216.34"]
+
+    transport = Transport(
+        EgressPolicy(resolver=resolver, trusted_proxy_origins={"http://proxy.invalid:8080"}),
+        adapter=httpx.MockTransport(lambda request: httpx.Response(200, stream=Reset())),
+    )
+    async with transport.open(SimpleNamespace(root="https://provider.invalid/v1"),
+                              ProxyConfig("http://proxy.invalid:8080"),
+                              OutboundRequest("GET", "models", None, deadline=time.monotonic() + 10)) as response:
+        chunks = response.chunks()
+        assert await chunks.__anext__() == b"first"
+        with pytest.raises(GatewayError) as caught:
+            await chunks.__anext__()
+
+    error = caught.value
+    assert error.code == "proxy_error"
+    assert error.safe_retry is False
+    assert error.transport_phase == "after_response"
+    assert error.proxy_used is True
+    assert "opaque-reset-detail" not in str(error)
+
+
+@pytest.mark.asyncio
 async def test_proxy_requires_explicit_trusted_remote_dns_policy():
     from autobuild_json.models import ProxyConfig
     from autobuild_json.gateway.transport.http import Transport, OutboundRequest

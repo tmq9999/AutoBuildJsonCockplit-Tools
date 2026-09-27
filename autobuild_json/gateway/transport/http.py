@@ -11,7 +11,7 @@ from uuid import UUID
 import httpcore
 import httpx
 
-from ..errors import GatewayError
+from ..errors import GatewayError, TransportFailure
 from .network import GuardedBackend
 
 ACCOUNT_ROOT = 'https://chatgpt.com/backend-api/wham'
@@ -133,8 +133,8 @@ class CoreTransport(httpx.AsyncBaseTransport):
 
 
 class UpstreamResponse:
-    def __init__(self, raw, deadline):
-        self.raw, self.deadline = raw, deadline
+    def __init__(self, raw, deadline, *, proxy_used=False):
+        self.raw, self.deadline, self.proxy_used = raw, deadline, bool(proxy_used)
         self.status = raw.status_code
         self.headers = raw.headers
 
@@ -150,6 +150,11 @@ class UpstreamResponse:
                 return
             except (asyncio.TimeoutError, httpx.TimeoutException, httpcore.TimeoutException):
                 raise GatewayError("deadline_exceeded", 504, "upstream") from None
+            except (httpx.HTTPError, httpcore.NetworkError, httpcore.ProtocolError, OSError):
+                # Response headers have already been received by the time a
+                # caller can iterate this stream.  Even a failure before the
+                # first body byte is therefore ambiguous and must not retry.
+                raise TransportFailure(before_response=False, proxy_used=self.proxy_used) from None
             yield chunk
 
     async def read_json(self, max_bytes=2_097_152):
@@ -188,6 +193,7 @@ class Transport:
 
     @asynccontextmanager
     async def open(self, route, proxy, request):
+        response_acquired = False
         try:
             if request.kind == 'codex_account' and route.root != ACCOUNT_ROOT:
                 raise ValueError('invalid_account_root')
@@ -214,8 +220,9 @@ class Transport:
                                          json=request.body if request.body is not None else None,
                                          extensions={"timeout": timeout})
                     response = await asyncio.wait_for(adapter.handle_async_request(call), timeout=remaining)
+                    response_acquired = True
                     try:
-                        yield UpstreamResponse(response, request.deadline)
+                        yield UpstreamResponse(response, request.deadline, proxy_used=proxy is not None)
                     finally:
                         if request.kind == 'codex_account':
                             await _account_close(response)
@@ -231,8 +238,9 @@ class Transport:
                 call = client.build_request(request.method, url,
                                             json=request.body, headers=headers)
                 response = await asyncio.wait_for(client.send(call, stream=True), timeout=remaining)
+                response_acquired = True
                 try:
-                    yield UpstreamResponse(response, request.deadline)
+                    yield UpstreamResponse(response, request.deadline, proxy_used=proxy is not None)
                 finally:
                     await response.aclose()
         except GatewayError:
@@ -242,4 +250,4 @@ class Transport:
         except (asyncio.TimeoutError, httpx.TimeoutException, httpcore.TimeoutException):
             raise GatewayError("deadline_exceeded", 504, "upstream") from None
         except (httpx.HTTPError, httpcore.NetworkError, httpcore.ProtocolError, OSError):
-            raise GatewayError("proxy_error" if proxy else "upstream_error", 502, "upstream") from None
+            raise TransportFailure(before_response=not response_acquired, proxy_used=proxy is not None) from None
