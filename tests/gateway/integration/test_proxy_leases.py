@@ -3,6 +3,9 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
+
+from autobuild_json.gateway.errors import GatewayError
 
 pytestmark = [pytest.mark.postgres, pytest.mark.asyncio]
 
@@ -41,3 +44,45 @@ async def test_invalid_key_health_is_shared_between_workers(pg_db):
     await first.disable_resource("kiot:fingerprint")
     assert await other.is_disabled("kiot:fingerprint")
     assert not await other.is_disabled("kiot:other-fingerprint")
+
+
+async def test_claim_does_not_outlive_deadline_while_lease_row_is_locked(pg_db):
+    from autobuild_json.gateway.proxy.pg_leases import PgLeaseStore
+
+    store = PgLeaseStore(pg_db)
+    resource = "locked-key-fingerprint"
+    initial = await store.claim(
+        resource,
+        uuid4(),
+        datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+    await store.release(initial)
+
+    async with pg_db.sessions.begin() as blocker:
+        await blocker.execute(
+            text("SELECT resource FROM proxy_leases WHERE resource=:resource FOR UPDATE"),
+            {"resource": resource},
+        )
+        pending = asyncio.create_task(
+            store.claim(
+                resource,
+                uuid4(),
+                datetime.now(timezone.utc) + timedelta(seconds=0.1),
+            )
+        )
+        try:
+            with pytest.raises(GatewayError, match="deadline_exceeded") as error:
+                await asyncio.wait_for(pending, 0.2)
+            assert error.value.status == 504
+            assert error.value.stage == "proxy"
+        finally:
+            if not pending.done():
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
+    async with pg_db.sessions() as session:
+        row = (await session.execute(
+            text("SELECT owner FROM proxy_leases WHERE resource=:resource"),
+            {"resource": resource},
+        )).one()
+    assert row.owner is None

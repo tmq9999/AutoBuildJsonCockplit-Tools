@@ -105,6 +105,46 @@ async def test_deadline_is_rechecked_after_a_provider_row_lock(pg_db):
     assert await active_admissions(pg_db) == 0
 
 
+async def test_provider_and_credential_locks_share_one_deadline(pg_db):
+    route, provider, credential = await limited_route(pg_db)
+    limits = ProviderLimits(pg_db)
+    provider_blocker = pg_db.sessions()
+    credential_blocker = pg_db.sessions()
+    pending = None
+    await provider_blocker.begin()
+    await credential_blocker.begin()
+    try:
+        await provider_blocker.execute(
+            text("SELECT id FROM providers WHERE id=:id FOR UPDATE"),
+            {"id": provider},
+        )
+        await credential_blocker.execute(
+            text("SELECT id FROM credentials WHERE id=:id FOR UPDATE"),
+            {"id": credential},
+        )
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=0.25)
+        context = limits.acquire(route, deadline, wait=True)
+        pending = asyncio.create_task(context.__aenter__())
+        await asyncio.sleep(0.15)
+        await provider_blocker.commit()
+
+        with pytest.raises(GatewayError, match="deadline_exceeded") as error:
+            await asyncio.wait_for(pending, 0.15)
+        assert error.value.status == 504
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        await provider_blocker.rollback()
+        await credential_blocker.rollback()
+        await provider_blocker.close()
+        await credential_blocker.close()
+
+    assert await active_admissions(pg_db) == 0
+    async with pg_db.sessions() as session:
+        assert await session.scalar(text("SELECT count(*) FROM provider_admissions")) == 0
+
+
 async def test_default_non_waiting_admission_still_fails_immediately(pg_db):
     route, _, _ = await limited_route(pg_db)
     limits = ProviderLimits(pg_db)

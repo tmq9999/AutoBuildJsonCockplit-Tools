@@ -17,23 +17,23 @@ class ProviderLimits:
         self._wait_attempts = 0
         self._expired_waits = 0
 
+    async def _set_lock_timeout(self, session, deadline):
+        remaining = self._remaining(deadline)
+        if remaining <= 0:
+            raise GatewayError("deadline_exceeded", 504, "upstream")
+        await session.execute(
+            text("SELECT set_config('lock_timeout', :timeout, true)"),
+            {"timeout": f"{max(1, int(remaining * 1000))}ms"},
+        )
+
     async def _try_acquire(self, route, deadline, identity):
         try:
             async with self.db.sessions.begin() as session:
-                remaining = (deadline - datetime.now(deadline.tzinfo or timezone.utc)).total_seconds()
-                if remaining <= 0:
-                    raise GatewayError("deadline_exceeded", 504, "upstream")
-                # PostgreSQL row locks otherwise have no relationship to the
-                # request deadline.  Set a transaction-local timeout before
-                # either FOR UPDATE so a blocked waiter cannot outlive it.
-                timeout_ms = max(1, int(remaining * 1000))
-                await session.execute(
-                    text("SELECT set_config('lock_timeout', :timeout, true)"),
-                    {"timeout": f"{timeout_ms}ms"},
-                )
+                await self._set_lock_timeout(session, deadline)
                 provider = (await session.execute(
                     text("SELECT config,version,cooldown_until FROM providers WHERE id=:id FOR UPDATE"),
                     {"id": route.provider_id})).mappings().first()
+                await self._set_lock_timeout(session, deadline)
                 credential = (await session.execute(
                     text("SELECT * FROM credentials WHERE id=:id AND provider_id=:provider FOR UPDATE"),
                     {"id": route.credential_id, "provider": route.provider_id})).mappings().first()
@@ -62,6 +62,7 @@ class ProviderLimits:
                     raise GatewayError("upstream_unavailable", 503, "upstream", 1)
                 if any(counts["concurrent"] >= concurrency for counts, _, concurrency in limits):
                     return False
+                await self._set_lock_timeout(session, deadline)
                 inserted = await session.execute(text(
                     "INSERT INTO provider_admissions(id,provider_id,credential_id,deadline) "
                     "SELECT :id,:provider,:credential,:deadline "
