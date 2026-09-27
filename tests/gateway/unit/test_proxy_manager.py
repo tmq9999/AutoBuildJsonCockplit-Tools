@@ -248,6 +248,7 @@ async def test_wait_false_makes_one_claim_without_sleeping():
             async with manager.acquire(selection, uuid4(), deadline(), wait=False):
                 pass
         assert caught.value.code == "proxy_capacity"
+        assert str(caught.value) == "proxy_not_ready"
         assert store.claims == 2
         assert asyncio.get_running_loop().time() - started < 0.1
 

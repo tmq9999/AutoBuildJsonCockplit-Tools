@@ -14,7 +14,10 @@ from .kiot import KiotClient, lease_action
 class ProxyCapacityError(GatewayError):
     """Internal signal that a local lease was busy and may be retried."""
     def __init__(self):
-        Exception.__init__(self, "proxy_capacity")
+        # Direct manager callers historically surface this exception string;
+        # keep that public contract while Engine keys retry behavior on the
+        # private subclass and internal code below.
+        Exception.__init__(self, "proxy_not_ready")
         self.code = "proxy_capacity"
         self.status = 503
         self.stage = "proxy"
