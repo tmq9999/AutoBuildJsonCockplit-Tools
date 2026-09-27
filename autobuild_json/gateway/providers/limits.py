@@ -40,6 +40,10 @@ class ProviderLimits:
         self._provider_overflow_keys = {}
 
     def _provider_lock(self, provider_id):
+        overflow = self._provider_overflow_keys.get(provider_id)
+        if overflow is not None:
+            overflow.users += 1
+            return overflow
         entry = self._provider_locks.get(provider_id)
         if entry is not None:
             entry.users += 1

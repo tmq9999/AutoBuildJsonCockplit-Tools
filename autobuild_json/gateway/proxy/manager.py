@@ -80,6 +80,10 @@ class ProxyManager:
                 "last_wait_ms": self._last_wait_ms, "cleanup_failures": self._cleanup_failures}
 
     def _resource_lock(self, resource):
+        overflow = self._resource_overflow_keys.get(resource)
+        if overflow is not None:
+            overflow.users += 1
+            return overflow
         entry = self._resource_locks.get(resource)
         if entry is not None:
             entry.users += 1

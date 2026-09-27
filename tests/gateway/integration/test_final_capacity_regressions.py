@@ -169,11 +169,18 @@ async def test_provider_lock_reservation_prevents_duplicate_same_key_lock(pg_db)
     assert other is not first
     first.users = 0
     limits._provider_locks.clear()
-    limits._provider_lock("anchor").users = 0
+    limits._provider_lock("anchor").users = 1
     migrated = limits._provider_lock("migrated")
     again_migrated = limits._provider_lock("migrated")
     assert migrated is again_migrated
     migrated.users -= 2
+    limits._provider_locks.clear()
+    limits._provider_lock("anchor").users = 1
+    overflow = limits._provider_lock("overflow")
+    limits._provider_locks["anchor"].users = 1
+    assert limits._provider_lock("overflow") is overflow
+    limits._provider_unlock("overflow", overflow)
+    limits._provider_unlock("overflow", overflow)
     limits._provider_locks.clear()
     limits._provider_lock("anchor").users = 0
     overflow = limits._provider_lock("overflow")
@@ -200,11 +207,18 @@ async def test_proxy_lock_reservation_prevents_duplicate_same_key_lock(pg_db):
     assert other is not first
     first.users = 0
     manager._resource_locks.clear()
-    manager._resource_lock("anchor").users = 0
+    manager._resource_lock("anchor").users = 1
     migrated = manager._resource_lock("migrated")
     again_migrated = manager._resource_lock("migrated")
     assert migrated is again_migrated
     migrated.users -= 2
+    manager._resource_locks.clear()
+    manager._resource_lock("anchor").users = 1
+    overflow = manager._resource_lock("overflow")
+    manager._resource_locks["anchor"].users = 1
+    assert manager._resource_lock("overflow") is overflow
+    manager._resource_unlock("overflow", overflow)
+    manager._resource_unlock("overflow", overflow)
     manager._resource_locks.clear()
     manager._resource_lock("anchor").users = 0
     overflow = manager._resource_lock("overflow")
