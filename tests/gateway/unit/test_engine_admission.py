@@ -2,7 +2,7 @@ from autobuild_json.gateway.admission import InferenceAdmission
 from autobuild_json.gateway.engine import Engine
 from autobuild_json.gateway.settings import ServiceSettings
 from autobuild_json.gateway import engine as engine_module
-from autobuild_json.gateway.errors import GatewayError
+from autobuild_json.gateway.errors import GatewayError, UpstreamRejected, TransportFailure
 import asyncio
 from contextlib import AsyncExitStack
 from datetime import datetime, timedelta, timezone
@@ -21,6 +21,27 @@ def test_direct_engine_uses_capacity_100_admission():
     Engine.__init__(engine, None, None, None, None, None, None)
     assert isinstance(engine.admission, InferenceAdmission)
     assert engine.admission.capacity == 100
+
+
+def test_capacity_snapshot_records_each_upstream_http_status_once_and_ignores_transport_failures():
+    engine = Engine.__new__(Engine)
+    engine.admission = InferenceAdmission(1)
+    engine._record_upstream_outcome = Engine._record_upstream_outcome.__get__(engine)
+    engine.request_capacity_publish = lambda: None
+    rejected = UpstreamRejected(429)
+
+    engine._record_upstream_outcome("rate_limited", rejected)
+    engine._record_upstream_outcome("rate_limited", rejected)
+    engine._record_upstream_outcome("failed", TransportFailure(before_response=True, proxy_used=False))
+
+    assert engine.capacity_snapshot()["upstream"]["http_statuses"] == {"429": 1}
+
+
+def test_capacity_snapshot_is_compatible_with_new_engine_objects_without_histogram_state():
+    engine = Engine.__new__(Engine)
+    engine.admission = InferenceAdmission(1)
+
+    assert engine.capacity_snapshot()["upstream"]["http_statuses"] == {}
 
 
 @pytest.mark.asyncio

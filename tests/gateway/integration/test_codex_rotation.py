@@ -120,7 +120,9 @@ async def test_generic_or_ambiguous_errors_never_walk_pool(pg_db, status):
         assert response.status_code == 502 and 'private-value' not in response.text
         assert len(env.upstream_requests) == 1
         async with pg_db.sessions() as session:
-            assert await session.scalar(text('SELECT state FROM requests')) == ('usage_pending' if status >= 500 else 'released')
+            # Every HTTP non-200 is a terminal pre-generation rejection now;
+            # status provenance is retained internally without exposing body.
+            assert await session.scalar(text('SELECT state FROM requests')) == 'released'
 
 
 async def test_expired_deadline_prevents_any_refresh_or_dispatch(pg_db, monkeypatch):

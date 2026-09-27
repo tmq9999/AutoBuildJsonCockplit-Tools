@@ -328,7 +328,7 @@ async def test_route_resources_attributes_post_acquisition_outcome_once_to_upstr
     from datetime import datetime, timedelta, timezone
     from autobuild_json.gateway.admission import InferenceAdmission
     from autobuild_json.gateway.engine import Engine
-    from autobuild_json.gateway.errors import GatewayError
+    from autobuild_json.gateway.errors import GatewayError, UpstreamRejected
 
     class ProviderAdmission:
         @asynccontextmanager
@@ -347,7 +347,7 @@ async def test_route_resources_attributes_post_acquisition_outcome_once_to_upstr
     engine.transport = SimpleNamespace(_validate=lambda route, proxy: asyncio.sleep(0))
     error = (asyncio.CancelledError() if failure == "cancelled" else
              GatewayError("deadline_exceeded", 504, "request") if failure == "deadline" else
-             GatewayError("rate_limited", 429, "upstream", 1))
+             UpstreamRejected(429, 1))
     caught = None
     try:
         async with engine.route_resources(
@@ -370,6 +370,8 @@ async def test_route_resources_attributes_post_acquisition_outcome_once_to_upstr
     assert snapshot[field] == {"provider": 0, "proxy": 0, "upstream": 1}
     assert snapshot["resource_wait_expired"] == 0
     assert snapshot["resource_wait_cancelled"] == 0
+    if failure == "rate_limited":
+        assert engine.capacity_snapshot()["upstream"]["http_statuses"] == {"429": 1}
 
 
 @pytest.mark.asyncio

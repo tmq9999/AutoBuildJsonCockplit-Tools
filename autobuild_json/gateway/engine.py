@@ -68,6 +68,9 @@ class Engine:
         self._capacity_stopping = False
         self._capacity_interval = 0.05
         self._capacity_heartbeat = 10.0
+        # Redacted cumulative upstream HTTP status provenance for serving
+        # telemetry. Keys are sanitized decimal status strings (100..599).
+        self._upstream_http_statuses = {}
         # Prepared calls remain owned by the engine after a request task is
         # cancelled or its bounded close caller times out.  This set is the
         # lifecycle drain path; it is deliberately not a detached fire-and-
@@ -93,10 +96,15 @@ class Engine:
             raise TimeoutError("prepared cleanup did not drain") from None
 
     def capacity_snapshot(self):
-        proxy = self.proxies.snapshot() if hasattr(self.proxies, "snapshot") else {}
+        proxies = getattr(self, "proxies", None)
+        proxy = proxies.snapshot() if hasattr(proxies, "snapshot") else {}
+        providers = getattr(self, "provider_limits", None)
+        provider = providers.snapshot() if hasattr(providers, "snapshot") else {}
+        statuses = getattr(self, "_upstream_http_statuses", {})
         return {"admission": self.admission.snapshot(),
-                "provider": self.provider_limits.snapshot(),
-                "proxy": proxy}
+                "provider": provider,
+                "proxy": proxy,
+                "upstream": {"http_statuses": dict(statuses)}}
 
     async def _publish_capacity(self):
         """Publish redacted serving-process telemetry for the admin process."""
@@ -202,6 +210,14 @@ class Engine:
                 error._gateway_upstream_outcome_recorded = True
             except (AttributeError, TypeError):
                 pass
+            if isinstance(error, UpstreamRejected):
+                status = error.upstream_status
+                if type(status) is int and 100 <= status <= 599:
+                    statuses = getattr(self, "_upstream_http_statuses", None)
+                    if statuses is None:
+                        statuses = self._upstream_http_statuses = {}
+                    key = str(status)
+                    statuses[key] = statuses.get(key, 0) + 1
         self._record_stage_outcome("upstream", outcome)
 
     @staticmethod

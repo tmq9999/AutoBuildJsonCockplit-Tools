@@ -77,10 +77,11 @@ async def test_proxy_transport_is_selected_once_without_direct_fallback(monkeypa
 
     monkeypatch.setattr(module, "CoreTransport", transport_factory)
     policy = EgressPolicy(resolver=public_address, trusted_proxy_origins={proxy.server})
-    with pytest.raises(GatewayError, match="^upstream_error$"):
+    with pytest.raises(UpstreamRejected, match="^upstream_error$") as caught:
         async with open_codex_websocket(Transport(policy), ROUTE, proxy,
                 "synthetic-account", "synthetic-token", time.monotonic()+10):
             pytest.fail("failed upstream accepted")
+    assert caught.value.upstream_status == 503
     assert selected == [proxy] and len(adapter.requests) == 1 and adapter.closed
 
 

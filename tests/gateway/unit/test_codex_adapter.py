@@ -1,3 +1,7 @@
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -35,3 +39,35 @@ def test_non_codex_responses_keeps_generation_controls():
     request = InferenceRequest(model="m", options=GenerationOptions(**options))
     body = ResponsesCodec().upstream_body(request, "actual")
     assert {name: body[name] for name in options} == options
+
+
+@pytest.mark.asyncio
+async def test_codex_generic_http_non_200_preserves_upstream_status():
+    from autobuild_json.gateway.contracts import InferenceRequest
+    from autobuild_json.gateway.errors import UpstreamRejected
+    from autobuild_json.gateway.providers.codex import CodexAdapter
+
+    class Response:
+        status = 502
+        headers = {}
+
+    class Transport:
+        @asynccontextmanager
+        async def open(self, route, proxy, call):
+            yield Response()
+
+    request = InferenceRequest(model="m")
+    route = SimpleNamespace(root="https://chatgpt.com/backend-api/codex", upstream_model="m", timeout=10)
+    lease = SimpleNamespace(deadline=datetime.now(timezone.utc) + timedelta(seconds=5), proxy=None)
+    adapter = CodexAdapter(Transport(), lambda route: ("account", {"access_token": "token"}))
+
+    with pytest.raises(UpstreamRejected) as caught:
+        async with adapter._open(request, route, lease, "account", {"access_token": "token"}):
+            pytest.fail("generic HTTP rejection was accepted")
+
+    assert caught.value.upstream_status == 502
+    assert caught.value.code == "upstream_error"
+    assert caught.value.stage == "upstream"
+    assert caught.value.status == 502
+    assert caught.value.safe_retry is False
+    assert caught.value.to_dict() == {"error": {"code": "upstream_error", "message": "upstream_error", "stage": "upstream"}}
