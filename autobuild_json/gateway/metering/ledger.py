@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from ..errors import GatewayError
 from ..identity.policy import KeyPolicy
-from .records import Hold
+from .records import Hold, Usage
 from .units import hold_micro, weighted_usage_micro
 
 TERMINAL = {"completed", "released", "adjusted"}
@@ -230,6 +230,61 @@ class Ledger:
             await self._finalize(session, row, min(charge, int(row["hold"])), "completed", usage=usage,
                                  computed_micro=charge,
                                  reason="usage_exceeded_bound" if charge > row["hold"] or usage.input_tokens>row['input_bound'] or usage.output_tokens>row['output_bound'] else None)
+
+    async def reconcile_interrupted(self, request_id, attempt_id=None):
+        """Close an interrupted request using only durable attempt evidence.
+
+        A disconnect may happen after the provider has written its receipt but
+        before the request settlement transaction commits.  Reconciliation is
+        serialized by the request lock and therefore either settles that one
+        authoritative receipt or leaves the hold explicitly pending.  Bounds,
+        elapsed time, and exception text are never treated as usage evidence.
+        """
+        async with self._request(request_id) as (session, row, _):
+            if row["state"] in TERMINAL:
+                return "already_settled"
+            evidence = (await session.execute(text(
+                "SELECT usage,status FROM attempts WHERE request_id=:request "
+                "AND (CAST(:attempt AS uuid) IS NULL OR id=CAST(:attempt AS uuid)) "
+                "AND status='completed' AND usage IS NOT NULL "
+                "ORDER BY started_at DESC,id DESC LIMIT 1"),
+                {"request": request_id, "attempt": attempt_id})).mappings().first()
+            usage = None
+            if evidence is not None:
+                try:
+                    usage = Usage(**dict(evidence["usage"]))
+                except (TypeError, ValueError):
+                    usage = None
+            if usage is not None and row["state"] in {"dispatched", "usage_pending"}:
+                charge = weighted_usage_micro(usage, int(row["input_micro"]), int(row["output_micro"]),
+                                              int(row["cache_read_micro"]), int(row["cache_write_micro"]))
+                await self._finalize(session, row, min(charge, int(row["hold"])), "completed", usage=usage,
+                                     computed_micro=charge,
+                                     reason="usage_exceeded_bound" if charge > row["hold"] or usage.input_tokens > row["input_bound"]
+                                     or usage.output_tokens > row["output_bound"] else None)
+                return "settled_authoritative_usage"
+            if row["state"] == "dispatched":
+                await session.execute(text("UPDATE requests SET state='usage_pending',reason='interrupted' WHERE id=:id"),
+                                      {"id": request_id})
+            return "unknown_usage_pending"
+
+    async def status_snapshot(self):
+        """Return redacted settlement facts suitable for operator snapshots."""
+        async with self.db.sessions() as session:
+            row = (await session.execute(text("""SELECT
+                count(*) FILTER (WHERE state='usage_pending') AS pending,
+                count(*) FILTER (WHERE state='usage_pending' AND EXISTS (
+                    SELECT 1 FROM attempts a WHERE a.request_id=requests.id
+                    AND a.status='completed' AND a.usage IS NOT NULL)) AS recoverable,
+                COALESCE(EXTRACT(EPOCH FROM (clock_timestamp()-min(admitted_at)
+                    FILTER (WHERE state='usage_pending'))),0) AS oldest_age
+                FROM requests"""))).mappings().one()
+        pending, recoverable = int(row["pending"]), int(row["recoverable"])
+        return {"pending": pending, "recoverable": recoverable,
+                "oldest_pending_age_seconds": max(0, int(row["oldest_age"] or 0)),
+                "recovery_outcome": ("clear" if pending == 0 else
+                                     "authoritative_usage_available" if recoverable else
+                                     "unknown_usage_pending")}
 
     async def release_unspent(self, request_id, evidence):
         async with self._request(request_id) as (session, row, _):

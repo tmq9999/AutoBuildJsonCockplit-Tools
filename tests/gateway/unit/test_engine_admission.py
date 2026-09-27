@@ -75,6 +75,32 @@ async def test_prepared_cleanup_releases_admission_when_resource_cleanup_fails()
     assert admission.snapshot()["inflight"] == 0
 
 
+@pytest.mark.asyncio
+async def test_prepared_close_joins_one_recovery_cleanup_and_settles_saved_usage():
+    admission = InferenceAdmission(1)
+    admission_stack = AsyncExitStack()
+    await admission_stack.enter_async_context(admission.enter(datetime.now(timezone.utc) + timedelta(seconds=2)))
+    calls = []
+
+    class Ledger:
+        async def reconcile_interrupted(self, *args):
+            calls.append(args)
+
+    class Stream:
+        async def cancel(self):
+            pass
+
+    from autobuild_json.gateway.engine import PreparedCall
+    request_id, attempt_id = __import__("uuid").uuid4(), __import__("uuid").uuid4()
+    prepared = PreparedCall(SimpleNamespace(ledger=Ledger(), budgets=None), AsyncExitStack(), Stream(), request_id,
+                            SimpleNamespace(public_model_id="m", adapter="x"), attempt_id,
+                            admission_stack=admission_stack)
+    await asyncio.gather(prepared.close(), prepared.close())
+    assert len(calls) == 1 and calls[0] == (request_id, attempt_id)
+    assert admission.snapshot()["inflight"] == 0
+    assert prepared.closed
+
+
 class _Ledger:
     def __init__(self):
         self.released = []

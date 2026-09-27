@@ -11,6 +11,7 @@ from ...oauth import ISSUER
 from ..accounts.imports import CODEX_PROVIDER
 from ..accounts import quota_storage as storage
 from ..errors import GatewayError
+from ..metering.ledger import Ledger
 from ..providers.codex_capabilities import codex_runtime_capabilities
 from ..routing.records import ProviderConfig
 from ..settings import ServiceSettings
@@ -57,6 +58,7 @@ class ServiceStatus:
                     AND (k.expires_at IS NULL OR k.expires_at>now())) AS enabled
                 FROM api_keys k JOIN customers c ON c.id=k.customer_id"""))).mappings().one())
             usage = await usage_summary(session)
+            settlement = await Ledger(self.services.db).status_snapshot()
         # The serving and admin listeners are separate processes. Prefer the
         # redacted snapshot written by the serving engine; never present an
         # idle admin-process engine as live inference capacity. Snapshots older
@@ -80,7 +82,8 @@ class ServiceStatus:
         if capacity is None:
             capacity = {"available": False, "reason": "serving_snapshot_unavailable"}
         return {"status": status, "base_url": base_url, "accounts": accounts, "keys": keys,
-                "usage": usage, "version": codex_runtime_capabilities()["version"], "capacity": capacity}
+                "usage": usage, "version": codex_runtime_capabilities()["version"],
+                "settlement": settlement, "capacity": capacity}
 
 
 class CodexProxy:

@@ -5,7 +5,6 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from .metering.ledger import Ledger
-from .metering.records import Usage
 from .metering.budgets import BudgetService
 from decimal import Decimal
 from .proxy.pg_leases import PgLeaseStore
@@ -21,6 +20,9 @@ def recover_request(state, dispatched):
 class Maintenance:
     def __init__(self, db, worker=None):
         self.db, self.leases, self.ledger, self.worker = db, PgLeaseStore(db), Ledger(db), worker
+
+    async def snapshot(self):
+        return await self.ledger.status_snapshot()
 
     async def tick(self):
         lease = await self.leases.claim("maintenance:gateway", uuid4(), datetime.now(timezone.utc)+timedelta(seconds=30))
@@ -49,13 +51,7 @@ class Maintenance:
                     for attempt in unused:
                         await BudgetService(self.db).settle(attempt,Decimal(0))
                 else:
-                    async with self.db.sessions() as session:
-                        evidence = (await session.execute(text("SELECT usage FROM attempts WHERE request_id=:id "
-                            "AND status='completed' AND usage IS NOT NULL ORDER BY started_at DESC LIMIT 1"), {"id": row["id"]})).scalar_one_or_none()
-                    if evidence is not None:
-                        await self.ledger.settle(row["id"], Usage(**evidence))
-                    else:
-                        await self.ledger.mark_pending(row["id"], "interrupted")
+                    await self.ledger.reconcile_interrupted(row["id"])
                 processed += 1
             async with self.db.sessions.begin() as session:
                 await session.execute(text("DELETE FROM continuation_handles WHERE expires_at<now()"))

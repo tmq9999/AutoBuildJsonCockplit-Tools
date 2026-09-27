@@ -94,3 +94,44 @@ async def test_public_health_does_not_reveal_registry_or_keys(pg_db):
         assert result.status_code == 200
         assert result.json() == {"status": "ok"}
         assert env.secret not in result.text
+
+
+async def test_disconnect_then_late_authoritative_usage_settles_once(pg_db):
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import text
+    from autobuild_json.gateway.identity.policy import Principal
+    from autobuild_json.gateway.protocols.openai_chat import OpenAIChatCodec
+    from autobuild_json.gateway.engine import RequestMeta
+    from autobuild_json.gateway.maintenance import Maintenance
+
+    async with gateway_environment(pg_db) as env:
+        async with pg_db.sessions() as session:
+            owner, version = (await session.execute(text(
+                "SELECT customer_id,version FROM api_keys WHERE id=:id"), {"id": env.key_id})).one()
+        now = datetime.now(timezone.utc)
+        prepared = await env.engine.prepare(Principal(owner, env.key_id, version),
+            OpenAIChatCodec().decode(BODY, {}), RequestMeta(__import__("uuid").uuid4(), now,
+                                                           now + timedelta(seconds=60)))
+        events = prepared.events()
+        assert (await events.__anext__()).kind == "started"
+        await events.aclose()
+        await prepared.close()
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT state FROM requests")) == "usage_pending"
+            assert await session.scalar(text("SELECT count(*) FROM usage_ledger")) == 0
+            assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
+            assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 0
+        async with pg_db.sessions.begin() as session:
+            await session.execute(text("UPDATE attempts SET status='completed',usage=CAST(:usage AS jsonb) WHERE id=:id"),
+                                  {"id": prepared.attempt_id,
+                                   "usage": '{"input_tokens":4,"output_tokens":5}'})
+            await session.execute(text("UPDATE requests SET deadline=now()-interval '30 seconds'"))
+        maintenance = Maintenance(pg_db)
+        assert await maintenance.tick() == 1
+        assert await maintenance.tick() == 0
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT state FROM requests")) == "completed"
+            assert await session.scalar(text("SELECT count(*) FROM usage_ledger")) == 1
+            assert await session.scalar(text("SELECT held FROM quota_buckets WHERE window_kind='total'")) == 0
+            assert await session.scalar(text("SELECT count(*) FROM provider_admissions WHERE active")) == 0
+            assert await session.scalar(text("SELECT count(*) FROM proxy_leases WHERE owner IS NOT NULL")) == 0

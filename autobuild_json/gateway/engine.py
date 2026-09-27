@@ -708,7 +708,18 @@ class PreparedCall:
             if not self.settled:
                 if self.budget_attempt is not None:
                     await self.engine.budgets.settle(self.budget_attempt, None)
-                await self.engine.ledger.mark_pending(self.request_id, "interrupted")
+                reconcile = getattr(self.engine.ledger, "reconcile_interrupted", None)
+                if reconcile is not None:
+                    # Keep the interruption marker durable even when the
+                    # authoritative attempt receipt arrives slightly later.
+                    # The reconciliation transaction then upgrades this same
+                    # request exactly once if that receipt is already saved.
+                    mark_pending = getattr(self.engine.ledger, "mark_pending", None)
+                    if mark_pending is not None:
+                        await mark_pending(self.request_id, "interrupted")
+                    await reconcile(self.request_id, self.attempt_id)
+                else:
+                    await self.engine.ledger.mark_pending(self.request_id, "interrupted")
         finally:
             try:
                 await self.stream.cancel()

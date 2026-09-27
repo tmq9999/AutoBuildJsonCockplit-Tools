@@ -33,6 +33,8 @@ async def test_status_is_private_storage_only_and_does_not_claim_running(pg_db, 
                               "reasoning": "0", "total_tokens": "0", "uncached_input_tokens": "0",
                               "charged_micro": "0", "held_micro": "0"},
             "version": "codex-http-v2",
+                    "settlement": {"pending": 0, "recoverable": 0,
+                                   "oldest_pending_age_seconds": 0, "recovery_outcome": "clear"},
                     "capacity": {"available": False, "reason": "serving_snapshot_unavailable"}}
         assert "no-store" in result.headers["cache-control"].split(", ")
         bad = await client.get(PATH + "?token=DO-NOT-ECHO")
