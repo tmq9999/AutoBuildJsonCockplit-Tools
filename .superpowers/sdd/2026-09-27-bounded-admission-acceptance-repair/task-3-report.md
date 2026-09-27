@@ -19,7 +19,7 @@ Implemented lifecycle-owned capacity telemetry for the serving gateway.
 
 ## Concerns
 
-Integration verification requires the repository's PostgreSQL 18/17 test environment. Existing checked-in status tests that expect an idle Engine fallback need to be updated to the new explicit-unavailable contract.
+Integration verification requires the repository's PostgreSQL 18/17 test environment.
 
 ## Fix round 1
 
