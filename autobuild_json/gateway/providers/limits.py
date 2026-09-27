@@ -1,4 +1,6 @@
+import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from math import ceil
 from uuid import uuid4
 
@@ -10,10 +12,11 @@ from ..errors import GatewayError
 class ProviderLimits:
     def __init__(self, db):
         self.db = db
+        self._released = asyncio.Condition()
+        self._wait_attempts = 0
+        self._expired_waits = 0
 
-    @asynccontextmanager
-    async def acquire(self, route, deadline):
-        identity = uuid4()
+    async def _try_acquire(self, route, deadline, identity):
         async with self.db.sessions.begin() as session:
             provider = (
                 (
@@ -48,6 +51,7 @@ class ProviderLimits:
             if until > now:
                 raise GatewayError("rate_limited", 429, "upstream",
                                    min(86400, ceil((until - now).total_seconds())))
+            limits = []
             for column, record_id, rpm, concurrency in (
                 (
                     "provider_id",
@@ -75,8 +79,11 @@ class ProviderLimits:
                     .mappings()
                     .one()
                 )
-                if counts["rpm"] >= rpm or counts["concurrent"] >= concurrency:
-                    raise GatewayError("upstream_unavailable", 503, "upstream", 1)
+                limits.append((counts, rpm, concurrency))
+            if any(counts["rpm"] >= rpm for counts, rpm, _ in limits):
+                raise GatewayError("upstream_unavailable", 503, "upstream", 1)
+            if any(counts["concurrent"] >= concurrency for counts, _, concurrency in limits):
+                return False
             await session.execute(
                 text(
                     "INSERT INTO provider_admissions(id,provider_id,credential_id,deadline) VALUES (:id,:provider,:credential,:deadline)"
@@ -88,10 +95,53 @@ class ProviderLimits:
                     "deadline": deadline,
                 },
             )
+        return True
+
+    def _remaining(self, deadline):
+        now = datetime.now(deadline.tzinfo or timezone.utc)
+        return (deadline - now).total_seconds()
+
+    def snapshot(self):
+        return {
+            "wait_attempts": self._wait_attempts,
+            "expired_waits": self._expired_waits,
+        }
+
+    async def _wait_for_release(self, deadline):
+        remaining = self._remaining(deadline)
+        if remaining <= 0:
+            self._expired_waits += 1
+            raise GatewayError("deadline_exceeded", 504, "upstream")
+        async with self._released:
+            try:
+                await asyncio.wait_for(self._released.wait(), min(0.05, remaining))
+            except asyncio.TimeoutError:
+                pass
+
+    async def _notify_release(self):
+        async with self._released:
+            self._released.notify_all()
+
+    @asynccontextmanager
+    async def acquire(self, route, deadline, *, wait=False):
+        identity = uuid4()
+        while True:
+            if wait and self._remaining(deadline) <= 0:
+                self._expired_waits += 1
+                raise GatewayError("deadline_exceeded", 504, "upstream")
+            if await self._try_acquire(route, deadline, identity):
+                break
+            if not wait:
+                raise GatewayError("upstream_unavailable", 503, "upstream", 1)
+            self._wait_attempts += 1
+            await self._wait_for_release(deadline)
         try:
             yield identity
         finally:
-            async with self.db.sessions.begin() as session:
-                await session.execute(
-                    text("UPDATE provider_admissions SET active=false WHERE id=:id"), {"id": identity}
-                )
+            try:
+                async with self.db.sessions.begin() as session:
+                    await session.execute(
+                        text("UPDATE provider_admissions SET active=false WHERE id=:id"), {"id": identity}
+                    )
+            finally:
+                await self._notify_release()
