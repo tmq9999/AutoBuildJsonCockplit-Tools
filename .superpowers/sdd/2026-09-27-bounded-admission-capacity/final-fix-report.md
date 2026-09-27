@@ -66,3 +66,5 @@ The required `data` symlink was preserved. Commits for this wave are recorded
 in the branch history with subjects `fix: close final bounded admission review
 gaps`, `test: preserve local gateway capacity configuration`, and `fix: make
 proxy non-wait claims single pass`.
+The pre-0016 rolling-schema fallback is in `fix: tolerate pre-telemetry admin
+schema`.
