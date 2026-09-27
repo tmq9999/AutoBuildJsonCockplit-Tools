@@ -174,6 +174,11 @@ class ProxyManager:
                     if proxy is not None:
                         break
                 if proxy is None:
+                    if not wait:
+                        # A non-waiting claim is intentionally one pass. The
+                        # caller owns provider admission and must not sleep
+                        # here; retryable waiting is handled outside it.
+                        break
                     if all_examined and not (wait and capacity_seen):
                         break
                     if wait:
