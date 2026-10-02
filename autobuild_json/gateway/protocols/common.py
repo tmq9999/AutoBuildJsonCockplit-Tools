@@ -38,6 +38,9 @@ class EventCollector:
             if isinstance(event.block, ToolCall):
                 self.tool_count += 1
                 self.tool_bytes += len(event.block.arguments.encode())
+            if isinstance(event.block, Opaque) and event.block.tool_input_field:
+                self.tool_count += 1
+                self.tool_bytes += len(event.block.payload[event.block.tool_input_field].encode())
             if isinstance(event.block, Reasoning):
                 if event.block.id != event.item_id:
                     raise ValueError("invalid_reasoning_id")
@@ -78,7 +81,29 @@ class EventCollector:
             elif event.kind == "tool_delta" and isinstance(block, ToolCall):
                 self.tool_bytes += len(event.delta.encode())
                 block = block.model_copy(update={"arguments": block.arguments + event.delta})
+            elif event.kind == "tool_delta" and isinstance(block, Opaque) and block.tool_input_field:
+                self.tool_bytes += len(event.delta.encode())
+                field = block.tool_input_field
+                block = block.model_copy(update={"payload": {**block.payload, field: block.payload[field] + event.delta}})
             elif event.kind == "block_finished":
+                if isinstance(block, Opaque) and block.tool_input_field:
+                    if block.tool_input_field == "arguments" and not isinstance(json.loads(block.payload["arguments"]), dict):
+                        raise ValueError("invalid_tool_arguments")
+                    if event.block is not None:
+                        if not isinstance(event.block, Opaque) or event.block.provider != block.provider:
+                            raise ValueError("invalid_tool_item")
+                        completed_fields = {"status", "metadata", "internal_chat_message_metadata_passthrough"}
+                        original = {k: v for k, v in block.payload.items() if k not in completed_fields}
+                        final = {k: v for k, v in event.block.payload.items() if k not in completed_fields}
+                        if original != final:
+                            raise ValueError("tool_item_mismatch")
+                        block = event.block
+                if isinstance(block, Text) and event.block is not None:
+                    if not isinstance(event.block, Text) or event.block.text != block.text:
+                        raise ValueError("invalid_text_item")
+                    if block.phase is not None and event.block.phase != block.phase:
+                        raise ValueError("message_phase_mismatch")
+                    block = event.block
                 if isinstance(block, GeneratedImage) and event.block is not None:
                     if not isinstance(event.block, GeneratedImage) or event.block.id != block.id:
                         raise ValueError("invalid_image")

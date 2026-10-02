@@ -18,11 +18,13 @@ SAFE_STAGES = frozenset({"auth", "policy", "storage", "quota", "proxy", "upstrea
 
 
 class GatewayError(Exception):
-    def __init__(self, code, status=400, stage="request", retry_after=None):
+    def __init__(self, code, status=400, stage="request", retry_after=None, *, upstream_status=None):
         self.code = code if code in SAFE_CODES else "internal_error"
         self.status = status if isinstance(status, int) and 400 <= status <= 599 else 500
         self.stage = stage if stage in SAFE_STAGES else "request"
         self.retry_after = retry_after if type(retry_after) is int and 0 <= retry_after <= 86400 else None
+        self.upstream_status = (upstream_status if type(upstream_status) is int
+                                and 100 <= upstream_status <= 599 else None)
         super().__init__(self.code)
 
     def to_dict(self):

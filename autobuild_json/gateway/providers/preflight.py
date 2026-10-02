@@ -13,6 +13,11 @@ def validate_request(request, route):
         request.validate_provider(route.adapter)
     except ValueError:
         raise GatewayError("unsupported_feature") from None
+    if (request.client_metadata is not None or request.service_tier is not None
+            or any(message.phase is not None for message in request.messages)) and not (
+        route.adapter == "codex_oauth" or (route.adapter == "openai_compatible" and route.wire_api == "responses")
+    ):
+        raise GatewayError("unsupported_feature")
     if route.adapter == "codex_oauth":
         codex_body(request, route.upstream_model)
     else:

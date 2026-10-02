@@ -1,0 +1,7 @@
+{
+  "name": "memos",
+  "displayName": "MemOS (Memory Operating System)",
+  "description": "Unified memory operating system for AI agents — long-term memory, multi-cube management, graph & vector retrieval",
+  "version": "2.0.33",
+  "repository": "https://github.com/MemTensor/MemOS"
+}

@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from uuid import UUID
 
 import httpx
 import pytest
@@ -86,6 +87,12 @@ async def test_admin_names_and_versioned_model_proxy_updates(pg_db):
         profile = (await client.post("/api/service/proxies", json={"name": "Direct", "mode": "direct"})).json()["id"]
         assert (await client.put(f"/api/service/proxies/{profile}/1", json={"name": "Pool", "mode": "pool", "entries_text": "proxy.invalid:80"})).status_code == 200
         assert (await client.put(f"/api/service/proxies/{profile}/1", json={"name": "Old", "mode": "direct"})).status_code == 409
+        # Blank entries_text during update preserves existing encrypted entries
+        assert (await client.put(f"/api/service/proxies/{profile}/2", json={"name": "Pool renamed", "mode": "pool", "entries_text": ""})).status_code == 200
+        reloaded_pool = await services.profiles.load(UUID(profile))
+        assert reloaded_pool.mode == "pool"
+        assert len(reloaded_pool.runtime_entries) == 1
+
 
 
 async def test_admin_can_archive_keys_and_customers_without_erasing_history(pg_db):

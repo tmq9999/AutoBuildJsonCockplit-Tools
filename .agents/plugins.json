@@ -1,0 +1,16 @@
+{
+  "entries": [
+    {
+      "path": ".agents/plugins/superpowers"
+    },
+    {
+      "path": ".agents/plugins/taste-skill"
+    },
+    {
+      "path": ".agents/plugins/context7"
+    },
+    {
+      "path": ".agents/plugins/memos"
+    }
+  ]
+}

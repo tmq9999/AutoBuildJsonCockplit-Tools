@@ -15,6 +15,7 @@ from .streaming import GatewayStreamResponse
 from .gemini_routes import gemini_router
 from .ollama_routes import ollama_router
 from .codex_routes import codex_router
+from .responses_diagnostics import log_responses_rejection
 
 
 def create_gateway_app(identity, catalog, engine, *, allowed_hosts, background_services=None):
@@ -34,6 +35,7 @@ def create_gateway_app(identity, catalog, engine, *, allowed_hosts, background_s
 
     @app.exception_handler(GatewayError)
     async def gateway_error(request, error):
+        log_responses_rejection(request.url.path, error)
         headers = {"Cache-Control": "no-store"}
         if error.retry_after is not None:
             headers["Retry-After"] = str(error.retry_after)

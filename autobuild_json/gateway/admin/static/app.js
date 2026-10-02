@@ -43,6 +43,11 @@ function rowValues(row){
 }
 const headers={keys:['Key / Tên','Khách hàng','Quota tổng (quy đổi)','Giao thức','Trạng thái'],customers:['Tên','Trạng thái','Phiên bản'],providers:['Tên','Chuẩn','Base URL','Trạng thái'],models:['Public ID','Identity','Hệ số in / out','Trạng thái'],proxies:['Tên','Loại','Vùng','Phiên bản'],credentials:['Credential','Health','Trạng thái','Loại'],oauth:['Tài khoản','Health','Trạng thái','Account ID'],bindings:['Public model','Upstream','Identity','Ưu tiên','Trạng thái'],usage:['Request','Model','Trạng thái','Token thực in / out','Giữ trước'],audit:['Hành động','Actor','Thời gian'],overview:['Chỉ số','Giá trị'],playground:['Kết quả thử']};
 Object.assign(headers,{aliases:['Alias','Public model'],budgets:['Budget ID','Tiền tệ','Hạn mức','Đã dùng','Giữ trước']});
+function isRowActive(v,r){
+  if(v==='keys')return Boolean(r.policy?.enabled&&!r.revoked_at);
+  if(v==='customers'||v==='providers'||v==='credentials'||v==='models'||v==='bindings')return Boolean(r.enabled);
+  return true;
+}
 function render(){
   $('split-workspace').hidden=view==='codex-accounts';
   $('global-header').hidden=view==='codex-accounts';
@@ -50,7 +55,13 @@ function render(){
   $('page-title').textContent=view==='keys'?'Quản lý API key':titles[view];$('list-title').textContent=titles[view];$('new-item').textContent='＋ '+(view==='playground'?'Chạy thử':'Thêm '+titles[view]);
   for(const b of document.querySelectorAll('[data-nav]'))b.classList.toggle('active',b.dataset.nav===view);
   const head=node('tr');for(const title of headers[view])head.append(node('th',title));$('columns').replaceChildren(head);
-  const term=$('search').value.toLocaleLowerCase(),rows=dataset().filter(r=>rowValues(r).join(' ').toLocaleLowerCase().includes(term));$('rows').replaceChildren();
+  const statusFilter=$('status-filter')?.value||'all';
+  if($('status-filter'))$('status-filter').hidden=!['keys','customers','providers','credentials','models','bindings'].includes(view);
+  const term=$('search').value.toLocaleLowerCase(),rows=dataset().filter(r=>{
+    if(statusFilter==='active'&&!isRowActive(view,r))return false;
+    if(statusFilter==='inactive'&&isRowActive(view,r))return false;
+    return rowValues(r).join(' ').toLocaleLowerCase().includes(term);
+  });$('rows').replaceChildren();
   for(const row of rows){const tr=node('tr'),values=rowValues(row);values.forEach((v,i)=>{const cell=node('td');if(i===0&&!['audit','overview'].includes(view)){action(cell,String(v),()=>edit(row),'row-link');if(view==='keys')cell.append(node('small',maskedSecret(row.prefix)));}else cell.textContent=String(v??'—');tr.append(cell);});$('rows').append(tr);}
   if(!rows.length){const tr=node('tr');tr.append(node('td','Chưa có dữ liệu.',{colspan:headers[view].length,class:'empty'}));$('rows').append(tr);}
   $('row-count').textContent=`${rows.length} bản ghi`;controls();
@@ -74,7 +85,20 @@ function edit(row=null){
   if(view==='budgets'&&row){$('editor').append(node('pre',JSON.stringify(row,null,2)));return;}
   const form=node('form','',{id:'editor-form',autocomplete:'off'});if(view==='keys')keyForm(form,row,data);else configForm(form,view,row,data);
   const submit=node('button',view==='playground'?'Gửi request thật':row?'Lưu thay đổi':'Tạo mới',{type:'submit',class:'primary'});form.append(submit);$('editor').append(form);
-  form.addEventListener('submit',event=>{event.preventDefault();guard(async()=>{const payload=view==='keys'?keyPayload(form,row):configPayload(form,view,row);const[path,method]=savePath(row,form);const result=await api.request(path,{method,body:payload});
+  form.addEventListener('submit',event=>{event.preventDefault();guard(async()=>{const payload=view==='keys'?keyPayload(form,row):configPayload(form,view,row);const[path,method]=savePath(row,form);
+    let result;
+    try{
+      result=await api.request(path,{method,body:payload});
+    }catch(err){
+      if(view==='keys'&&!row&&(err.code==='permission_denied'||err.status===403)){
+        const custId=value(form,'customer_id');
+        const cust=data.customers.find(c=>c.id===custId);
+        if(cust&&!cust.enabled){
+          throw new Error(`Không thể cấp API key: Khách hàng "${cust.name}" đang bị khóa. Cần mở lại khách hàng trước khi cấp key.`);
+        }
+      }
+      throw err;
+    }
     if(view==='playground'){const usage=result?.usage;const old=$('playground-result');if(old)old.remove();const output=node('section','',{id:'playground-result'});output.append(node('h3','Response thật từ gateway'));if(usage)output.append(node('pre',JSON.stringify(usage,null,2)));const full=node('details');full.append(node('summary','Xem response JSON'),node('pre',JSON.stringify(result,null,2)));output.append(full);$('editor').append(output);await load();notice('Request hoàn tất. Usage và tổng gateway đã cập nhật.');return;}
     $('editor').replaceChildren(node('p','Đã lưu. Chọn bản ghi để chỉnh sửa.',{class:'muted'}));selected=null;await load();notice('Đã lưu thay đổi.');if(result?.secret)reveal(result.secret);
   });});
@@ -84,7 +108,7 @@ function edit(row=null){
   if(view==='providers'&&row){action($('editor'),'Lấy danh sách model',()=>guard(async()=>{const result=await api.request(`/api/service/providers/${row.id}/discover`,{method:'POST',body:{}});$('editor').append(node('pre',JSON.stringify(result,null,2)));}));action($('editor'),'Tắt provider',()=>guard(async()=>{await api.request(`/api/service/providers/${row.id}`,{method:'DELETE',body:{version:row.version}});await load();}),'danger');}
   if(view==='credentials'&&row)action($('editor'),row.enabled?'Tắt credential':'Bật credential',()=>guard(async()=>{await api.request(`/api/service/credentials/${row.id}`,{method:'PATCH',body:{version:row.version,enabled:!row.enabled}});await load();edit(data.credentials.find(c=>c.id===row.id));}));
   if(view==='models'&&row)action($('editor'),'Ẩn / ngừng model',()=>guard(async()=>{await api.request(`/api/service/models/${encodeURIComponent(row.model_id)}`,{method:'DELETE',body:{version:row.version}});await load();edit(data.models.find(m=>m.model_id===row.model_id));}),'danger');
-  if(view==='proxies'&&row){action($('editor'),'Xóa profile không còn dùng',()=>guard(async()=>{if(!confirm('Xóa cấu hình proxy này? Không gọi /out.'))return;await api.request(`/api/service/proxies/${row.id}`,{method:'DELETE',body:{version:row.version}});await load();$('editor').replaceChildren();}),'danger');if(row.config.mode==='kiotproxy')action($('editor'),'Giải phóng Kiot key…',()=>guard(async()=>{const index=prompt('Số thứ tự key (bắt đầu từ 1). Chỉ giải phóng khi không có request sử dụng.');if(index===null)return;await api.request(`/api/service/proxies/${row.id}/release`,{method:'POST',body:{key_index:Number(index)-1}});notice('Đã giải phóng key được chọn.');}));}
+  if(view==='proxies'&&row){action($('editor'),'Xóa profile không còn dùng',()=>guard(async()=>{if(!confirm('Xóa cấu hình proxy này? Không gọi /out.'))return;try{await api.request(`/api/service/proxies/${row.id}`,{method:'DELETE',body:{version:row.version}});await load();$('editor').replaceChildren();}catch(err){if(err.status===409||err.code==='invalid_state'){throw new Error('Không thể xóa profile proxy: Profile này đang được gán cho Provider hoặc Tài khoản Codex. Vui lòng gỡ liên kết trước khi xóa.');}throw err;}}),'danger');if(row.config.mode==='kiotproxy')action($('editor'),'Giải phóng Kiot key…',()=>guard(async()=>{const index=prompt('Số thứ tự key (bắt đầu từ 1). Chỉ giải phóng khi không có request sử dụng.');if(index===null)return;await api.request(`/api/service/proxies/${row.id}/release`,{method:'POST',body:{key_index:Number(index)-1}});notice('Đã giải phóng key được chọn.');}));}
 }
 const navIcons={overview:'activity',customers:'users',keys:'key',providers:'route',credentials:'key',models:'image',bindings:'route',proxies:'route',oauth:'upload',playground:'play',usage:'activity',audit:'activity',aliases:'route',budgets:'settings','codex-accounts':'codex'};
 document.querySelector('.cockpit-logo').replaceChildren(icon('codex'));
@@ -93,7 +117,7 @@ for(const button of document.querySelectorAll('[data-nav]')){
   button.addEventListener('click',()=>{
     if(busy)return;
     const wasCodex=view==='codex-accounts',requested=button.dataset.nav;
-    view=requested==='oauth'?'codex-accounts':requested;selected=null;$('search').value='';
+    view=requested==='oauth'?'codex-accounts':requested;selected=null;$('search').value='';if($('status-filter'))$('status-filter').value='all';
     if(view==='codex-accounts'){
       codex.open().then(()=>{if(requested==='oauth'&&view==='codex-accounts')codex.showImport();});
       $('codex-workspace').hidden=false;render();
@@ -109,7 +133,7 @@ for(const button of document.querySelectorAll('[data-nav]')){
     });
   });
 }
-$('new-item').addEventListener('click',()=>edit());$('search').addEventListener('input',render);$('refresh').addEventListener('click',()=>guard(load));
+$('new-item').addEventListener('click',()=>edit());$('search').addEventListener('input',render);$('status-filter')?.addEventListener('change',render);$('refresh').addEventListener('click',()=>guard(load));
 $('hide-secret').addEventListener('click',clearSecret);$('one-time-secret').addEventListener('cancel',clearSecret);$('copy-secret').addEventListener('click',()=>navigator.clipboard.writeText($('secret-value').value));
 $('logout').addEventListener('click',()=>guard(async()=>{try{await api.request('/api/session',{method:'DELETE'});}finally{api.clear();hideAll();}}));
 $('login-form').addEventListener('submit',event=>{event.preventDefault();guard(async()=>{api.clear();$('login-error').textContent='';try{const session=await api.request('/api/session',{method:'POST',body:{token:$('admin-token').value}});api.setSession(session.csrf_token);authenticated=true;$('admin-token').value='';$('login-panel').hidden=true;$('workspace').hidden=false;await Promise.all([load(),codex.open()]);}catch(e){$('login-error').textContent='Không đăng nhập được: '+e.message;throw e;}});});

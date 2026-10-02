@@ -17,6 +17,93 @@ normalization. They do not prove every SDK tool mode, beta feature, model or cli
 application (Claude Code/Codex CLI) works. Run the relevant client acceptance test
 before claiming that support.
 
+## Responses request bodies
+
+`POST /v1/responses` and `POST /backend-api/codex/responses` accept native
+Responses input and return Responses JSON (default) or semantic SSE events
+with `stream: true`. A minimal native body is:
+
+```json
+{"model":"gpt-6-astra","input":"Xin chào"}
+```
+
+The model must be published and allowed by the client key. From the
+2026-09-28 compatibility patch, the same handlers also accept a Chat-style
+`messages` array as an alternative to `input`:
+
+```json
+{"model":"gpt-6-astra","messages":[{"role":"user","content":"Xin chào"}]}
+```
+
+This is a gateway extension, not the native OpenAI Responses request shape.
+It translates text messages (string or `type: "text"` parts), assistant
+`tool_calls`, and `role: "tool"` results with `tool_call_id`. Other top-level
+fields retain Responses syntax: for example, function tools use
+`{"type":"function","name":"lookup","parameters":{}}`, not Chat's nested
+`function` object. Chat-only options such as `max_tokens` and
+`stream_options`, and unsupported media, remain rejected rather than dropped.
+Use native `input` for Responses-specific items.
+
+Supplying both `input` and `messages`, or a non-array `messages`, returns
+`invalid_request` at the request boundary, before dispatch or quota reservation.
+The existing `store: true` and `background: true` restrictions still apply.
+Auth, routing, continuation scope and usage accounting are unchanged.
+
+Regression coverage uses the real HTTP handlers and disposable PostgreSQL with
+synthetic provider I/O for JSON/SSE and exactly-once settlement. It does not
+verify a running tunnel, deployed process, or live provider. Existing processes
+must reload the patched code before the extension becomes available.
+
+## Codex CLI native tools (2026-09-28)
+
+The Codex OAuth Responses path accepts bounded string-valued `client_metadata`,
+`service_tier` hints, and developer `additional_tools` input items containing
+native tool definitions/namespaces. Only `service_tier: "priority"` is forwarded
+to Codex; other tiers are omitted, matching the inspected Cockpit normalization.
+Native metadata/tier hints are rejected on non-Responses upstream protocols
+instead of silently discarded.
+
+The parser and Responses encoder preserve `custom_tool_call` input deltas,
+terminal metadata, `caller`/`async`, and `custom_tool_call_output` replay (string
+or text, image, or file content parts). Media fields have type/size limits; image
+parts require the vision capability and are forwarded without a gateway fetch.
+Namespaced function-call replay is retained as well. These native items
+are provider-bound opaque records: they require the tools capability and cannot
+be routed to Anthropic/Gemini/Ollama/Chat or an unrelated OpenAI provider.
+Call identity/input must agree across the lifecycle; only completion metadata
+may be filled at item-done. Grammar input is not parsed as JSON function arguments.
+
+Assistant `phase` (`commentary`/`final_answer`) survives streaming output and
+follow-up input. An initially absent phase may be filled at item-done; conflicting
+values across added/done/terminal events are rejected. Non-Responses routes reject
+phase-bearing requests rather than silently dropping the field.
+
+These schema cases were checked against the [official Responses create
+reference](https://developers.openai.com/api/reference/resources/responses/methods/create)
+and covered by synthetic regression tests; image/file tool results and async
+execution semantics have not been verified live.
+
+Real CLI text and a complete terminal-tool roundtrip have been observed through
+the LAN listener with real provider usage. See
+[live evidence and commands](research/2026-09-28-codex-live-responses.md).
+This proves those two modes on Codex CLI 0.157.1, not every tool, client version,
+media type, long-session compaction, WebSocket mode, or internet deployment.
+
+When an upstream Responses stream fails or closes before its terminal event, the
+gateway emits exactly one `response.failed` SSE event with a safe allowlisted
+code (and no `response.completed`/`response.incomplete`). This applies even when
+the upstream failed before `response.created`; usage remains unknown and the
+request is retained for reconciliation. Operations logs record only the safe
+upstream event type, never provider bodies or prompts.
+
+Upstream `error`/`response.failed` codes are retained only when allowlisted,
+including before `response.created`. Unknown or malformed codes become
+`upstream_error`. A code such as `rate_limited` received inside an HTTP 200 SSE
+stream does not prove pre-generation rejection and does not authorize automatic
+retry or quota release. The CLI acceptance verifier reports safe gateway codes
+and HTTP/local-environment hints; an empty attempt-report page alone does not
+prove that the client sent no HTTP request.
+
 ## Current limits
 
 - Responses WebSocket is a sequential beta bridge, not a transparent persistent
@@ -48,8 +135,9 @@ before claiming that support.
   upstream Responses call, matching Cockpit's compatibility normalization. These
   are accepted client hints, not enforced generation caps; admission and retry
   reservation still use the full finite operator-configured model bound. Codex
-  requests add `Accept: text/event-stream`; no `originator` spoofing is used. No
-  live Codex inference contract has been verified by this gateway implementation.
+  requests add `Accept: text/event-stream` and the Codex protocol-identification
+  headers. The narrowly scoped live text/tool evidence above is separate from
+  synthetic compatibility suites.
 - Model discovery via public APIs is filtered by client policy. Private provider
   discovery supports native model-list shapes and stages entries for admin review.
 - Public gateway requires a client key for every protocol, including Ollama. No key

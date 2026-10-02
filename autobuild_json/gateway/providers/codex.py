@@ -27,6 +27,11 @@ def codex_body(request, model):
     # certified binding bound even when the client supplies a smaller limit.
     for name in ("max_output_tokens", "temperature", "top_p"):
         body.pop(name, None)
+    # Cockpit accepts the client's service-tier hint but only forwards the
+    # Codex-supported priority tier. Other values are omitted before dispatch;
+    # the CLI's fast configuration is already serialized as priority.
+    if body.get("service_tier") != "priority":
+        body.pop("service_tier", None)
     include = list(body.get("include", []))
     if "reasoning.encrypted_content" not in include:
         include.append("reasoning.encrypted_content")
@@ -118,7 +123,7 @@ class CodexAdapter:
                 rejected.received_at = received_at
                 raise rejected
             if response.status != 200:
-                raise GatewayError("upstream_error", 502)
+                raise GatewayError("upstream_error", 502, "upstream", upstream_status=response.status)
             yield ProviderStream(response, compact_events(response) if compact else responses_events(
                 response, images=request.image_tool is not None, allow_empty_terminal_output=True))
 

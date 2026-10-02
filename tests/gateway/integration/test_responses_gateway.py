@@ -34,6 +34,38 @@ async def test_responses_can_translate_a_chat_upstream(pg_db):
         assert response.json()["usage"]["input_tokens"] == 4
 
 
+@pytest.mark.parametrize("frames", [0, 3])
+async def test_streamed_responses_emit_failed_terminal_when_upstream_closes_early(pg_db, frames):
+    from .test_codex_pool_dispatch import BODY, codex_environment
+
+    truncated = b"".join(frame+b"\n\n" for frame in native_wire().split(b"\n\n")[:frames])
+    async with codex_environment(pg_db, respond=lambda r: httpx.Response(200, content=truncated)) as env:
+        response = await env.client.post("/v1/responses", json={
+            **BODY, "stream": True,
+        }, headers=env.headers)
+
+        assert response.status_code == 200
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        failed = [event for event in events if event["type"] == "response.failed"]
+        assert len(failed) == 1
+        assert failed[0]["response"]["status"] == "failed"
+        assert failed[0]["response"]["error"] == {"code": "upstream_error", "message": "upstream_error"}
+        assert failed[0]["response"]["usage"] is None
+        if frames:
+            assert any(event["type"] == "response.output_text.delta" and event["delta"] == "Native"
+                       for event in events)
+        else:
+            assert len(events) == 1
+        assert not any(event["type"] in {"response.completed", "response.incomplete"} for event in events)
+        assert len(env.upstream_requests) == 1
+        assert "upstream-resp-private" not in response.text
+        async with pg_db.sessions() as session:
+            assert await session.scalar(text("SELECT state FROM requests")) == "usage_pending"
+            assert await session.scalar(text("SELECT count(*) FROM attempts")) == 1
+            assert await session.scalar(text("SELECT count(*) FROM usage_ledger")) == 0
+            assert await session.scalar(text("SELECT held FROM quota_buckets WHERE window_kind='total'")) > 0
+
+
 async def test_native_responses_continuation_is_scoped_and_sent_only_upstream(pg_db):
     from autobuild_json.gateway.routing.records import ProviderConfig
     async with gateway_environment(pg_db, respond=lambda r: httpx.Response(200, content=native_wire())) as env:

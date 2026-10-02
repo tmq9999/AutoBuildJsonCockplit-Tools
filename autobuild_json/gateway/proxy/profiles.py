@@ -47,10 +47,19 @@ class ProfileStore:
 
     async def update(self, identity, version, payload):
         raw = payload.entries_text.get_secret_value()
-        self.selection(payload.mode, raw, region=payload.region, protocol=payload.protocol, rotate=payload.rotate)
-        cipher = self.vault.seal("proxy_profile", identity, raw.encode()).to_dict()
         config = {"mode": payload.mode, "region": payload.region, "protocol": payload.protocol, "rotate": payload.rotate}
         async with self.db.sessions.begin() as session:
+            existing = (await session.execute(text("SELECT encrypted_entries, version FROM proxy_profiles WHERE id=:id FOR UPDATE"),
+                                              {"id": identity})).mappings().first()
+            if not existing or existing["version"] != version:
+                raise GatewayError("version_conflict", 409)
+            if not raw and payload.mode != "direct":
+                cipher = existing["encrypted_entries"]
+                decrypted = self.vault.open("proxy_profile", identity, Ciphertext.from_dict(cipher)).decode()
+                self.selection(payload.mode, decrypted, region=payload.region, protocol=payload.protocol, rotate=payload.rotate)
+            else:
+                self.selection(payload.mode, raw, region=payload.region, protocol=payload.protocol, rotate=payload.rotate)
+                cipher = self.vault.seal("proxy_profile", identity, raw.encode()).to_dict()
             result = await session.scalar(text("UPDATE proxy_profiles SET name=:name,config=CAST(:config AS jsonb),"
                 "encrypted_entries=CAST(:cipher AS jsonb),version=version+1 WHERE id=:id AND version=:version RETURNING id"),
                 {"id": identity, "version": version, "name": payload.name, "config": json.dumps(config), "cipher": json.dumps(cipher)})

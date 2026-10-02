@@ -27,7 +27,17 @@ function quotaField(parent,name,label,options={}){
 export function keyForm(form,row,data){
   const p=row?.policy??{},general=section(form,'Thông tin chung');
   field(general,'name','Tên hiển thị',{value:row?.name??'',required:true});
-  const customer=field(general,'customer_id','Khách hàng',{choices:[['','Chọn khách hàng'],...data.customers.map(c=>[c.id,c.name])],value:row?.customer_id??'',required:true});customer.disabled=Boolean(row);
+  const customerChoices=[['','Chọn khách hàng'],...data.customers.map(c=>[c.id,c.enabled===false?`${c.name} [Đã khóa]`:c.name])];
+  const customer=field(general,'customer_id','Khách hàng',{choices:customerChoices,value:row?.customer_id??'',required:true});customer.disabled=Boolean(row);
+  const disabledWarn=node('p','Khách hàng này đang bị khóa, không thể cấp API key mới. Cần mở lại khách hàng trước khi cấp key.',{class:'notice warning'});
+  disabledWarn.hidden=true;
+  customer.parentElement.append(disabledWarn);
+  const checkCustomerStatus=()=>{
+    const selectedCust=data.customers.find(c=>c.id===customer.value);
+    disabledWarn.hidden=!(selectedCust&&selectedCust.enabled===false);
+  };
+  customer.addEventListener('change',checkCustomerStatus);
+  checkCustomerStatus();
   field(general,'expires_at','Hết hạn (UTC)',{type:'datetime-local',value:p.expires_at?new Date(p.expires_at).toISOString().slice(0,16):''});
   field(general,'enabled','Cho phép sử dụng',{type:'checkbox',value:p.enabled??true});
   const quota=section(form,'Hạn mức token quy đổi');quota.append(node('p','Trống = không giới hạn; 0 = không có quota.',{class:'muted'}));

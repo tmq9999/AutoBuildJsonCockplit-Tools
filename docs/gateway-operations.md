@@ -117,11 +117,24 @@ included or encrypted by this service backup; protect them separately.
 
 ## Publishing and limitations
 
-Loopback is the default. Non-loopback bind requires explicit allowed Host values,
-trusted reverse-proxy IPs and TLS-proxy confirmation. Do not use wildcard trusted
-forwarders. The reverse proxy must enforce aggregate pre-auth rate/body limits;
-the built-in pre-auth IP guard is bounded and process-local. Issued-key quota/RPM
-and concurrency remain database-authoritative across gateway workers.
+Loopback is the default. For a trusted private-LAN smoke test only, the local
+runner can bind the public gateway to one explicit RFC1918 IPv4 address:
+
+```bash
+.venv/bin/python scripts/local_gateway.py \
+  --postgres-bin /absolute/path/to/postgres/bin \
+  --gateway-host 192.168.134.128
+```
+
+This exposes plaintext `http://192.168.134.128:8788`; the admin listener remains
+loopback-only at `127.0.0.1:8787`, the Host allowlist contains only the exact LAN
+address, and wildcard/public bind addresses are rejected. Use this only on a
+trusted test LAN with no port forwarding. Omit `--gateway-host` to return to the
+loopback default. Any other non-loopback deployment still requires explicit Host
+values, trusted reverse-proxy IPs and TLS-proxy confirmation. Do not use wildcard
+trusted forwarders. The reverse proxy must enforce aggregate pre-auth rate/body
+limits; the built-in pre-auth IP guard is bounded and process-local. Issued-key
+quota/RPM and concurrency remain database-authoritative across gateway workers.
 
 Gateway does not execute model tool calls or shell commands. It does not grant
 rights to resell a provider's service; verify the provider contract independently.

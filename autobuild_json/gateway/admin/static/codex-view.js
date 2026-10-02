@@ -54,6 +54,8 @@ export function createCodexWorkspace(root,api,onUnauthorized){
   let proxyBusy=false,proxyNeedsReload=false,proxyState='loading',proxyProfiles=[],statusGeneration=0;
   let statsTimer=null,statsBusy=false,usageNote=null;
   let reportAccounts=new Map(),reportAccountSelect=null;
+  const accountTokens=new Map(),tokenAccounts=new Map();
+  function accountToken(id){if(!id)return '';if(!accountTokens.has(id)){const t='acc_ref_'+accountTokens.size;accountTokens.set(id,t);tokenAccounts.set(t,id);}return accountTokens.get(id);}
   const tabPanels={overview:'codex-overview',keys:'codex-keys',accounts:'codex-accounts-panel',models:'codex-capabilities',usage:'codex-reports'};
   const current=t=>active&&t===epoch;
   function notify(text,error=false){if(message){message.textContent=text;message.className='notice'+(error?' warning':'');}for(const dialog of root.querySelectorAll('dialog[open]')){let note=dialog.querySelector('.dialog-notice');if(!note){note=node('p','',{class:'dialog-notice',role:'status'});dialog.prepend(note);}note.textContent=text;note.className='dialog-notice notice'+(error?' warning':'');}}
@@ -251,7 +253,7 @@ export function createCodexWorkspace(root,api,onUnauthorized){
     const changed=pageIndex!==page.page-1||pageSize!==page.page_size||loadedSearch!==search||loadedHealth!==status;
     accounts=page.items;pageIndex=page.page-1;pageSize=page.page_size;pageTotal=page.total;pageCount=page.total_pages;loadedSearch=search;loadedHealth=status;
     reportAccounts=mergeReportAccountOptions(reportAccounts,accounts);
-    if(reportAccountSelect?.isConnected){const selected=reportAccountSelect.value;reportAccountSelect.replaceChildren(node('option','Tất cả',{value:''}),...[...reportAccounts].map(([id,label])=>node('option',label,{value:id})));reportAccountSelect.value=selected;}
+    if(reportAccountSelect?.isConnected){const selected=reportAccountSelect.value;reportAccountSelect.replaceChildren(node('option','Tất cả',{value:''}),...[...reportAccounts].map(([id,label])=>node('option',label,{value:accountToken(id)})));reportAccountSelect.value=selected;}
     if(changed){selectedAccounts.clear();savedQuota.clear();savedCredits.clear();refreshErrors.clear();}
     else selectedAccounts=new Set([...selectedAccounts].filter(id=>accounts.some(row=>row.id===id)));
     if(state.accountId&&!accounts.some(row=>row.id===state.accountId))state.select(null);
@@ -500,7 +502,7 @@ export function createCodexWorkspace(root,api,onUnauthorized){
     const range=node('div','',{class:'report-range'});range.append(node('strong','Thống kê sử dụng'));const presets=node('div','',{class:'range-buttons'});range.append(presets);reportsBox.append(range);
     const summary=node('div','',{class:'codex-overview-stats'}),chart=node('section','',{class:'card codex-chart'});reportsBox.append(summary,chart);
     const log=panel(reportsBox,'codex-report-log','Thống kê và nhật ký'),form=node('form','',{class:'codex-report-filters'});log.append(form);
-    field(form,'kind','Báo cáo',{choices:[['requests','Từng attempt'],['accounts','Theo tài khoản']]});reportAccountSelect=field(form,'account','Tài khoản',{choices:[['','Tất cả'],...[...reportAccounts]]});field(form,'model','Canonical model',{choices:[['','Tất cả'],...models.map(m=>[m.model_id,m.model_id])]});field(form,'from','Từ (UTC)',{type:'datetime-local'});field(form,'to','Đến (UTC)',{type:'datetime-local'});const submit=node('button','Tải báo cáo đã lưu',{type:'submit'});form.append(submit);const output=node('div','',{class:'report-output'});log.append(output);let page=null,filters={},kind='requests',generation=0;
+    field(form,'kind','Báo cáo',{choices:[['requests','Từng attempt'],['accounts','Theo tài khoản']]});reportAccountSelect=field(form,'account','Tài khoản',{choices:[['','Tất cả'],...[...reportAccounts].map(([id,label])=>[accountToken(id),label])]});field(form,'model','Canonical model',{choices:[['','Tất cả'],...models.map(m=>[m.model_id,m.model_id])]});field(form,'from','Từ (UTC)',{type:'datetime-local'});field(form,'to','Đến (UTC)',{type:'datetime-local'});const submit=node('button','Tải báo cáo đã lưu',{type:'submit'});form.append(submit);const output=node('div','',{class:'report-output'});log.append(output);let page=null,filters={},kind='requests',generation=0;
     for(const [days,label]of [[1,'24 giờ'],[7,'7 ngày'],[30,'30 ngày']]){const button=action(presets,label,()=>{const end=new Date(),start=new Date(end.getTime()-days*86400000);form.elements.namedItem('from').value=start.toISOString().slice(0,16);form.elements.namedItem('to').value=end.toISOString().slice(0,16);for(const b of presets.children)b.classList.toggle('active',b===button);form.requestSubmit();});if(days===1)button.classList.add('active');}
     function drawSummary(result){const totals=result.summary??{};summary.replaceChildren();for(const [label,key] of [['Requests','requests'],['Hoàn tất','completed'],['Tổng token','total_tokens'],['Input token','input_tokens'],['Cache đọc','cached_read'],['Cache ghi','cached_write'],['Output token','output_tokens'],['Reasoning','reasoning'],['Token quy đổi đã trừ','charged_micro']]){const v=totals[key],card=node('div','',{class:'codex-stat'});card.append(node('small',label),node('strong',v==null?unknown:label.includes('quy đổi')?amount(v):BigInt(v).toLocaleString('vi-VN')),node('span','Toàn bộ khoảng thời gian / bộ lọc',{class:'muted'}));summary.append(card);}
       summary.append(node('p',`${totals.pending??0} request chờ đối soát; ${totals.unknown_usage_requests??0} hoàn tất thiếu usage. Không cộng cache/reasoning lần thứ hai.`,{class:'muted'}));
@@ -518,7 +520,7 @@ export function createCodexWorkspace(root,api,onUnauthorized){
       if(result.items.some(r=>BigInt(r.held_micro??'0')>0n))output.append(node('p','Pending usage hold cần đối soát; không silent refund.',{class:'notice warning'}));
       output.append(node('p','Failed attempt không charge khách; chỉ serving attempt được quyết toán một lần. Chi phí upstream không quy đổi thành quota; Không rõ không phải 0.',{class:'muted'}));if(result.next_after)action(output,'Trang báo cáo tiếp theo',()=>perform(()=>read(true)));
     }
-    form.onsubmit=e=>{e.preventDefault();kind=value(form,'kind');filters=reportAccountFilters(value(form,'account'));if(value(form,'model'))filters.model_id=value(form,'model');for(const n of ['from','to'])if(value(form,n))filters[n]=value(form,n)+':00Z';perform(()=>read());};perform(()=>read());
+    form.onsubmit=e=>{e.preventDefault();kind=value(form,'kind');const accVal=value(form,'account');filters=reportAccountFilters(tokenAccounts.get(accVal)??accVal);if(value(form,'model'))filters.model_id=value(form,'model');for(const n of ['from','to'])if(value(form,n))filters[n]=value(form,n)+':00Z';perform(()=>read());};perform(()=>read());
   }
   function build(){root.replaceChildren();
     const heading=node('div','',{class:'codex-page-heading'});heading.append(node('h2','Accounts'),node('span','?',{class:'codex-help',title:'Quản lý tài khoản OAuth và dịch vụ API Codex'}));root.append(heading);

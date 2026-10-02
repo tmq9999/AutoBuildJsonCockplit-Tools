@@ -6,6 +6,15 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def is_private_lan_host(host: str) -> bool:
+    try:
+        address = ipaddress.IPv4Address(host)
+    except ipaddress.AddressValueError:
+        return False
+    return any(address in ipaddress.IPv4Network(cidr)
+               for cidr in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
+
 class ServiceSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AUTOBUILD_GATEWAY_", extra="forbid")
 
@@ -20,6 +29,7 @@ class ServiceSettings(BaseSettings):
     database_pool_timeout: float = Field(default=30, ge=1, le=300)
     allowed_hosts: tuple[str, ...] = ("127.0.0.1:8788", "localhost:8788")
     tls_proxy_configured: bool = False
+    allow_insecure_lan: bool = False
     trusted_proxy_ips: tuple[str, ...] = ()
     private_origins: tuple[str, ...] = ()
     allowed_networks: tuple[str, ...] = ()
@@ -53,6 +63,11 @@ class ServiceSettings(BaseSettings):
             raise ValueError("Database pool capacity must be at least 3")
         if self.enabled and (self.database_url is None or self.master_key_file is None):
             raise ValueError("Enabled gateway requires database and master-key configuration")
-        if self.host not in {"127.0.0.1", "localhost", "::1"} and (not self.tls_proxy_configured or not self.allowed_hosts or not self.trusted_proxy_ips):
+        if self.allow_insecure_lan:
+            if not is_private_lan_host(self.host):
+                raise ValueError("Insecure LAN bind requires a specific RFC1918 private IPv4 address")
+            if self.allowed_hosts != (f"{self.host}:{self.port}",):
+                raise ValueError("Insecure LAN allowed hosts must contain only the exact bind address and port")
+        elif self.host not in {"127.0.0.1", "localhost", "::1"} and (not self.tls_proxy_configured or not self.allowed_hosts or not self.trusted_proxy_ips):
             raise ValueError("Public bind requires explicit TLS proxy, trusted IPs and allowed hosts")
         return self

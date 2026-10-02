@@ -1,7 +1,9 @@
-"""Run a loopback-only gateway with persistent, private development data.
+"""Run a local gateway with persistent, private development data.
 
 No synthetic upstream or credentials are created. PostgreSQL binaries must be
 provided by the operator; database/keyring survive a process or machine restart.
+Gateway defaults to loopback; --gateway-host explicitly opts into plaintext LAN
+testing. Admin and PostgreSQL always remain loopback-only.
 """
 import argparse
 import asyncio
@@ -18,6 +20,20 @@ import fcntl
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+
+def gateway_bind_environment(host):
+    from autobuild_json.gateway.settings import is_private_lan_host
+    lan = host != "127.0.0.1"
+    if lan and not is_private_lan_host(host):
+        raise ValueError("Gateway host must be 127.0.0.1 or a specific RFC1918 private IPv4 address")
+    hosts = [f"{host}:8788"] if lan else ["127.0.0.1:8788", "localhost:8788"]
+    return {
+        "AUTOBUILD_GATEWAY_HOST": host,
+        "AUTOBUILD_GATEWAY_PORT": "8788",
+        "AUTOBUILD_GATEWAY_ALLOWED_HOSTS": json.dumps(hosts),
+        "AUTOBUILD_GATEWAY_ALLOW_INSECURE_LAN": "true" if lan else "false",
+    }
 
 
 def private_file(path, create):
@@ -87,12 +103,18 @@ async def import_records(path, environment):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--postgres-bin", type=Path, required=True)
+    parser.add_argument("--gateway-host", default="127.0.0.1",
+                        help="Gateway bind address; a specific RFC1918 IPv4 opts into insecure HTTP LAN testing")
     parser.add_argument("--import-json", type=Path, help="Explicit local OAuth export to import; never prints tokens")
     parser.add_argument("--allowed-network", action="append", default=[],
                         help="Explicit CIDR allowed for private upstream/proxy resolution (repeatable)")
     parser.add_argument("--trusted-egress-proxy", action="append", default=[],
                         help="Exact proxy origin trusted for private resolution (repeatable)")
     args = parser.parse_args()
+    try:
+        gateway_environment = gateway_bind_environment(args.gateway_host)
+    except ValueError as exc:
+        parser.error(str(exc))
     binary = args.postgres_bin.resolve()
     for name in ("initdb", "pg_ctl"):
         if not (binary / name).is_file():
@@ -114,10 +136,10 @@ def main():
     except BlockingIOError:
         os.close(lock_descriptor)
         parser.error("Another local gateway runner is already using this data directory")
-    for port in (55433, 8787, 8788):
+    for host, port in (("127.0.0.1", 55433), ("127.0.0.1", 8787), (args.gateway_host, 8788)):
         with socket.socket() as probe:
-            if probe.connect_ex(("127.0.0.1", port)) == 0:
-                parser.error(f"Local port {port} already in use; no existing process was changed")
+            if probe.connect_ex((host, port)) == 0:
+                parser.error(f"Local address {host}:{port} already in use; no existing process was changed")
     cluster, password_file = root / "postgres", root / "db-password"
     password = private_file(password_file, lambda: secrets.token_urlsafe(32))
     if not (cluster / "PG_VERSION").is_file():
@@ -154,10 +176,10 @@ def main():
         require_private_regular(keyring)
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("AUTOBUILD_")}
+        environment.update(gateway_environment)
         environment.update(
             AUTOBUILD_GATEWAY_DATABASE_URL=f"postgresql+psycopg://autobuild_local:{password}@127.0.0.1:55433/autobuild_local",
-            AUTOBUILD_GATEWAY_MASTER_KEY_FILE=str(keyring), AUTOBUILD_GATEWAY_HOST="127.0.0.1",
-            AUTOBUILD_GATEWAY_PORT="8788", AUTOBUILD_GATEWAY_ALLOWED_HOSTS='["127.0.0.1:8788","localhost:8788"]',
+            AUTOBUILD_GATEWAY_MASTER_KEY_FILE=str(keyring),
             AUTOBUILD_GATEWAY_ALLOWED_NETWORKS=json.dumps(args.allowed_network),
             AUTOBUILD_GATEWAY_TRUSTED_EGRESS_PROXIES=json.dumps(args.trusted_egress_proxy),
             AUTOBUILD_HOST="127.0.0.1", AUTOBUILD_PORT="8787", AUTOBUILD_DATA_DIR=str(root / "admin-data"))
@@ -169,7 +191,10 @@ def main():
             return 0
         for action in ("serve", "admin"):
             children.append(subprocess.Popen(command_args + [action], env=environment, cwd=ROOT))
-        print("Starting admin http://127.0.0.1:8787/service/ and gateway http://127.0.0.1:8788", flush=True)
+        print(f"Starting admin http://127.0.0.1:8787/service/ and gateway http://{args.gateway_host}:8788", flush=True)
+        if args.gateway_host != "127.0.0.1":
+            print("WARNING: LAN gateway uses plaintext HTTP. Use only on a trusted test network; no port forwarding.",
+                  flush=True)
         print(f"Admin token: private file {root / 'admin-data' / 'local-config.json'}", flush=True)
         # A child failure shuts down both listeners. No credential-bearing
         # command line/environment is printed on errors.

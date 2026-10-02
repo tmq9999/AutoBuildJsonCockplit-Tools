@@ -51,7 +51,11 @@ Codex OAuth hiện cung cấp các đường tương thích Responses/Images:
   request mới không ghim session có thể chuyển sang tài khoản tiếp theo trong
   giới hạn pool, tối đa 8 tài khoản/request. Binding/model bị từ chối được
   cooldown cục bộ 5 phút, không làm tắt các model khác của tài khoản.
-- `POST /v1/responses` và `POST /backend-api/codex/responses` — Responses SSE.
+- `POST /v1/responses` và `POST /backend-api/codex/responses` — Responses JSON/SSE;
+  `input` là dạng chuẩn. Mảng `messages` kiểu Chat Completions được hỗ trợ
+  cho text và lịch sử function call/result; các trường cấp cao khác vẫn dùng
+  chuẩn Responses. Không gửi đồng thời `input` và `messages`.
+  Xem [contract request](docs/gateway-compatibility.md#responses-request-bodies).
 - `POST /v1/responses/compact` và alias backend — compaction response có usage.
 - `POST /v1/images/generations`, `POST /v1/images/edits` — JSON hoặc multipart
   edit, trả `{created,data:[{b64_json|url,revised_prompt}]}`.
@@ -152,7 +156,12 @@ Ba terminal/process cần cùng biến môi trường ở trên:
 ```
 
 Runner giữ database, keyring và admin config trong `data/local-gateway/` (private,
-không commit), chỉ mở loopback 55433/8787/8788 và không tạo model/key khách giả.
+không commit), mặc định chỉ mở loopback 55433/8787/8788 và không tạo model/key
+khách giả. Để test public gateway từ một máy khác trên cùng LAN, truyền đúng IP
+RFC1918 của máy host, ví dụ `--gateway-host 192.168.134.128`; khi đó gateway là
+`http://192.168.134.128:8788`, còn admin vẫn chỉ ở `http://127.0.0.1:8787`.
+Đây là HTTP plaintext cho mạng test tin cậy, không phải cấu hình production và
+không được port-forward ra Internet. Bỏ cờ để quay lại loopback.
 Có thể thêm `--import-json /absolute/path/to/oauth-export.json` để nhập mảng JSON
 OAuth đã có, tối đa 1000 records/32 MiB; không tự login hoặc refresh token. Dừng
 bằng Ctrl+C sẽ dừng đúng các process do runner tạo, giữ nguyên dữ liệu cho lần chạy sau.

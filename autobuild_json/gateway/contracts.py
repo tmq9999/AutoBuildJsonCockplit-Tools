@@ -12,6 +12,7 @@ class StrictRecord(BaseModel):
 class Text(StrictRecord):
     type: Literal["text"] = "text"
     text: str = Field(repr=False)
+    phase: Literal["commentary", "final_answer"] | None = None
 
 
 class Image(StrictRecord):
@@ -125,6 +126,12 @@ class Opaque(StrictRecord):
     provider: str
     payload: dict = Field(repr=False)
 
+    @property
+    def tool_input_field(self):
+        if self.provider == "codex_oauth":
+            return {"custom_tool_call": "input", "function_call": "arguments"}.get(self.payload.get("type"))
+        return None
+
 
 Block = Annotated[Text | Image | ToolCall | ToolResult | Reasoning | Compaction | GeneratedImage | Opaque, Field(discriminator="type")]
 
@@ -132,6 +139,7 @@ Block = Annotated[Text | Image | ToolCall | ToolResult | Reasoning | Compaction 
 class Message(StrictRecord):
     role: Literal["system", "developer", "user", "assistant", "tool"]
     blocks: tuple[Block, ...] = Field(default=(), repr=False)
+    phase: Literal["commentary", "final_answer"] | None = None
 
 
 class Tool(StrictRecord):
@@ -167,14 +175,26 @@ class InferenceRequest(StrictRecord):
     continuation: str | None = None
     operation: Literal["responses", "compact", "websocket"] = "responses"
     image_tool: ImageGenerationTool | None = None
+    # Codex sends these request-scoped routing hints with native Responses
+    # calls.  They are deliberately kept separate from generation options so
+    # other provider adapters can reject the Codex-only opaque fields instead
+    # of silently forwarding them.
+    client_metadata: dict[str, str] | None = Field(default=None, max_length=32, repr=False)
+    service_tier: str | None = Field(default=None, min_length=1, max_length=64)
 
     @property
     def required_capabilities(self):
         capabilities = {"text"}
         blocks = [block for message in self.messages for block in message.blocks]
-        if self.tools or any(isinstance(b, (ToolCall, ToolResult)) for b in blocks):
+        if self.tools or any(isinstance(b, (ToolCall, ToolResult)) or
+            (isinstance(b, Opaque) and b.provider == "codex_oauth" and b.payload.get("type") in {
+                "additional_tools", "custom_tool_call", "custom_tool_call_output", "function_call"}) for b in blocks):
             capabilities.add("tools")
-        if any(isinstance(b, Image) for b in blocks):
+        if any(isinstance(b, Image) or (isinstance(b, Opaque) and b.provider == "codex_oauth"
+                and b.payload.get("type") == "custom_tool_call_output"
+                and isinstance(b.payload.get("output"), list)
+                and any(isinstance(part, dict) and part.get("type") == "input_image"
+                        for part in b.payload["output"])) for b in blocks):
             capabilities.add("vision")
         if self.continuation:
             capabilities.add("continuation")
@@ -191,6 +211,15 @@ class InferenceRequest(StrictRecord):
             for block in message.blocks:
                 if isinstance(block, Opaque) and block.provider != adapter:
                     raise ValueError("unsupported_feature")
+
+    @model_validator(mode="after")
+    def validate_request_metadata(self):
+        if self.client_metadata is not None:
+            if any(not isinstance(key, str) or not 1 <= len(key) <= 128
+                   or not isinstance(value, str) or len(value) > 8192
+                   for key, value in self.client_metadata.items()):
+                raise ValueError("invalid_client_metadata")
+        return self
 
 
 FinishReason = Literal["stop", "length", "tool_calls", "content_filter"]

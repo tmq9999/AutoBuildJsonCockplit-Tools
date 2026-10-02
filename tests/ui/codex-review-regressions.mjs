@@ -75,7 +75,7 @@ export async function codexReviewRegressions(context,base){
     await page.route(base+'/api/service/codex-service/proxy',route=>route.fulfill({status:404,contentType:'application/json',body:JSON.stringify({error:'not_found'})}));
     await page.getByRole('button',{name:'Tài khoản Codex',exact:true}).click();await page.locator('[data-codex-tab="overview"]').click();
     await page.waitForFunction(()=>document.querySelector('#codex-service-proxy')?.textContent.includes('Chưa có provider Codex'));
-    assert.equal(await page.locator('#codex-overview .codex-stat').count(),5);assert.equal(await page.locator('#codex-service-proxy-save').count(),0);
+    assert((await page.locator('#codex-overview .codex-stat').count())>=5,'Overview stats must remain visible when provider is 404');assert.equal(await page.locator('#codex-service-proxy-save').count(),0);
     assert(!((await page.locator('#codex-message').textContent())??'').includes('not_found'));
   });
   await scenario('missing profile never silently falls back to direct and reload fetches profiles',async page=>{

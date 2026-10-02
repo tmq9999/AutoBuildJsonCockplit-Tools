@@ -40,6 +40,16 @@ python3 -m venv .venv
 .venv/bin/python -m autobuild_json
 ```
 
+Sau khi cài xong, lần sau có thể khởi động bằng một lệnh từ bất kỳ thư mục nào:
+
+```bash
+/absolute/path/to/AutoBuildJsonCockplit-Tools/scripts/start_oauth.sh
+```
+
+Script tự dùng `.venv`, giữ listener ở `127.0.0.1:8787`, và không khởi động thêm
+coordinator nếu OAuth workbench đã chạy. Có thể đổi cổng tạm thời bằng
+`OAUTH_PORT=8789`.
+
 Windows dùng `.venv\Scripts\python.exe` thay `.venv/bin/python`. Nếu Linux thiếu
 `ensurepip`, có thể cài gói `python3-venv` của hệ điều hành, hoặc dùng pip có sẵn để
 cài vào venv: `python3 -m pip --python .venv/bin/python install pip`.

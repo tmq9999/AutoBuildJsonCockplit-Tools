@@ -131,6 +131,53 @@ async def test_reasoning_summaries_encrypted_replay_and_usage_survive_native_res
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("metadata", [None, {}, {"turn": "PRIVATE-metadata"}])
+async def test_codex_reasoning_metadata_fields_are_accepted_and_not_replayed(metadata, caplog):
+    values = copy.deepcopy(reasoning_events())
+    for index in (1, 10):
+        values[index]["item"].update(content=[], encrypted_content="opaque-replay-payload",
+                                    metadata=metadata, internal_chat_message_metadata_passthrough=None)
+    values[-1]["response"]["output"][0] = dict(values[10]["item"], metadata={"turn": "PRIVATE-final"},
+        internal_chat_message_metadata_passthrough={"trace": "PRIVATE-internal"})
+    events = await canonical(values)
+    result = collected(events)
+    assert result.blocks[0].summary == ("Published summary.", "Another published summary.")
+    assert result.blocks[0].encrypted_content == "opaque-replay-payload"
+    encoded = ResponsesCodec(model="model").encode_result(result)
+    assert "metadata" not in encoded["output"][0]
+    assert "internal_chat_message_metadata_passthrough" not in encoded["output"][0]
+    codec = ResponsesCodec(model="model")
+    wire = b"".join(frame for event in events for frame in codec.encode_event(event))
+    assert b"event: response.completed" in wire and b"event: response.failed" not in wire
+    assert b"PRIVATE" not in wire and "PRIVATE" not in caplog.text
+    request = codec.decode({"model": "model", "input": values[-1]["response"]["output"]}, {})
+    assert codec.upstream_body(request, "upstream")["input"][0] == encoded["output"][0]
+    assert result.usage.input_tokens == 4 and result.usage.output_tokens == 5
+
+
+@pytest.mark.parametrize("field", ["metadata", "internal_chat_message_metadata_passthrough"])
+def test_reasoning_transport_metadata_is_bounded_json(field):
+    from autobuild_json.gateway.protocols.openai_responses import reasoning_item
+
+    item = {"type": "reasoning", "id": "rs1", "summary": []}
+    with pytest.raises(ValueError, match="reasoning_metadata_limit_exceeded"):
+        reasoning_item(dict(item, **{field: {"data": "x" * (256 * 1024)}}))
+    with pytest.raises(ValueError, match="invalid_reasoning_metadata"):
+        reasoning_item(dict(item, **{field: float("nan")}))
+
+
+def test_reasoning_metadata_does_not_allow_unknown_fields_or_raw_reasoning():
+    from autobuild_json.gateway.protocols.openai_responses import reasoning_item
+
+    item = {"type": "reasoning", "id": "rs1", "summary": [], "metadata": {},
+            "internal_chat_message_metadata_passthrough": None}
+    with pytest.raises(GatewayError, match="unsupported_feature"):
+        reasoning_item(dict(item, unknown_field="PRIVATE"))
+    with pytest.raises(ValueError, match="invalid_reasoning_content"):
+        reasoning_item(dict(item, content=[{"type": "reasoning_text", "text": "PRIVATE"}]))
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", ["chat", "anthropic", "gemini", "ollama", "ollama_generate"])
 async def test_other_protocols_omit_reasoning_without_leaking_or_losing_usage(protocol):
     from autobuild_json.gateway.protocols.openai_chat import OpenAIChatCodec

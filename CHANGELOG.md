@@ -5,6 +5,56 @@ hay cam kết production-ready; version package hiện vẫn là `0.1.0`.
 
 ## [Unreleased] — 2026-09-24
 
+### OAuth launcher — 2026-10-02
+
+- Added `scripts/start_oauth.sh` so the private OAuth workbench can be started
+  with one command while remaining bound to loopback.
+
+### Private LAN test bind — 2026-09-28
+
+- The local runner now accepts `--gateway-host` for one explicit RFC1918 IPv4
+  address, enabling plaintext LAN testing at `192.168.134.128:8788` while keeping
+  the admin listener on loopback. Loopback remains the default; wildcard and
+  public bind addresses are rejected.
+
+### Responses request compatibility — 2026-09-28
+
+- Streaming upstream failures now produce one terminal `response.failed` SSE
+  envelope with an allowlisted error code, including failures before
+  `response.created`; they no longer leak a non-terminal `error` event that
+  makes Codex wait for a completion marker. Truncated/failed streams remain
+  usage-pending and are never fabricated as successful completions. A bounded
+  parser diagnostic records only the safe rejected event type for operations
+  triage.
+- Upstream SSE `error`/`response.failed` now retains its allowlisted code even
+  before `response.created`, rather than losing it at the `missing_start`
+  check. Unknown codes remain redacted; this does not enable retries/refunds.
+  CLI acceptance diagnostics also recognize admission/auth/quota codes and
+  HTTP status/local-permission hints without printing raw error messages.
+- Fixed the actual Codex CLI envelope rejected with `unsupported_feature`:
+  bounded `client_metadata`, service-tier normalization, and native
+  `additional_tools` definitions now reach the Codex adapter.
+- Fixed the subsequent streaming/tool-roundtrip failure: custom grammar tool
+  calls retain input deltas, metadata and tool-result replay without being
+  treated as JSON function calls. Provider fencing and exact usage accounting
+  remain in place.
+- Preserve assistant `phase` across streamed output and follow-up requests.
+  Native tool replay retains bounded `caller`/`async` fields and supports text,
+  image and file output parts; image output requires the vision capability.
+  These schema cases have regression coverage, not full live media verification.
+- Real Codex CLI text and terminal-tool calls previously completed through LAN.
+  The latest 10:55 ICT recheck passed text, but tool mode was interrupted with
+  unknown usage and a retained hold. Tool reliability remains unresolved; no
+  retry or refund followed. The verifier now emits allowlisted client error
+  hints and held quota without raw messages. Evidence is in
+  `docs/research/2026-09-28-codex-live-responses.md`.
+- Preserve internal upstream HTTP status on generic Codex failures without
+  changing safe public errors or classifying ambiguous failures as rejections.
+- `/v1/responses` keeps the native `input` field as its canonical contract and
+  now translates the common Chat Completions `messages` envelope at the
+  inbound boundary. Sending both `input` and `messages` is rejected as an
+  ambiguous request.
+
 ### Proxy burst follow-up — 2026-09-27
 
 - Corrected a real PostgreSQL pool-starvation deadlock in account proxy

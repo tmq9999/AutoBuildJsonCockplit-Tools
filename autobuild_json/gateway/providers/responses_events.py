@@ -1,11 +1,45 @@
 import json
+import logging
 
-from ..contracts import InferenceEvent, Text, ToolCall, Reasoning, GeneratedImage, Compaction
-from ..errors import GatewayError
+from ..contracts import InferenceEvent, Text, ToolCall, Reasoning, GeneratedImage, Compaction, Opaque
+from ..errors import GatewayError, SAFE_CODES
 from ..metering.usage import normalize_provider_usage
 from ..protocols.common import EventCollector
 from ..protocols.frames import SSEDecoder
-from ..protocols.openai_responses import reasoning_item
+from ..protocols.openai_responses import message_phase, reasoning_item, native_tool_item
+
+logger = logging.getLogger(__name__)
+
+# Diagnostic labels only: membership does not imply protocol support.
+DIAGNOSTIC_EVENTS = frozenset({
+    "error", "response.created", "response.in_progress", "response.completed",
+    "response.incomplete", "response.failed", "response.queued",
+    "response.output_item.added", "response.output_item.done",
+    "response.content_part.added", "response.content_part.done",
+    "response.output_text.delta", "response.output_text.done", "response.output_text.annotation.added",
+    "response.function_call_arguments.delta", "response.function_call_arguments.done",
+    "response.custom_tool_call_input.delta", "response.custom_tool_call_input.done",
+    "response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
+    "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
+    "response.reasoning_text.delta", "response.reasoning_text.done",
+    "response.refusal.delta", "response.refusal.done", "response.compaction.compacting",
+    "response.image_generation_call.in_progress", "response.image_generation_call.generating",
+    "response.image_generation_call.completed", "response.image_generation_call.partial_image",
+    "response.web_search_call.in_progress", "response.web_search_call.searching",
+    "response.web_search_call.completed", "codex.rate_limits", "codex.response.metadata",
+    "responsesapi.websocket_timing",
+})
+DIAGNOSTIC_ITEMS = frozenset({
+    "message", "reasoning", "function_call", "custom_tool_call", "image_generation_call",
+    "web_search_call", "file_search_call", "code_interpreter_call", "mcp_call",
+    "mcp_list_tools", "shell_call", "local_shell_call", "compaction",
+})
+DIAGNOSTIC_FIELDS = frozenset({
+    "id", "type", "status", "content", "summary", "encrypted_content", "metadata",
+    "internal_chat_message_metadata_passthrough", "channel", "recipient", "phase", "role",
+    "signature", "format", "visibility", "name", "namespace", "input", "arguments",
+    "call_id", "caller", "async",
+})
 
 
 def normalize_responses_usage(payload):
@@ -13,6 +47,15 @@ def normalize_responses_usage(payload):
         return normalize_provider_usage(payload, "openai_responses")
     except (ValueError, KeyError, TypeError, AttributeError):
         raise GatewayError("invalid_usage", 502, "upstream") from None
+
+
+def safe_upstream_error_code(value):
+    """Keep an upstream lifecycle error's code without exposing its message."""
+    candidates = [value.get("code")] if isinstance(value, dict) else []
+    nested = value.get("error") if isinstance(value, dict) else None
+    if isinstance(nested, dict):
+        candidates.append(nested.get("code"))
+    return next((code for code in candidates if isinstance(code, str) and code in SAFE_CODES), "upstream_error")
 
 
 class ResponsesEvents:
@@ -23,6 +66,10 @@ class ResponsesEvents:
         self.allow_empty_terminal_output = allow_empty_terminal_output
         self.calls = False
         self.summary_text_done = set()
+        self.last_event_type = "none"
+        self.last_item_type = "none"
+        self.last_item_fields = ""
+        self.other_item_fields = 0
 
     def _item(self, value, item_id=None):
         identity = item_id if item_id is not None else value["item_id"]
@@ -35,8 +82,21 @@ class ResponsesEvents:
 
     def feed(self, value):
         kind = value["type"]
+        self.last_event_type = kind if isinstance(kind, str) and kind in DIAGNOSTIC_EVENTS else "other"
+        item = value.get("item")
+        item_kind = item.get("type") if isinstance(item, dict) else None
+        self.last_item_type = (item_kind if isinstance(item_kind, str) and item_kind in DIAGNOSTIC_ITEMS
+                               else "other" if item is not None else "none")
+        fields = set(item) if isinstance(item, dict) else set()
+        self.last_item_fields = ",".join(sorted(fields & DIAGNOSTIC_FIELDS))
+        self.other_item_fields = len(fields - DIAGNOSTIC_FIELDS)
         if self.collector.terminal:
             raise ValueError("event_after_terminal")
+        # A provider can fail before it emits response.created. Preserve the
+        # safe error code without treating an HTTP 200 SSE error as retryable.
+        if kind in {"response.failed", "error"}:
+            payload = value.get("response", {}) if kind == "response.failed" else value
+            raise GatewayError(safe_upstream_error_code(payload), 502, "stream")
         events = []
         if kind == "response.created":
             events.append(InferenceEvent(kind="started", response_id=value["response"]["id"]))
@@ -47,7 +107,11 @@ class ResponsesEvents:
             if type(value["output_index"]) is not int:
                 raise ValueError("invalid_output_index")
             if item["type"] == "message":
-                block = Text(text="")
+                block = Text(text="", phase=message_phase(item))
+            elif item["type"] == "custom_tool_call" or (item["type"] == "function_call" and
+                    {"namespace", "caller", "async", "metadata", "internal_chat_message_metadata_passthrough"} & set(item)):
+                block = native_tool_item(item)
+                self.calls = True
             elif item["type"] == "function_call":
                 block = ToolCall(call_id=item["call_id"], name=item["name"], arguments=item.get("arguments", ""))
                 self.calls = True
@@ -58,8 +122,12 @@ class ResponsesEvents:
             else:
                 raise GatewayError("unsupported_feature", 502, "stream")
             events.append(InferenceEvent(kind="block_started", item_id=item["id"], index=value["output_index"], block=block))
-        elif kind in {"response.output_text.delta", "response.function_call_arguments.delta"}:
-            identity, _ = self._item(value)
+        elif kind in {"response.output_text.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta"}:
+            identity, block = self._item(value)
+            if kind == "response.custom_tool_call_input.delta" and not (isinstance(block, Opaque) and block.tool_input_field == "input"):
+                raise ValueError("invalid_tool_delta")
+            if kind == "response.function_call_arguments.delta" and isinstance(block, Opaque) and block.tool_input_field != "arguments":
+                raise ValueError("invalid_tool_delta")
             events.append(InferenceEvent(kind="text_delta" if kind == "response.output_text.delta" else "tool_delta",
                                          item_id=identity, delta=value["delta"]))
         elif kind in {"response.reasoning_summary_part.added", "response.reasoning_summary_text.delta",
@@ -106,11 +174,19 @@ class ResponsesEvents:
         elif kind == "response.output_item.done":
             item = value["item"]
             identity, block = self._item(value, item["id"])
-            expected = ("image_generation_call" if isinstance(block, GeneratedImage) else
+            expected = (block.payload["type"] if isinstance(block, Opaque) and block.tool_input_field else
+                "image_generation_call" if isinstance(block, GeneratedImage) else
                 "reasoning" if isinstance(block, Reasoning) else "function_call" if isinstance(block, ToolCall) else "message")
             if item.get("type") != expected:
                 raise ValueError("invalid_item_type")
             final = reasoning_item(item) if isinstance(block, Reasoning) else None
+            if isinstance(block, Opaque) and block.tool_input_field:
+                final = native_tool_item(item)
+            if isinstance(block, Text):
+                phase = message_phase(item)
+                if block.phase is not None and phase != block.phase:
+                    raise ValueError("message_phase_mismatch")
+                final = Text(text=block.text, phase=phase)
             if isinstance(block, GeneratedImage):
                 final = GeneratedImage.model_validate(dict(item, type="generated_image"))
                 if final.status != "completed" or not final.result:
@@ -133,15 +209,21 @@ class ResponsesEvents:
                     block = self.collector.blocks[item["id"]][1]
                     if isinstance(block, Reasoning) and reasoning_item(item) != block:
                         raise ValueError("reasoning_terminal_mismatch")
+                    if isinstance(block, Text) and message_phase(item) != block.phase:
+                        raise ValueError("message_phase_mismatch")
                     if isinstance(block, GeneratedImage) and GeneratedImage.model_validate(dict(item, type="generated_image")) != block:
                         raise ValueError("image_terminal_mismatch")
+                    if isinstance(block, Opaque) and block.tool_input_field and native_tool_item(item) != block:
+                        raise ValueError("tool_terminal_mismatch")
             usage = normalize_responses_usage(payload["usage"]) if payload.get("usage") is not None else None
             if usage:
                 events.append(InferenceEvent(kind="usage", usage=usage))
             events.append(InferenceEvent(kind="finished", finish_reason="length" if kind == "response.incomplete"
                                          else "tool_calls" if self.calls else "stop", usage=usage))
-        elif kind in {"response.failed", "error"}:
-            raise GatewayError("upstream_error", 502, "stream")
+        elif kind == "response.custom_tool_call_input.done":
+            _, block = self._item(value)
+            if not isinstance(block, Opaque) or block.tool_input_field != "input" or value["input"] != block.payload["input"]:
+                raise ValueError("invalid_tool_done")
         elif kind in {"response.content_part.added", "response.content_part.done", "response.output_text.done",
                       "response.function_call_arguments.done"}:
             _, block = self._item(value)
@@ -165,7 +247,20 @@ async def responses_events(response, *, images=False, allow_empty_terminal_outpu
         decoder.finish()
         if not parser.collector.terminal:
             raise ValueError("incomplete_output")
+    except GatewayError as exc:
+        trace = exc.__traceback__
+        while trace.tb_next is not None:
+            trace = trace.tb_next
+        origin = trace.tb_frame.f_code.co_name
+        if origin not in {"feed", "native_tool_item", "reasoning_item", "normalize_responses_usage"}:
+            origin = "other"
+        logger.warning("responses stream rejected code=%s event_type=%s item_type=%s origin=%s line=%d fields=%s other_fields=%d",
+                       exc.code, parser.last_event_type, parser.last_item_type, origin, trace.tb_lineno,
+                       parser.last_item_fields, parser.other_item_fields)
+        raise
     except (ValueError, KeyError, TypeError, AttributeError):
+        logger.warning("responses stream invalid code=upstream_error event_type=%s item_type=%s",
+                       parser.last_event_type, parser.last_item_type)
         raise GatewayError("upstream_error", 502, "stream") from None
 
 

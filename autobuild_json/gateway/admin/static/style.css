@@ -38,6 +38,9 @@
 .table-title,.table-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px}
 .table-title{border-bottom:1px solid var(--line)}
 .table-title input{max-width:250px;margin:0}
+.table-filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.table-filters select{max-width:160px;margin:0}
+.table-filters input{max-width:220px;margin:0}
 .table-scroll{max-height:70vh;overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:12px}th,td{padding:11px 12px;border-bottom:1px solid #edf0f4;vertical-align:top}th{font-size:10px;color:#647691;background:#fafbfd;white-space:nowrap}td{max-width:330px;overflow-wrap:anywhere}
 .table-footer{font-size:10px;color:var(--muted)}
 #editor{max-height:80vh;overflow:auto;padding:18px}fieldset{border:0;border-bottom:1px solid var(--line);padding:0 0 12px;margin:0 0 15px}legend{font-size:11px;font-weight:700;margin-bottom:10px}
